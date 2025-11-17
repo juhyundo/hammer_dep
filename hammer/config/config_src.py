@@ -1074,6 +1074,52 @@ class HammerDatabase:
                 elif k != "_config_path":
                     self.check_setting(k)
 
+    def export_to_json(self, filename: str = "database_export.json", section: str = "final") -> None:
+        """
+        Export database contents to a JSON file for easier inspection.
+
+        :param filename: Output filename
+        :param section: Which section to export ("all", "final", "core", etc.)
+        """
+
+        db_contents = self.get_database_json()
+        with open(filename, 'w') as f:
+            f.write(db_contents)
+            f.close()
+
+        print(f"Database exported to {filename}")
+    
+    def ordered(self, obj):
+        if isinstance(obj, dict):
+            return sorted((k, self.ordered(v)) for k, v in obj.items())
+        if isinstance(obj, list):
+            return sorted(self.ordered(x) for x in obj)
+        else:
+            return obj
+
+    def compare_database_json(self, stage: str, filename: str = "database_export.json") -> bool:
+        """
+        Compare old and new database jsons to see if change occurred
+
+        :param filename: Output filename
+        :param stage: Which stage's database is being checked
+        """
+
+        new_db_contents = json.loads(self.get_database_json())
+        old_db_contents = 0
+        with open(filename, 'r') as f:
+            old_db_contents = json.loads(f.read())
+            if self.ordered(old_db_contents) == self.ordered(new_db_contents):
+                print(f"Database unchanged, can skip {stage}")
+                f.close()
+                return True
+            else:
+                print(f"Database changed, must run {stage}")
+                f.close()
+                return False
+
+
+
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:
     """

@@ -578,6 +578,10 @@ class CLIDriver:
                 if driver.dump_history:
                     dump_config_to_yaml_file(os.path.join(driver.syn_tool.run_dir, "syn-output-history.yml"),
                                             add_key_history(self.get_full_config(driver, output), key_history))
+                
+                #Save Syn Database to JSON
+                driver.database.compare_database_json(filename = "database_syn.json", stage = "syn")
+                driver.database.export_to_json("database_syn.json", "final")
             elif action_type == "par":
                 if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
                     return None
@@ -598,6 +602,9 @@ class CLIDriver:
                 if driver.dump_history:
                     dump_config_to_yaml_file(os.path.join(driver.par_tool.run_dir, "par-output-history.yml"),
                                             add_key_history(self.get_full_config(driver, output), key_history))
+                    
+                #Save PAR Database to JSON
+                driver.database.export_to_json("database_par.json", "final")
             elif action_type == "drc":
                 if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
                     return None
