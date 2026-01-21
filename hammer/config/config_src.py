@@ -1097,26 +1097,46 @@ class HammerDatabase:
         else:
             return obj
 
-    def compare_database_json(self, stage: str, filename: str = "database_export.json") -> bool:
+    def compare_database_json(self, stage: str, filename: str = "master_database.json") -> bool:
         """
         Compare old and new database jsons to see if change occurred
 
-        :param filename: Output filename
+        :param filename: Output filename for master database json
         :param stage: Which stage's database is being checked
+        :return: True if change detected, else False
         """
 
         new_db_contents = json.loads(self.get_database_json())
-        old_db_contents = 0
+        master_db_contents = 0
+        config_change_flag = False
         with open(filename, 'r') as f:
-            old_db_contents = json.loads(f.read())
-            if self.ordered(old_db_contents) == self.ordered(new_db_contents):
-                print(f"Database unchanged, can skip {stage}")
+            master_db_contents = json.loads(f.read())
+            for key in new_db_contents:
+                if key in master_db_contents:
+                    if master_db_contents[key] != new_db_contents[key]:
+                        config_change_flag = True
+                        master_db_contents[key] = new_db_contents[key]
+            f.close()
+        if config_change_flag:
+            print(f"Database changed, updating master_database.json, must run {stage}")
+            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
+            with open(filename, 'w') as f:
+                f.write(master_db_contents_str)
                 f.close()
-                return True
-            else:
-                print(f"Database changed, must run {stage}")
-                f.close()
-                return False
+            print(f"Database exported to {filename}")
+        else:
+            print(f"Database unchanged, can skip {stage}") 
+        return config_change_flag
+        
+
+            # if self.ordered(old_db_contents) == self.ordered(new_db_contents):
+            #     print(f"Database unchanged, can skip {stage}")
+            #     f.close()
+            #     return True
+            # else:
+            #     print(f"Database changed, must run {stage}")
+            #     f.close()
+            #     return False
 
 
 
