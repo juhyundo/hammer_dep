@@ -1074,6 +1074,61 @@ class HammerDatabase:
                 elif k != "_config_path":
                     self.check_setting(k)
 
+    def export_to_json(self, filename: str = "database_export.json", section: str = "final") -> None:
+        """
+        Export database contents to a JSON file for easier inspection.
+
+        :param filename: Output filename
+        :param section: Which section to export ("all", "final", "core", etc.)
+        """
+
+        db_contents = self.get_database_json()
+        with open(filename, 'w') as f:
+            f.write(db_contents)
+            f.close()
+
+        print(f"Database exported to {filename}")
+    
+    def ordered(self, obj):
+        if isinstance(obj, dict):
+            return sorted((k, self.ordered(v)) for k, v in obj.items())
+        if isinstance(obj, list):
+            return sorted(self.ordered(x) for x in obj)
+        else:
+            return obj
+
+    def compare_database_json(self, stage: str, filename: str = "master_database.json") -> bool:
+        """
+        Compare old and new database jsons to see if change occurred
+
+        :param filename: Output filename for master database json
+        :param stage: Which stage's database is being checked
+        :return: True if change detected, else False
+        """
+
+        new_db_contents = json.loads(self.get_database_json())
+        master_db_contents = 0
+        config_change_flag = False
+        
+        with open(filename, 'r') as f:
+            master_db_contents = json.loads(f.read())
+            for key in new_db_contents:
+                if key in master_db_contents:
+                    if master_db_contents[key] != new_db_contents[key]:
+                        config_change_flag = True
+                        master_db_contents[key] = new_db_contents[key]
+            f.close()
+        if config_change_flag:
+            print(f"Database changed, updating master_database.json, must run {stage}")
+            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
+            with open(filename, 'w') as f:
+                f.write(master_db_contents_str)
+                f.close()
+            print(f"Database exported to {filename}")
+        else:
+            print(f"Database unchanged, can skip {stage}") 
+        return config_change_flag
+                
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:
     """
