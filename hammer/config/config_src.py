@@ -1109,24 +1109,34 @@ class HammerDatabase:
         new_db_contents = json.loads(self.get_database_json())
         master_db_contents = 0
         config_change_flag = False
-        
-        with open(filename, 'r') as f:
-            master_db_contents = json.loads(f.read())
+
+        # Rerun from build, reset master db
+        if stage == "build":
+            config_change_flag = (master_db_contents != new_db_contents)
+            master_db_contents = new_db_contents
+        else:
             for key in new_db_contents:
-                if key in master_db_contents:
+                # New key 
+                if key not in master_db_contents:
+                    config_change_flag = True
+                    if stage != "build":
+                        raise RuntimeError(f"New config key '{key}' not in master database of configs detected; must rerun from build")
+                    master_db_contents[key] = new_db_contents[key]
+                else:
                     if master_db_contents[key] != new_db_contents[key]:
                         config_change_flag = True
                         master_db_contents[key] = new_db_contents[key]
-            f.close()
+
         if config_change_flag:
             print(f"Database changed, updating master_database.json, must run {stage}")
-            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
+            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4,
+                                               separators=(',', ': '))
             with open(filename, 'w') as f:
                 f.write(master_db_contents_str)
                 f.close()
             print(f"Database exported to {filename}")
         else:
-            print(f"Database unchanged, can skip {stage}") 
+            print(f"Database unchanged, can skip {stage}")
         return config_change_flag
                 
 
