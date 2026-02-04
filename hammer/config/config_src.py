@@ -1097,49 +1097,91 @@ class HammerDatabase:
         else:
             return obj
 
-    def compare_database_json(self, stage: str, filename: str = "master_database.json") -> bool:
+    def compare_database_json(self, stage: str, filename: str = "master_database.json") -> Optional[str]:
         """
-        Compare old and new database jsons to see if change occurred
+        Compare old and new database jsons to see if change occurred.
+
+        Returns the earliest stage affected by any change using prefix mapping.
+        Returns None if no change.
 
         :param filename: Output filename for master database json
         :param stage: Which stage's database is being checked
-        :return: True if change detected, else False
+        :return: Earliest affected stage name if change detected, else None
         """
 
         new_db_contents = json.loads(self.get_database_json())
-        master_db_contents = 0
-        config_change_flag = False
-
         with open(filename, 'r') as f:
             master_db_contents = json.loads(f.read())
-        # Rerun from build, reset master db
+        config_change_flag = False
+        earliest_stage: Optional[str] = None
+
+        stage_order: List[str] = ["build", "sim","syn", "par", "drc", "lvs", "power", "formal", "timing"]
+        stage_to_index: Dict[str, int] = {s: i for i, s in enumerate(stage_order)}
+
+        def stage_for_key(key: str) -> str:
+            if key.startswith("sim."):
+                return "sim"
+            if key.startswith("synthesis.") or key.startswith("syn."):
+                return "syn"
+            if key.startswith("par."):
+                return "par"
+            if key.startswith("drc."):
+                return "drc"
+            if key.startswith("lvs."):
+                return "lvs"
+            if key.startswith("power."):
+                return "power"
+            if key.startswith("formal."):
+                return "formal"
+            if key.startswith("timing."):
+                return "timing"
+            return "build"
+
+        # Rerun from build: reset master db
         if stage == "build":
-            config_change_flag = (master_db_contents != new_db_contents)
+            if master_db_contents != new_db_contents:
+                config_change_flag = True
+                earliest_stage = "build"
             master_db_contents = new_db_contents
         else:
+            # Detect deleted keys
+            for key in master_db_contents:
+                if key not in new_db_contents:
+                    config_change_flag = True
+                    earliest_stage = "build"
+                    break
+
             for key in new_db_contents:
-                # New key 
+                # New key
                 if key not in master_db_contents:
                     config_change_flag = True
-                    if stage != "build":
-                        raise RuntimeError(f"New config key '{key}' not in master database of configs detected; must rerun from build")
-                    master_db_contents[key] = new_db_contents[key]
-                else:
-                    if master_db_contents[key] != new_db_contents[key]:
-                        config_change_flag = True
+                    earliest_stage = "build"
+                    break
+                # Changed value
+                if master_db_contents[key] != new_db_contents[key]:
+                    config_change_flag = True
+                    key_stage = stage_for_key(key)
+
+                    # changed value comes at later stage
+                    if earliest_stage is None or stage_to_index[key_stage] < stage_to_index[earliest_stage]:
+                        earliest_stage = key_stage
+                    # Only update master when this stage == the earliest stage for this key.
+                    # If the change requires an earlier stage than the current stage, do not update
+                    if stage_to_index[key_stage] == stage_to_index.get(stage, -1):
                         master_db_contents[key] = new_db_contents[key]
 
         if config_change_flag:
-            print(f"Database changed, updating master_database.json, must run {stage}")
-            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4,
-                                               separators=(',', ': '))
-            with open(filename, 'w') as f:
-                f.write(master_db_contents_str)
-                f.close()
-            print(f"Database exported to {filename}")
+            if earliest_stage is None:
+                earliest_stage = "build"
+            print(f"Database changed, earliest stage affected is {earliest_stage} (checked at {stage})")
+            if stage == "build" or earliest_stage == stage:
+                master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
+                with open(filename, 'w') as f:
+                    f.write(master_db_contents_str)
+                print(f"Database exported to {filename}")
         else:
             print(f"Database unchanged, can skip {stage}")
-        return config_change_flag
+        return earliest_stage
                 
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:
