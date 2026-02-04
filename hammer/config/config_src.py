@@ -10,6 +10,7 @@ import json
 import numbers
 import os
 import re
+from pathlib import Path
 from decimal import Decimal
 from enum import Enum
 from importlib import resources
@@ -1110,17 +1111,32 @@ class HammerDatabase:
         """
 
         new_db_contents = json.loads(self.get_database_json())
-        with open(filename, 'r') as f:
-            master_db_contents = json.loads(f.read())
+        master_path = Path(filename)
+
+        # Load or initialize master DB
+        master_db_contents: Optional[dict]
+        try:
+            text = master_path.read_text()
+            if text.strip() == "":
+                raise ValueError("master database file is empty")
+            loaded = json.loads(text)
+            master_db_contents = loaded if isinstance(loaded, dict) else None
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            master_db_contents = None
+
+        if stage == "build":
+            master_db_contents = new_db_contents
+            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
+            master_path.write_text(master_db_contents_str)
+            print(f"Initialized master database at {master_path}")
+            return "build" 
         config_change_flag = False
         earliest_stage: Optional[str] = None
 
-        stage_order: List[str] = ["build", "sim","syn", "par", "drc", "lvs", "power", "formal", "timing"]
+        stage_order: List[str] = ["build", "syn", "par", "drc", "lvs", "power", "formal", "timing"]
         stage_to_index: Dict[str, int] = {s: i for i, s in enumerate(stage_order)}
 
         def stage_for_key(key: str) -> str:
-            if key.startswith("sim."):
-                return "sim"
             if key.startswith("synthesis.") or key.startswith("syn."):
                 return "syn"
             if key.startswith("par."):
@@ -1144,12 +1160,12 @@ class HammerDatabase:
                 earliest_stage = "build"
             master_db_contents = new_db_contents
         else:
-            # Detect deleted keys
-            for key in master_db_contents:
-                if key not in new_db_contents:
-                    config_change_flag = True
-                    earliest_stage = "build"
-                    break
+            # # Detect deleted keys --> conservatively rerun from build
+            # for key in master_db_contents:
+            #     if key not in new_db_contents:
+            #         config_change_flag = True
+            #         earliest_stage = "build"
+            #         break
 
             for key in new_db_contents:
                 # New key
@@ -1176,9 +1192,8 @@ class HammerDatabase:
             print(f"Database changed, earliest stage affected is {earliest_stage} (checked at {stage})")
             if stage == "build" or earliest_stage == stage:
                 master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
-                with open(filename, 'w') as f:
-                    f.write(master_db_contents_str)
-                print(f"Database exported to {filename}")
+                master_path.write_text(master_db_contents_str)
+                print(f"Database exported to {master_path}")
         else:
             print(f"Database unchanged, can skip {stage}")
         return earliest_stage

@@ -1622,6 +1622,12 @@ class CLIDriver:
         :return: The diplomacy graph
         """
         #pdb.set_trace()
+        # Initialize master database
+        try:
+            driver.database.compare_database_json(stage="build")
+        except (RuntimeError, ValueError, OSError) as e:
+            append_error_func(f"Failed to initialize master database during build: {e}")
+
         build_system = str(driver.database.get_setting("vlsi.core.build_system", "none"))
         if build_system in BuildSystems:
             return BuildSystems[build_system](driver, append_error_func)
