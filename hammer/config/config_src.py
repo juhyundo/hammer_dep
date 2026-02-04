@@ -1110,6 +1110,8 @@ class HammerDatabase:
         master_db_contents = 0
         config_change_flag = False
 
+        with open(filename, 'r') as f:
+            master_db_contents = json.loads(f.read())
         # Rerun from build, reset master db
         if stage == "build":
             config_change_flag = (master_db_contents != new_db_contents)
