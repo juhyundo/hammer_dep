@@ -23,6 +23,40 @@ from hammer.utils import add_dicts, deepdict, topological_sort
 
 from .yaml2json import load_yaml  # grumble grumble
 
+class StageNode():
+    def __init__(self, name, next = [], prev = []):
+        self.name = name
+        self.next = next
+        self.prev = prev
+
+class StageGraph():
+    def __init__(self):
+        self.sim_rtl = StageNode("sim_rtl")
+        self.power_rtl = StageNode("power_rtl", prev = [self.sim_rtl])
+
+        self.syn = StageNode("syn")
+        self.sim_syn = StageNode("sim_syn")
+        self.power_syn = StageNode("power_syn", prev = [self.syn, self.sim_syn])
+        self.timing_syn = StageNode("timing_syn", prev = [self.syn])
+        self.formal_syn = StageNode("formal_syn", prev = [self.syn])
+        
+        self.par = StageNode("par", prev = [self.syn])
+        self.sim_par = StageNode("sim_par")
+        self.power_par = StageNode("power_par", prev = [self.par, self.sim_par])
+        self.formal_par = StageNode("formal_par", prev = [self.par])
+        self.timing_par = StageNode("timing_par", prev = [self.par])
+        self.drc = StageNode("drc", prev = [self.par])
+        self.lvs = StageNode("lvs", prev = [self.par])
+
+        stageList = [self.sim_rtl, self.power_rtl, self.syn, self.sim_syn, self.power_syn,
+                     self.timing_syn, self.formal_syn, self.par, self.sim_par, self.power_par,
+                     self.formal_par, self.timing_par, self.drc, self.lvs]
+
+        stageDict = {stage.name : stage.prev for stage in stageList}
+
+        
+    
+
 
 # A helper class that writes Decimals as strings
 # TODO(ucb-bar/hammer#378) get rid of this and serialize units
@@ -1133,8 +1167,7 @@ class HammerDatabase:
         config_change_flag = False
         earliest_stage: Optional[str] = None
 
-        stage_order: List[str] = ["build", "syn", "par", "drc", "lvs", "power", "formal", "timing"]
-        stage_to_index: Dict[str, int] = {s: i for i, s in enumerate(stage_order)}
+        stage_order = StageGraph()
 
         def stage_for_key(key: str) -> str:
             if key.startswith("synthesis.") or key.startswith("syn."):
