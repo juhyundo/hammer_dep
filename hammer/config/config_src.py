@@ -48,11 +48,11 @@ class StageGraph():
         self.drc = StageNode("drc", prev = [self.par])
         self.lvs = StageNode("lvs", prev = [self.par])
 
-        stageList = [self.sim_rtl, self.power_rtl, self.syn, self.sim_syn, self.power_syn,
+        self.stageList = [self.sim_rtl, self.power_rtl, self.syn, self.sim_syn, self.power_syn,
                      self.timing_syn, self.formal_syn, self.par, self.sim_par, self.power_par,
                      self.formal_par, self.timing_par, self.drc, self.lvs]
 
-        stageDict = {stage.name : stage.prev for stage in stageList}
+        self.stageDict = {stage.name : stage.prev for stage in self.stageList}
 
         
     
@@ -1142,7 +1142,7 @@ class HammerDatabase:
 
         Returns true if change detected, false if none
 
-        Automatically reruns stage if change detected (unless override)
+        Automatically updates master database if change detected (unless override)
 
         :param filename: Output filename for master database json
         :param stage: Which stage's database is being checked
@@ -1163,24 +1163,33 @@ class HammerDatabase:
 
         affectedStageList = []
 
-        def recursiveStageCheck(self, stage:str) -> bool:
-            prevStageChange = False
-            for prevStage in self.stageGraph.stagedict[stage]:
+        new_db_contents = json.loads(self.get_database_json())
+
+        def curStageCheck(stage:str):
+            keyChangeFlag = False
+            # affectedSettings = []
+            for setting, value in new_db_contents.items():
+                if(setting not in master_db_contents):
+                    keyChangeFlag = True
+                    # affectedSettings.append((setting,None,value))
+                    master_db_contents[setting] = value
+                elif(setting.startswith(stage + ".")):
+                    if(master_db_contents[setting] != value):
+                        keyChangeFlag = True
+                        # affectedSettings.append((setting,master_db_contents[setting],value))
+                        master_db_contents[setting] = value
+            return keyChangeFlag # ,affectedSettings
+
+        def recursiveStageCheck(stage:str) -> bool:
+            prevStageFlag = False
+            curStageFlag = curStageCheck(stage)
+            for prevStage in self.stageGraph.stageDict[stage]:
                 #formatted like this to force check on previous stage
                 prevStageCheck = recursiveStageCheck(prevStage.name)
-                prevStageChange = prevStageCheck or prevStageChange
-            if prevStageChange:
+                prevStageFlag = prevStageCheck or prevStageFlag
+            if prevStageFlag or curStageFlag:
                 affectedStageList.append(stage)
-                runstage(stage)
-                return True
-            else:
-                new_db_contents = json.loads(self.get_database_json())
-                if curStageCheck():
-                    
-                    affectedStageList.append(stage)
-                    runstage(stage)
-                    return True
-            return False
+            return prevStageFlag or curStageFlag
             
 
         config_change_flag = recursiveStageCheck(stage)
@@ -1190,10 +1199,9 @@ class HammerDatabase:
             master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
             master_path.write_text(master_db_contents_str)
             print(f"Updated Database exported to {master_path}")
-            return True
         else:
             print(f"Database unchanged, can directly run {stage}")
-            return False
+        return config_change_flag
                 
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:

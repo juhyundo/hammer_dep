@@ -417,7 +417,7 @@ def create_hammer_dag_gcd():
     def exit_():
         """Exit task"""
         print("Exiting")
-        sys.exit(0)
+        #sys.exit(0)
 
     # Create task instances
     start = start()

@@ -2,6 +2,8 @@
     "cadence.CDS_LIC_FILE": "5280@bwrcflex-1.eecs.berkeley.edu:5280@bwrcflex-2.eecs.berkeley.edu",
     "cadence.cadence_home": "/tools/cadence",
     "cadence.extra_env_vars": [],
+    "clockPeriod": "20.0ns",
+    "clockPeriodby5": "4.0",
     "drc.inputs.additional_drc_text": "",
     "drc.inputs.additional_drc_text_mode": "auto",
     "drc.inputs.drc_rules_to_run": [],
@@ -68,16 +70,18 @@
     "par.generate_power_straps_options.by_tracks.track_width": 6,
     "par.generate_power_straps_options.by_tracks.track_width_met5": 2,
     "par.innovus.version": "231",
-    "par.inputs.gds_map_file": "/tools/C/bandk1451/chipyard-sledgehammer-br-airflow3/chipyard/vlsi/hammer_dep/hammer/technology/sky130/extra/sky130_lefpin.map",
+    "par.inputs.gds_map_file": "/tools/C/bandk1451/chipyard-sledgehammer-br-airflow3/chipyard/vlsi/hammer/hammer/technology/sky130/extra/sky130_lefpin.map",
     "par.inputs.gds_map_mode": "manual",
     "par.inputs.gds_merge": true,
     "par.inputs.gds_precision": 1000,
     "par.inputs.gds_precision_mode": "auto",
-    "par.inputs.input_files": [],
+    "par.inputs.input_files": [
+        "/bwrcq/C/bandk1451/chipyard-sledgehammer-br-airflow3/chipyard/vlsi/hammer/e2e/build-sky130-cm/gcd/syn-rundir/gcd.mapped.v"
+    ],
     "par.inputs.physical_only_cells_list": [],
     "par.inputs.physical_only_cells_mode": "auto",
     "par.inputs.post_synth_sdc": null,
-    "par.inputs.top_module": null,
+    "par.inputs.top_module": "gcd",
     "par.openroad.klayout_bin": "/tools/commercial/skywater/local/chipyard-tutorial/.conda-klayout/bin/klayout",
     "par.openroad.klayout_techfile_source": "/tools/commercial/skywater/local/sky130A/libs.tech/klayout/tech/sky130A.lyt",
     "par.openroad.macro_placement.halo": [
@@ -91,7 +95,7 @@
         "/tools/commercial/skywater/local/sky130A/libs.tech/openlane/rules.openrcx.sky130A.nom.spef_extractor"
     ],
     "par.openroad.openroad_bin": "/tools/commercial/skywater/local/chipyard-tutorial/.conda-openroad/bin/openroad",
-    "par.openroad.setrc_file": "/tools/C/bandk1451/chipyard-sledgehammer-br-airflow3/chipyard/vlsi/hammer_dep/hammer/technology/sky130/extra/setRC.tcl",
+    "par.openroad.setrc_file": "/tools/C/bandk1451/chipyard-sledgehammer-br-airflow3/chipyard/vlsi/hammer/hammer/technology/sky130/extra/setRC.tcl",
     "par.power_straps_abutment": false,
     "par.power_straps_abutment_macros": null,
     "par.power_straps_mode": "generate",
@@ -164,6 +168,12 @@
     "synopsys.extra_env_vars": [],
     "synopsys.synopsys_home": "/tools/synopsys",
     "synthesis.clock_gating_mode": "auto",
+    "synthesis.genus.clock_gating_mode": "empty",
+    "synthesis.genus.generate_final_netlist": true,
+    "synthesis.genus.generate_reports": true,
+    "synthesis.genus.qrc_files": [],
+    "synthesis.genus.timing_driven": true,
+    "synthesis.genus.use_qrc": false,
     "synthesis.genus.version": "231",
     "synthesis.inputs.input_files": [
         "src/pass.v"
@@ -201,6 +211,7 @@
     "technology.sky130.sky130_cds": "/tools/commercial/skywater/sky130_cds/sky130_prelim_release_091123",
     "technology.sky130.sky130_nda": "/tools/commercial/skywater/swtech130/skywater-src-nda-20221031",
     "technology.sky130.sram22_sky130_macros": "/tools/commercial/skywater/local/sram22_sky130_macros",
+    "technology.sky130.synthesis_tool": "genus",
     "timing.inputs.input_files": [],
     "timing.inputs.max_paths": 100,
     "timing.inputs.post_synth_sdc": null,
@@ -209,6 +220,9 @@
     "timing.inputs.top_module": null,
     "timing.submit.command": "local",
     "timing.submit.settings": [],
+    "verilogSrc": [
+        "/bwrcq/C/isabellehsu/hammer_main/e2e/src/gcd.v"
+    ],
     "vlsi.builtins.is_complete": true,
     "vlsi.core.build_system": "make",
     "vlsi.core.drc_tool": "hammer.drc.calibre",
@@ -260,6 +274,7 @@
     ],
     "vlsi.inputs.dont_use_list": [],
     "vlsi.inputs.dont_use_mode": "auto",
+    "vlsi.inputs.gds_merge": true,
     "vlsi.inputs.hierarchical.config_source": "none",
     "vlsi.inputs.hierarchical.constraints": [],
     "vlsi.inputs.hierarchical.manual_modules": [],
