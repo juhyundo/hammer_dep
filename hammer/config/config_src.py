@@ -820,6 +820,8 @@ class HammerDatabase:
 
         self.logger = HammerVLSILogging().context()  # type: HammerVLSILoggingContext
 
+        self.stageGraph = StageGraph()
+
     @property
     def runtime(self) -> List[dict]:
         return [self._runtime]
@@ -1132,22 +1134,23 @@ class HammerDatabase:
         else:
             return obj
 
-    def compare_database_json(self, stage: str, filename: str = "master_database.json") -> Optional[str]:
+    def stage_change_check(self, stage: str, filename: str = "master_database.json") -> bool:
         """
-        Compare old and new database jsons to see if change occurred.
+        Compare old and new database jsons to see if change occurred in any prior or current stages.
 
-        Returns the earliest stage affected by any change using prefix mapping.
-        Returns None if no change.
+        Recursively runs helper on tree structure. Called on leaf, recurse on parents (parents evaluate first)
+
+        Returns true if change detected, false if none
+
+        Automatically reruns stage if change detected (unless override)
 
         :param filename: Output filename for master database json
         :param stage: Which stage's database is being checked
-        :return: Earliest affected stage name if change detected, else None
+        :return: true if change detected, else false
         """
 
-        new_db_contents = json.loads(self.get_database_json())
-        master_path = Path(filename)
-
         # Load or initialize master DB
+        master_path = Path(filename)
         master_db_contents: Optional[dict]
         try:
             text = master_path.read_text()
@@ -1158,78 +1161,39 @@ class HammerDatabase:
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             master_db_contents = None
 
-        if stage == "build":
-            master_db_contents = new_db_contents
-            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
-            master_path.write_text(master_db_contents_str)
-            print(f"Initialized master database at {master_path}")
-            return "build" 
-        config_change_flag = False
-        earliest_stage: Optional[str] = None
+        affectedStageList = []
 
-        stage_order = StageGraph()
+        def recursiveStageCheck(self, stage:str) -> bool:
+            prevStageChange = False
+            for prevStage in self.stageGraph.stagedict[stage]:
+                #formatted like this to force check on previous stage
+                prevStageCheck = recursiveStageCheck(prevStage.name)
+                prevStageChange = prevStageCheck or prevStageChange
+            if prevStageChange:
+                affectedStageList.append(stage)
+                runstage(stage)
+                return True
+            else:
+                new_db_contents = json.loads(self.get_database_json())
+                if curStageCheck():
+                    
+                    affectedStageList.append(stage)
+                    runstage(stage)
+                    return True
+            return False
+            
 
-        def stage_for_key(key: str) -> str:
-            if key.startswith("synthesis.") or key.startswith("syn."):
-                return "syn"
-            if key.startswith("par."):
-                return "par"
-            if key.startswith("drc."):
-                return "drc"
-            if key.startswith("lvs."):
-                return "lvs"
-            if key.startswith("power."):
-                return "power"
-            if key.startswith("formal."):
-                return "formal"
-            if key.startswith("timing."):
-                return "timing"
-            return "build"
-
-        # Rerun from build: reset master db
-        if stage == "build":
-            if master_db_contents != new_db_contents:
-                config_change_flag = True
-                earliest_stage = "build"
-            master_db_contents = new_db_contents
-        else:
-            # # Detect deleted keys --> conservatively rerun from build
-            # for key in master_db_contents:
-            #     if key not in new_db_contents:
-            #         config_change_flag = True
-            #         earliest_stage = "build"
-            #         break
-
-            for key in new_db_contents:
-                # New key
-                if key not in master_db_contents:
-                    config_change_flag = True
-                    earliest_stage = "build"
-                    break
-                # Changed value
-                if master_db_contents[key] != new_db_contents[key]:
-                    config_change_flag = True
-                    key_stage = stage_for_key(key)
-
-                    # changed value comes at later stage
-                    if earliest_stage is None or stage_to_index[key_stage] < stage_to_index[earliest_stage]:
-                        earliest_stage = key_stage
-                    # Only update master when this stage == the earliest stage for this key.
-                    # If the change requires an earlier stage than the current stage, do not update
-                    if stage_to_index[key_stage] == stage_to_index.get(stage, -1):
-                        master_db_contents[key] = new_db_contents[key]
+        config_change_flag = recursiveStageCheck(stage)
 
         if config_change_flag:
-            if earliest_stage is None:
-                earliest_stage = "build"
-            print(f"Database changed, earliest stage affected is {earliest_stage} (checked at {stage})")
-            if stage == "build" or earliest_stage == stage:
-                master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
-                master_path.write_text(master_db_contents_str)
-                print(f"Database exported to {master_path}")
+            print(f"Database changed, stages affected are {affectedStageList}")
+            master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
+            master_path.write_text(master_db_contents_str)
+            print(f"Updated Database exported to {master_path}")
+            return True
         else:
-            print(f"Database unchanged, can skip {stage}")
-        return earliest_stage
+            print(f"Database unchanged, can directly run {stage}")
+            return False
                 
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:
