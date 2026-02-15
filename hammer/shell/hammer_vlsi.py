@@ -304,7 +304,8 @@ def create_hammer_dag_gcd():
             context['dag_run'].conf.get('sim_rtl', False) or
             context['dag_run'].conf.get('syn', False) or
             context['dag_run'].conf.get('par', False)):
-            return "build_decider"
+            # return "build_decider"
+            return "build"
         else:
             return "exit_"
 
@@ -343,7 +344,7 @@ def create_hammer_dag_gcd():
             return 'sim_rtl'
         elif (context['dag_run'].conf.get('syn', False) or 
             context['dag_run'].conf.get('par', False)):
-            return 'syn_decider'
+            return 'syn'
         return 'exit_'
 
     @task
@@ -383,35 +384,35 @@ def create_hammer_dag_gcd():
             raise AirflowSkipException("PAR task skipped")
 
     #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    def build_decider(**context):
-        """Decide whether to run build"""
-        if context['dag_run'].conf.get('build', True):
-            return 'build'
-        elif (context['dag_run'].conf.get('sim_rtl', False) or
-            context['dag_run'].conf.get('syn', False) or
-            context['dag_run'].conf.get('par', False)):
-            return "sim_or_syn_decide"
-        return 'exit_'
+    # @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    # def build_decider(**context):
+    #     """Decide whether to run build"""
+    #     if context['dag_run'].conf.get('build', True):
+    #         return 'build'
+    #     elif (context['dag_run'].conf.get('sim_rtl', False) or
+    #         context['dag_run'].conf.get('syn', False) or
+    #         context['dag_run'].conf.get('par', False)):
+    #         return "sim_or_syn_decide"
+    #     return 'exit_'
 
-    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    def syn_decider(**context):
-        """Decide whether to run synthesis"""
-        if context['dag_run'].conf.get('syn', False):
-            return 'syn'
-        elif (context['dag_run'].conf.get('par', False)):
-            return "par_decider"
-        else:
-            return "exit_"
+    # #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
+    # @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    # def syn_decider(**context):
+    #     """Decide whether to run synthesis"""
+    #     if context['dag_run'].conf.get('syn', False):
+    #         return 'syn'
+    #     elif (context['dag_run'].conf.get('par', False)):
+    #         return "par_decider"
+    #     else:
+    #         return "exit_"
 
-    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
-    def par_decider(**context):
-        """Decide whether to run par"""
-        if context['dag_run'].conf.get('par', False):
-            return 'par'
-        return 'exit_'
+    # #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
+    # @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    # def par_decider(**context):
+    #     """Decide whether to run par"""
+    #     if context['dag_run'].conf.get('par', False):
+    #         return 'par'
+    #     return 'exit_'
 
     @task(trigger_rule=TriggerRule.NONE_FAILED)
     def exit_():
@@ -422,37 +423,37 @@ def create_hammer_dag_gcd():
     # Create task instances
     start = start()
     clean = clean()
-    build_decide = build_decider()
+    # build_decide = build_decider()
     build = build()
     sim_or_syn_decide = sim_or_syn_decide()
     sim_rtl = sim_rtl()
-    syn_decide = syn_decider()
+    # syn_decide = syn_decider()
     syn = syn()
-    par_decide = par_decider()
+    # par_decide = par_decider()
     par = par()
     exit_ = exit_()
 
     # Set up dependencies to ensure deciders always run
-    start >> [clean, build_decide, exit_]
+    start >> [clean, build, exit_]
     clean >> exit_
-    build_decide >> [build, sim_or_syn_decide, exit_]
+    # build_decide >> [build, sim_or_syn_decide, exit_]
     build >> sim_or_syn_decide
-    sim_or_syn_decide >> [sim_rtl, syn_decide, exit_]
+    sim_or_syn_decide >> [sim_rtl, syn, exit_]
     sim_rtl >> exit_
-    syn_decide >> [syn, par_decide, exit_]
-    syn >> par_decide
-    par_decide >> [par, exit_]
+    # syn_decide >> [syn, par_decide, exit_]
+    syn >> par
+    # par_decide >> [par, exit_]
     par >> exit_
 
     return {
         'clean': clean,
-        'build_decide': build_decide,
+        # 'build_decide': build_decide,
         'build': build,
         'sim_or_syn_decide': sim_or_syn_decide,
         'sim_rtl': sim_rtl,
-        'syn_decide': syn_decide,
+        # 'syn_decide': syn_decide,
         'syn': syn,
-        'par_decide': par_decide,
+        # 'par_decide': par_decide,
         'par': par
     }
 
