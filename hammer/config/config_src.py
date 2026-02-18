@@ -51,6 +51,8 @@ class StageGraph():
         self.stageList = [self.sim_rtl, self.power_rtl, self.syn, self.sim_syn, self.power_syn,
                      self.timing_syn, self.formal_syn, self.par, self.sim_par, self.power_par,
                      self.formal_par, self.timing_par, self.drc, self.lvs]
+                     
+        self.stageTagTuple = ("synthesis", "sim", "par", "drc", "lvs", "power", "pcb", "formal")
 
         self.stageDict = {stage.name : stage.prev for stage in self.stageList}
 
@@ -1173,7 +1175,7 @@ class HammerDatabase:
                     keyChangeFlag = True
                     # affectedSettings.append((setting,None,value))
                     master_db_contents[setting] = value
-                elif(setting.startswith(stage + ".")):
+                elif(setting.startswith(stage + ".") or (not setting.startswith(self.stageGraph.stageTagTuple))):
                     if(master_db_contents[setting] != value):
                         keyChangeFlag = True
                         # affectedSettings.append((setting,master_db_contents[setting],value))
