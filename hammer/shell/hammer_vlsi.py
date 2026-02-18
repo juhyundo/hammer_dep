@@ -162,6 +162,12 @@ class AIRFlow:
         print(f"Running command: {' '.join(sys.argv)}")
         CLIDriver().main()
 
+    def sim_rtl_to_power(self):
+        print("Executing sim-to-power-rtl")
+        
+    def power_rtl(self):
+        print("Executing power_rtl")
+
     def syn(self):
         print("Executing synthesis")
         print(f"Using config files:")
@@ -220,6 +226,18 @@ class AIRFlow:
         
         return par_input_json
 
+    def sim_syn(self):
+        print("Executing sim_syn")
+
+    def power_syn(self):
+        print("Executing power_syn")
+
+    def formal_syn(self):
+        print("Executing formal_syn")
+
+    def timing_syn(self):
+        print("Executing timing_syn")
+
     def par(self):
         """Execute PAR flow."""
         # Generate par-input.json
@@ -244,6 +262,24 @@ class AIRFlow:
         
         print(f"Running command: {' '.join(sys.argv)}")
         CLIDriver().main()
+
+    def sim_par(self):
+        print("Executing sim_par")
+
+    def power_par(self):
+        print("Executing power_par")
+
+    def timing_par(self):
+        print("Executing timing_par")
+
+    def formal_par(self):
+        print("Executing formal_par")
+
+    def drc(self):
+        print("Executing drc")
+
+    def lvs(self):
+        print("Executing lvs")
 
     def clean(self):
         print("Executing clean")
@@ -278,17 +314,83 @@ class AIRFlow:
             title='RTL Simulation',
             description='Run RTL simulation'
         ),
+        'power_rtl': Param(
+            default=False,
+            type='boolean',
+            title='RTL Power Simulation',
+            description='Run RTL Power simulation'
+        ),
         'syn': Param(
             default=False,
             type='boolean',
             title='Synthesis',
             description='Run logic synthesis'
         ),
+        'sim_syn': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Synthesis',
+            description='Run synthesis simulation'
+        ),
+        'timing_syn': Param(
+            default=False,
+            type='boolean',
+            title='Timing Synthesis',
+            description='Get timing from synthesis'
+        ),
+        'formal_syn': Param(
+            default=False,
+            type='boolean',
+            title='Formal Synthesis',
+            description='Get formal from synthesis'
+        ),
+        'power_syn': Param(
+            default=False,
+            type='boolean',
+            title='Power Synthesis',
+            description='Get power from synthesis'
+        ),
         'par': Param(
             default=False,
             type='boolean',
             title='Place and Route',
             description='Run place and route'
+        ),
+        'drc': Param(
+            default=False,
+            type='boolean',
+            title='Design Rule Check',
+            description='Run design rule check'
+        ),
+        'lvs': Param(
+            default=False,
+            type='boolean',
+            title='Layout Versus Schematic',
+            description='Run layout versus schematic'
+        ),
+        'sim_par': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Place and Route',
+            description='Run place and route simulation'
+        ),
+        'timing_par': Param(
+            default=False,
+            type='boolean',
+            title='Timing Place and Route',
+            description='get timing from place and route'
+        ),
+        'formal_par': Param(
+            default=False,
+            type='boolean',
+            title='Formal Place and Route',
+            description='Get formal from place and route'
+        ),
+        'power_par': Param(
+            default=False,
+            type='boolean',
+            title='Power Place and Route',
+            description='Get power from place and route'
         )
     },
     render_template_as_native_obj=True
@@ -302,8 +404,19 @@ def create_hammer_dag_gcd():
             return "clean"
         elif (context['dag_run'].conf.get('build', False) or 
             context['dag_run'].conf.get('sim_rtl', False) or
+            context['dag_run'].conf.get('power_rtl', False) or
             context['dag_run'].conf.get('syn', False) or
-            context['dag_run'].conf.get('par', False)):
+            context['dag_run'].conf.get('formal_syn', False) or
+            context['dag_run'].conf.get('timing_syn', False) or
+            context['dag_run'].conf.get('power_syn', False) or
+            context['dag_run'].conf.get('sim_syn', False) or
+            context['dag_run'].conf.get('par', False) or
+            context['dag_run'].conf.get('power_par', False) or
+            context['dag_run'].conf.get('sim_par', False) or
+            context['dag_run'].conf.get('formal_par', False) or
+            context['dag_run'].conf.get('timing_par', False) or
+            context['dag_run'].conf.get('drc', False) or
+            context['dag_run'].conf.get('lvs', False)):
             # return "build_decider"
             return "build"
         else:
@@ -337,15 +450,15 @@ def create_hammer_dag_gcd():
     #Need to either find trigger flag to pass in, so this task runs if build_decider is success or change flow graph
     #@task
     #@task.branch(trigger_rule=TriggerRule.ONE_SUCCESS)
-    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
-    def sim_or_syn_decide(**context):
-        """Decide whether to run sim_rtl or syn"""
-        if context['dag_run'].conf.get('sim_rtl', False):
-            return 'sim_rtl'
-        elif (context['dag_run'].conf.get('syn', False) or 
-            context['dag_run'].conf.get('par', False)):
-            return 'syn'
-        return 'exit_'
+    # @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    # def sim_or_syn_decide(**context):
+    #     """Decide whether to run sim_rtl or syn"""
+    #     if context['dag_run'].conf.get('sim_rtl', False):
+    #         return 'sim_rtl'
+    #     elif (context['dag_run'].conf.get('syn', False) or 
+    #         context['dag_run'].conf.get('par', False)):
+    #         return 'syn'
+    #     return 'exit_'
 
     @task
     def sim_rtl(**context):
@@ -360,6 +473,18 @@ def create_hammer_dag_gcd():
             raise AirflowSkipException("Sim-RTL task skipped")
 
     @task
+    def power_rtl(**context):
+        """Execute power_RTL simulation task"""
+        print("Starting power_rtl task")
+        if context['dag_run'].conf.get('power_rtl', False):
+            print("power_RTL parameter is True, executing power_rtl")
+            flow = AIRFlow()
+            flow.power_rtl()
+        else:
+            print("power_RTL parameter is False, skipping")
+            raise AirflowSkipException("power_RTL task skipped")
+
+    @task
     def syn(**context):
         """Execute synthesis task"""
         print("Starting syn task")
@@ -372,6 +497,54 @@ def create_hammer_dag_gcd():
             raise AirflowSkipException("Synthesis task skipped")
 
     @task
+    def power_syn(**context):
+        """Execute power_synthesis task"""
+        print("Starting power_syn task")
+        if context['dag_run'].conf.get('power_syn', False):
+            print("power_Synthesis parameter is True, executing power_syn")
+            flow = AIRFlow()
+            flow.power_syn()
+        else:
+            print("power_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("power_Synthesis task skipped")
+
+    @task
+    def timing_syn(**context):
+        """Execute timing_synthesis task"""
+        print("Starting timing_syn task")
+        if context['dag_run'].conf.get('timing_syn', False):
+            print("timing_Synthesis parameter is True, executing timing_syn")
+            flow = AIRFlow()
+            flow.timing_syn()
+        else:
+            print("timing_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("timing_Synthesis task skipped")
+
+    @task
+    def formal_syn(**context):
+        """Execute formal_synthesis task"""
+        print("Starting formal_syn task")
+        if context['dag_run'].conf.get('formal_syn', False):
+            print("formal_Synthesis parameter is True, executing formal_syn")
+            flow = AIRFlow()
+            flow.formal_syn()
+        else:
+            print("formal_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("formal_Synthesis task skipped")
+
+    @task
+    def sim_syn(**context):
+        """Execute sim_synthesis task"""
+        print("Starting sim_syn task")
+        if context['dag_run'].conf.get('sim_syn', False):
+            print("sim_Synthesis parameter is True, executing sim_syn")
+            flow = AIRFlow()
+            flow.sim_syn()
+        else:
+            print("sim_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("sim_Synthesis task skipped")
+
+    @task
     def par(**context):
         """Execute PAR task"""
         print("Starting par task")
@@ -382,6 +555,78 @@ def create_hammer_dag_gcd():
         else:
             print("PAR parameter is False, skipping")
             raise AirflowSkipException("PAR task skipped")
+
+    @task
+    def formal_par(**context):
+        """Execute formal_PAR task"""
+        print("Starting formal_par task")
+        if context['dag_run'].conf.get('formal_par', False):
+            print("formal_PAR parameter is True, executing formal_par")
+            flow = AIRFlow()
+            flow.formal_par()
+        else:
+            print("formal_PAR parameter is False, skipping")
+            raise AirflowSkipException("formal_PAR task skipped")
+        
+    @task
+    def timing_par(**context):
+        """Execute timing_PAR task"""
+        print("Starting timing_par task")
+        if context['dag_run'].conf.get('timing_par', False):
+            print("timing_PAR parameter is True, executing timing_par")
+            flow = AIRFlow()
+            flow.timing_par()
+        else:
+            print("timing_PAR parameter is False, skipping")
+            raise AirflowSkipException("timing_PAR task skipped")
+        
+    @task
+    def sim_par(**context):
+        """Execute sim_PAR task"""
+        print("Starting sim_par task")
+        if context['dag_run'].conf.get('sim_par', False):
+            print("sim_PAR parameter is True, executing sim_par")
+            flow = AIRFlow()
+            flow.sim_par()
+        else:
+            print("sim_PAR parameter is False, skipping")
+            raise AirflowSkipException("sim_PAR task skipped")
+        
+    @task
+    def power_par(**context):
+        """Execute Power_PAR task"""
+        print("Starting Power_Par task")
+        if context['dag_run'].conf.get('power_par', False):
+            print("Power_PAR parameter is True, executing Power_Par")
+            flow = AIRFlow()
+            flow.power_par()
+        else:
+            print("Power_PAR parameter is False, skipping")
+            raise AirflowSkipException("Power_PAR task skipped")
+        
+    @task
+    def drc(**context):
+        """Execute DRC task"""
+        print("Starting DRC task")
+        if context['dag_run'].conf.get('drc', False):
+            print("DRC parameter is True, executing DRC")
+            flow = AIRFlow()
+            flow.drc()
+        else:
+            print("DRC parameter is False, skipping")
+            raise AirflowSkipException("DRC task skipped")
+        
+    @task
+    def lvs(**context):
+        """Execute LVS task"""
+        print("Starting LVS task")
+        if context['dag_run'].conf.get('lvs', False):
+            print("LVS parameter is True, executing LVS")
+            flow = AIRFlow()
+            flow.lvs()
+        else:
+            print("LVS parameter is False, skipping")
+            raise AirflowSkipException("LVS task skipped")
 
     #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
     # @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
@@ -425,36 +670,68 @@ def create_hammer_dag_gcd():
     clean = clean()
     # build_decide = build_decider()
     build = build()
-    sim_or_syn_decide = sim_or_syn_decide()
+    # sim_or_syn_decide = sim_or_syn_decide()
     sim_rtl = sim_rtl()
+    power_rtl = power_rtl()
     # syn_decide = syn_decider()
     syn = syn()
+    power_syn = power_syn()
+    timing_syn = timing_syn()
+    formal_syn = formal_syn()
+    sim_syn = sim_syn()
     # par_decide = par_decider()
     par = par()
+    power_par = power_par()
+    timing_par = timing_par()
+    formal_par = formal_par()
+    sim_par = sim_par()
+    drc = drc()
+    lvs = lvs()
     exit_ = exit_()
 
     # Set up dependencies to ensure deciders always run
     start >> [clean, build, exit_]
     clean >> exit_
     # build_decide >> [build, sim_or_syn_decide, exit_]
-    build >> sim_or_syn_decide
-    sim_or_syn_decide >> [sim_rtl, syn, exit_]
-    sim_rtl >> exit_
+    build >> [sim_rtl, syn, exit_]
+    sim_rtl >> [power_rtl, exit_]
+    power_rtl >> exit_
     # syn_decide >> [syn, par_decide, exit_]
-    syn >> par
+    syn >> [timing_syn, power_syn, formal_syn, sim_syn, par, exit_]
+    timing_syn >> exit_
+    sim_syn >> [power_syn, exit_]
+    formal_syn >> exit_
+    power_syn >> exit_
     # par_decide >> [par, exit_]
-    par >> exit_
+    par >> [timing_par, power_par, formal_par, sim_par, drc, lvs, exit_]
+    power_par >> exit_
+    formal_par >> exit_
+    sim_par >> [power_par, exit_]
+    timing_par >> exit_
+    lvs >> exit_
+    drc >> exit_
 
     return {
         'clean': clean,
         # 'build_decide': build_decide,
         'build': build,
-        'sim_or_syn_decide': sim_or_syn_decide,
+        # 'sim_or_syn_decide': sim_or_syn_decide,
         'sim_rtl': sim_rtl,
+        'power_rtl': power_rtl,
         # 'syn_decide': syn_decide,
         'syn': syn,
+        'power_syn': power_syn,
+        'timing_syn': timing_syn,
+        'formal_syn': formal_syn,
+        'sim_syn': sim_syn,
         # 'par_decide': par_decide,
-        'par': par
+        'par': par,
+        'power_par': power_par,
+        'sim_par': sim_par,
+        'timing_par': timing_par,
+        'formal_par': formal_par,
+        'lvs': lvs,
+        'drc': drc
     }
 
 # Create the DAG
@@ -798,11 +1075,17 @@ class AIRFlow_rocket:
             title='Build Design',
             description='Run the build step'
         ),
-        'sim_rtl': Param(
+        'sim-rtl': Param(
             default=False,
             type='boolean',
             title='RTL Simulation',
             description='Run RTL simulation'
+        ),
+        'power-rtl': Param(
+            default=False,
+            type='boolean',
+            title='RTL Power Simulation',
+            description='Run RTL Power simulation'
         ),
         'sram_generator': Param(
             default=False,
@@ -816,11 +1099,71 @@ class AIRFlow_rocket:
             title='Synthesis',
             description='Run logic synthesis'
         ),
+        'sim-syn': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Synthesis',
+            description='Run synthesis simulation'
+        ),
+        'timing-syn': Param(
+            default=False,
+            type='boolean',
+            title='Timing Synthesis',
+            description='Get timing from synthesis'
+        ),
+        'formal-syn': Param(
+            default=False,
+            type='boolean',
+            title='Formal Synthesis',
+            description='Get formal from synthesis'
+        ),
+        'power-syn': Param(
+            default=False,
+            type='boolean',
+            title='Power Synthesis',
+            description='Get power from synthesis'
+        ),
         'par': Param(
             default=False,
             type='boolean',
             title='Place and Route',
             description='Run place and route'
+        ),
+        'drc': Param(
+            default=False,
+            type='boolean',
+            title='Design Rule Check',
+            description='Run design rule check'
+        ),
+        'lvs': Param(
+            default=False,
+            type='boolean',
+            title='Layout Versus Schematic',
+            description='Run layout versus schematic'
+        ),
+        'sim-par': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Place and Route',
+            description='Run place and route simulation'
+        ),
+        'timing-par': Param(
+            default=False,
+            type='boolean',
+            title='Timing Place and Route',
+            description='get timing from place and route'
+        ),
+        'formal-par': Param(
+            default=False,
+            type='boolean',
+            title='Formal Place and Route',
+            description='Get formal from place and route'
+        ),
+        'power-par': Param(
+            default=False,
+            type='boolean',
+            title='Power Place and Route',
+            description='Get power from place and route'
         )
     },
     render_template_as_native_obj=True
