@@ -1223,14 +1223,14 @@ class HammerDatabase:
                         for stageNode in self.stageGraph.stageList:
                             affectedStages.add(stageNode.name)
             for setting, value in master_db_contents.items():
-                if(setting.startswith(tag + ".") and (setting not in new_db_contents)):
-                    if setting == (stage + ".needsToRerun"):
-                        if value:
-                            keyChangeFlag = True
-                            print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
-                            # affectedSettings.append((setting,None,value))
-                            master_db_contents[setting] = False
-                    elif master_db_contents[setting] != None:
+                if ".needsToRerun" in setting:    
+                    if setting.startswith(stage) and value:
+                        keyChangeFlag = True
+                        print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
+                        # affectedSettings.append((setting,None,value))
+                        master_db_contents[setting] = False
+                elif(setting.startswith(tag + ".") and (setting not in new_db_contents)):
+                    if master_db_contents[setting] != None:
                         keyChangeFlag = True
                         print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE DOES NOT EXIST")
                         # affectedSettings.append((setting,None,value))
@@ -1239,13 +1239,7 @@ class HammerDatabase:
                             if stageNode.tag == tag:
                                 affectedStages.add(stageNode.name)
                 elif((not setting.startswith(self.stageGraph.stageTagTuple)) and (setting not in new_db_contents)):
-                    if setting == (stage + ".needsToRerun"):
-                        if value:
-                            keyChangeFlag = True
-                            print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
-                            # affectedSettings.append((setting,None,value))
-                            master_db_contents[setting] = False
-                    elif master_db_contents[setting] != None:
+                    if master_db_contents[setting] != None:
                         keyChangeFlag = True
                         print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE DOES NOT EXIST")
                         # affectedSettings.append((setting,None,value))
