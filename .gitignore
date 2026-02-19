@@ -29,3 +29,4 @@ dist/
 e2e/obj_dir
 e2e/build*
 e2e/output.json
+hammer/shell/autoTA/conda/
