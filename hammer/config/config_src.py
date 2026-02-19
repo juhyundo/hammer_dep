@@ -24,37 +24,55 @@ from hammer.utils import add_dicts, deepdict, topological_sort
 from .yaml2json import load_yaml  # grumble grumble
 
 class StageNode():
-    def __init__(self, name, next = [], prev = []):
+    def __init__(self, name, tag, next = [], prev = []):
         self.name = name
+        self.tag = tag
         self.next = next
         self.prev = prev
 
 class StageGraph():
     def __init__(self):
-        self.sim_rtl = StageNode("sim_rtl")
-        self.power_rtl = StageNode("power_rtl", prev = [self.sim_rtl])
+        self.sim_rtl = StageNode("sim_rtl", "sim")
+        self.power_rtl = StageNode("power_rtl", "power", prev = [self.sim_rtl])
 
-        self.syn = StageNode("syn")
-        self.sim_syn = StageNode("sim_syn")
-        self.power_syn = StageNode("power_syn", prev = [self.syn, self.sim_syn])
-        self.timing_syn = StageNode("timing_syn", prev = [self.syn])
-        self.formal_syn = StageNode("formal_syn", prev = [self.syn])
+        self.syn = StageNode("syn", "synthesis")
+        self.sim_syn = StageNode("sim_syn", "sim")
+        self.power_syn = StageNode("power_syn", "power", prev = [self.syn, self.sim_syn])
+        self.timing_syn = StageNode("timing_syn", "timing", prev = [self.syn])
+        self.formal_syn = StageNode("formal_syn", "formal", prev = [self.syn])
         
-        self.par = StageNode("par", prev = [self.syn])
-        self.sim_par = StageNode("sim_par")
-        self.power_par = StageNode("power_par", prev = [self.par, self.sim_par])
-        self.formal_par = StageNode("formal_par", prev = [self.par])
-        self.timing_par = StageNode("timing_par", prev = [self.par])
-        self.drc = StageNode("drc", prev = [self.par])
-        self.lvs = StageNode("lvs", prev = [self.par])
+        self.par = StageNode("par", "par", prev = [self.syn])
+        self.sim_par = StageNode("sim_par", "sim")
+        self.power_par = StageNode("power_par", "power", prev = [self.par, self.sim_par])
+        self.formal_par = StageNode("formal_par", "formal", prev = [self.par])
+        self.timing_par = StageNode("timing_par", "timing", prev = [self.par])
+        self.drc = StageNode("drc", "drc", prev = [self.par])
+        self.lvs = StageNode("lvs", "lvs", prev = [self.par])
+
+        self.sim_rtl.next = [self.power_rtl]
+        self.power_rtl.next = []
+
+        self.syn.next = [self.par, self.sim_syn, self.power_syn, self.timing_syn, self.formal_syn]
+        self.sim_syn.next = [self.power_syn]
+        self.power_syn.next = []
+        self.timing_syn.next = []
+        self.formal_syn.next = []
+        
+        self.par.next = [self.power_par, self.sim_par, self.formal_par, self.timing_par, self.drc, self.lvs]
+        self.sim_par.next = [self.power_par]
+        self.power_par.next = []
+        self.formal_par.next = []
+        self.timing_par.next = []
+        self.drc.next = []
+        self.lvs.next = []
 
         self.stageList = [self.sim_rtl, self.power_rtl, self.syn, self.sim_syn, self.power_syn,
                      self.timing_syn, self.formal_syn, self.par, self.sim_par, self.power_par,
                      self.formal_par, self.timing_par, self.drc, self.lvs]
                      
-        self.stageTagTuple = ("synthesis", "sim", "par", "drc", "lvs", "power", "pcb", "formal")
+        self.stageTagTuple = ("synthesis", "sim", "par", "drc", "lvs", "power", "pcb", "formal", "timing")
 
-        self.stageDict = {stage.name : stage.prev for stage in self.stageList}
+        self.stageDict = {stage.name : stage for stage in self.stageList}
 
         
     
@@ -1163,41 +1181,99 @@ class HammerDatabase:
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             master_db_contents = None
 
-        affectedStageList = []
+        affectedStages = set()
+        stagePath = set()
 
         new_db_contents = json.loads(self.get_database_json())
 
-        def curStageCheck(stage:str):
+        def curStageCheck(tag:str, stage:str):
             keyChangeFlag = False
             # affectedSettings = []
             for setting, value in new_db_contents.items():
-                if(setting not in master_db_contents):
-                    keyChangeFlag = True
-                    # affectedSettings.append((setting,None,value))
-                    master_db_contents[setting] = value
-                elif(setting.startswith(stage + ".") or (not setting.startswith(self.stageGraph.stageTagTuple))):
-                    if(master_db_contents[setting] != value):
+                if(setting.startswith(tag + ".")):
+                    if(setting not in master_db_contents):
+                        keyChangeFlag = True
+                        # affectedSettings.append((setting,None,value))
+                        master_db_contents[setting] = value
+                        for stage in self.stageGraph.stageList:
+                            if stage.tag == tag:
+                                affectedStages.add(stage.name)
+                    elif(master_db_contents[setting] != value):
                         keyChangeFlag = True
                         # affectedSettings.append((setting,master_db_contents[setting],value))
                         master_db_contents[setting] = value
+                        for stage in self.stageGraph.stageList:
+                            if stage.tag == tag:
+                                affectedStages.add(stage.name)
+                elif(not setting.startswith(self.stageGraph.stageTagTuple)):
+                    if(setting not in master_db_contents):
+                        keyChangeFlag = True
+                        # affectedSettings.append((setting,None,value))
+                        master_db_contents[setting] = value
+                        for stage in self.stageGraph.stageList:
+                            affectedStages.add(stage.name)
+                    elif(master_db_contents[setting] != value):
+                        keyChangeFlag = True
+                        # affectedSettings.append((setting,master_db_contents[setting],value))
+                        master_db_contents[setting] = value
+                        for stage in self.stageGraph.stageList:
+                            affectedStages.add(stage.name)
+            for setting, value in master_db_contents.items():
+                if(setting.startswith(tag + ".") and (setting not in new_db_contents)):
+                    if setting == (stage + ".needsToRerun"):
+                        if value:
+                            keyChangeFlag = True
+                            # affectedSettings.append((setting,None,value))
+                            master_db_contents[setting] = False
+                    else:
+                        keyChangeFlag = True
+                        # affectedSettings.append((setting,None,value))
+                        master_db_contents[setting] = None
+                        for stage in self.stageGraph.stageList:
+                            if stage.tag == tag:
+                                affectedStages.add(stage.name)
+                elif((not setting.startswith(self.stageGraph.stageTagTuple)) and (setting not in new_db_contents)):
+                    if setting == (stage + ".needsToRerun"):
+                        if value:
+                            keyChangeFlag = True
+                            # affectedSettings.append((setting,None,value))
+                            master_db_contents[setting] = False
+                    else:
+                        keyChangeFlag = True
+                        # affectedSettings.append((setting,None,value))
+                        master_db_contents[setting] = None
+                        for stage in self.stageGraph.stageList:
+                            affectedStages.add(stage.name)
             return keyChangeFlag # ,affectedSettings
 
+        def propagateChangeFlag(stage:str):
+            affectedStages.add(stage)
+            for laterStage in self.stageGraph.stageDict[stage].next:
+                propagateChangeFlag(laterStage.name)
+
         def recursiveStageCheck(stage:str) -> bool:
+            stagePath.add(stage)
             prevStageFlag = False
-            curStageFlag = curStageCheck(stage)
-            for prevStage in self.stageGraph.stageDict[stage]:
+            curStageFlag = curStageCheck(self.stageGraph.stageDict[stage].tag, stage)
+            for prevStage in self.stageGraph.stageDict[stage].prev:
                 #formatted like this to force check on previous stage
-                prevStageCheck = recursiveStageCheck(prevStage.name)
-                prevStageFlag = prevStageCheck or prevStageFlag
-            if prevStageFlag or curStageFlag:
-                affectedStageList.append(stage)
+                if prevStage.name not in stagePath:
+                    prevStageCheck = recursiveStageCheck(prevStage.name)
+                    prevStageFlag = prevStageCheck or prevStageFlag
+            if curStageFlag:
+                propagateChangeFlag(stage)
             return prevStageFlag or curStageFlag
             
 
         config_change_flag = recursiveStageCheck(stage)
 
         if config_change_flag:
-            print(f"Database changed, stages affected are {affectedStageList}")
+            for stage in affectedStages:
+                if stage not in stagePath:
+                    master_db_contents[stage + ".needsToRerun"] = True
+                else:
+                    master_db_contents[stage + ".needsToRerun"] = False
+            print(f"Database changed, stages affected are {affectedStages}")
             master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
             master_path.write_text(master_db_contents_str)
             print(f"Updated Database exported to {master_path}")
