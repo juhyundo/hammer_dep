@@ -34,9 +34,12 @@ from hammer.utils import add_dicts, deeplist, deepdict, get_or_else, check_funct
 from hammer.config import HammerJSONEncoder
 
 from airflow.models.dag import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models.baseoperator import chain
-from airflow.decorators import task, dag
+#from airflow.operators.python import PythonOperator
+#from airflow.models.baseoperator import chain
+#from airflow.decorators import task, dag
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk.bases.operator import chain
+from airflow.sdk import task, dag
 from datetime import datetime, timedelta
 
 #import pdb
@@ -1745,7 +1748,8 @@ class CLIDriver:
                   file=sys.stderr)
             sys.exit(1)
 
-        sys.exit(self.run_main_parsed(vars(parser.parse_args(args))))
+        #sys.exit(self.run_main_parsed(vars(parser.parse_args(args))))
+        self.run_main_parsed(vars(parser.parse_args(args)))
 
 @task
 def import_task_to_dag():

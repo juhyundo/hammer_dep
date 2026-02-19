@@ -16,12 +16,16 @@ import sys
 import json
 
 from airflow.models.dag import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models.param import Param
-from airflow.utils.trigger_rule import TriggerRule
+#from airflow.operators.python import PythonOperator
+#from airflow.models.param import Param
+#from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import Param
+from airflow.task.trigger_rule import TriggerRule
 from datetime import datetime
 from airflow.exceptions import AirflowSkipException
-from airflow.decorators import task, dag
+#from airflow.decorators import task, dag
+from airflow.sdk import task, dag
 from airflow.models import Variable
 
 import pendulum
@@ -413,11 +417,37 @@ def create_hammer_dag_gcd():
             return 'par'
         return 'exit_'
 
+
+    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
+    @task(trigger_rule=TriggerRule.ALL_DONE) # Runs even if 'syn' failed/crashed
+    def syn_debug(**context):
+        """run autoTA script"""
+        print("Starting syn debug")
+        if context['dag_run'].conf.get('syn', False):
+            flow = AIRFlow()
+            current_script_dir = os.path.dirname(os.path.abspath(__file__))
+            gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
+            command = ["python3", gemini_path]
+            print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
+
+            result = subprocess.run(command, cwd=flow.OBJ_DIR, check=True, capture_output=True, text=True)
+            
+            # 3. Print the terminal output to the Airflow logs
+            print("Terminal Output:")
+            print(result.stdout)
+            
+            if result.stderr:
+                print("Terminal Errors:")
+                print(result.stderr)
+        else:
+            print("Synthesis parameter is False, skipping")
+            raise AirflowSkipException("Synthesis task skipped")
+
     @task(trigger_rule=TriggerRule.NONE_FAILED)
     def exit_():
         """Exit task"""
         print("Exiting")
-        sys.exit(0)
+        #sys.exit(0)
 
     # Create task instances
     start = start()
@@ -428,6 +458,7 @@ def create_hammer_dag_gcd():
     sim_rtl = sim_rtl()
     syn_decide = syn_decider()
     syn = syn()
+    syn_debug = syn_debug()
     par_decide = par_decider()
     par = par()
     exit_ = exit_()
@@ -438,9 +469,9 @@ def create_hammer_dag_gcd():
     build_decide >> [build, sim_or_syn_decide, exit_]
     build >> sim_or_syn_decide
     sim_or_syn_decide >> [sim_rtl, syn_decide, exit_]
-    sim_rtl >> exit_
+    # sim_rtl >> exit_
     syn_decide >> [syn, par_decide, exit_]
-    syn >> par_decide
+    syn >> syn_debug >> par_decide
     par_decide >> [par, exit_]
     par >> exit_
 
@@ -452,6 +483,7 @@ def create_hammer_dag_gcd():
         'sim_rtl': sim_rtl,
         'syn_decide': syn_decide,
         'syn': syn,
+        'syn_debug': syn_debug,
         'par_decide': par_decide,
         'par': par
     }
@@ -904,7 +936,8 @@ def create_hammer_dag_rocket():
             raise AirflowSkipException("SRAM task skipped")
 
     #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    #@task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
     def sram_decider(**context):
         """Decide whether to run sram generator"""
         if context['dag_run'].conf.get('sram_generator', False):
@@ -965,7 +998,8 @@ def create_hammer_dag_rocket():
         return 'exit_'
 
     #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    #@task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
     def syn_decider(**context):
         """Decide whether to run synthesis"""
         if context['dag_run'].conf.get('syn', False):
@@ -987,7 +1021,7 @@ def create_hammer_dag_rocket():
     def exit_():
         """Exit task"""
         print("Exiting")
-        sys.exit(0)
+        #sys.exit(0)
 
     # Create task instances
     start = start()
