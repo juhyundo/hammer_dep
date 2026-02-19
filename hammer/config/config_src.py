@@ -1280,7 +1280,7 @@ class HammerDatabase:
             master_path.write_text(master_db_contents_str)
             print(f"Updated Database exported to {master_path}")
         else:
-            print(f"Database unchanged, can directly run {stage}")
+            print(f"Database unchanged, can skip {stage}")
         return config_change_flag
                 
 

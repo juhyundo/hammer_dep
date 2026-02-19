@@ -65,16 +65,17 @@ class AIRFlow:
         self.makecmdgoals = os.getenv('MAKECMDGOALS', "build")
         
         # simulation and power configurations
-        self.SIM_CONF = os.getenv('SIM_CONF',
-            f"{self.e2e_dir}/configs-design/{self.design}/sim-rtl.yml" if '-rtl' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/sim-syn.yml" if '-syn' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/sim-par.yml" if '-par' in self.makecmdgoals else ''
-        )
-        self.POWER_CONF = os.getenv('POWER_CONF',
-            f"{self.e2e_dir}/configs-design/{self.design}/power-rtl-{self.pdk}.yml" if 'power-rtl' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/power-syn-{self.pdk}.yml" if 'power-syn' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/power-par-{self.pdk}.yml" if 'power-par' in self.makecmdgoals else ''
-        )
+        self.SIM_RTL_CONF = os.getenv('SIM_RTL_CONF', f"{self.e2e_dir}/configs-design/{self.design}/sim-rtl.yml")
+
+        self.SIM_SYN_CONF = os.getenv('SIM_SYN_CONF', f"{self.e2e_dir}/configs-design/{self.design}/sim-syn.yml")
+
+        self.SIM_PAR_CONF = os.getenv('SIM_PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/sim-par.yml")
+
+        self.POWER_RTL_CONF = os.getenv('POWER_RTL_CONF', f"{self.e2e_dir}/configs-design/{self.design}/power-rtl-{self.pdk}.yml")
+
+        self.POWER_SYN_CONF = os.getenv('POWER_SYN_CONF', f"{self.e2e_dir}/configs-design/{self.design}/power-syn-{self.pdk}.yml")
+
+        self.POWER_PAR_CONF = os.getenv('POWER_PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/power-par-{self.pdk}.yml")
 
         # create project configuration
         self.PROJ_YMLS = [
@@ -83,8 +84,7 @@ class AIRFlow:
             self.DESIGN_CONF, 
             self.DESIGN_PDK_CONF,
             self.SYN_CONF, 
-            self.SIM_CONF, 
-            self.POWER_CONF, 
+            self.PAR_CONF,
             self.extra
         ]
         
@@ -107,21 +107,27 @@ class AIRFlow:
         print(f"TOOLS_CONF: {self.TOOLS_CONF}")
         print(f"DESIGN_CONF: {self.DESIGN_CONF}")
         print(f"DESIGN_PDK_CONF: {self.DESIGN_PDK_CONF}")
+        print(f"SYN_CONF: {self.SYN_CONF}")
+        print(f"PAR_CONF: {self.PAR_CONF}")
+        print(f"SIM_RTL_CONF: {self.SIM_RTL_CONF}")
+        print(f"SIM_SYN_CONF: {self.SIM_SYN_CONF}")
+        print(f"SIM_PAR_CONF: {self.SIM_PAR_CONF}")
+        print(f"POWER_RTL_CONF: {self.POWER_RTL_CONF}")
+        print(f"POWER_SYN_CONF: {self.POWER_SYN_CONF}")
+        print(f"POWER_PAR_CONF: {self.POWER_PAR_CONF}")
         
         sys.argv = [
             'hammer-vlsi',
             'build',
             '--obj_dir', self.OBJ_DIR,
-            '-e', self.ENV_YML,
-            '-p', self.PDK_CONF,
-            '-p', self.TOOLS_CONF,
-            '-p', self.DESIGN_CONF,
-            '-p', self.DESIGN_PDK_CONF
+            '-e', self.ENV_YML
         ]
-        
-        if self.extra:
-            sys.argv.extend(['-p', self.extra])
-        
+
+        # Add all project configs
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
         if self.args:
             sys.argv.extend(self.args.split())
             
@@ -130,6 +136,529 @@ class AIRFlow:
 
     def sim_rtl(self):
         print("Executing sim-rtl")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim-rtl',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML
+        ]
+
+        # Add all project configs
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_RTL_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def sim_rtl_to_power(self):
+        print("Executing sim-rtl-to-power")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim-rtl-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'sim-rtl-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/sim-rundir/sim-rtl-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_RTL_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+        
+    def power_rtl(self):
+        print("Executing power-rtl")
+        sys.argv = [
+            'hammer-vlsi',
+            'power-rtl',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'sim-rtl-to-power_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_RTL_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn(self):
+        print("Executing synthesis")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_par(self):
+        print("Executing syn-to-par")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-par',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+    
+    def syn_to_sim(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-sim',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'syn-to-sim_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def sim_syn(self):
+        print("Executing sim-syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim',
+            '--obj_dir', self.OBJ_DIR, #bwrc env yml
+            '-e', self.ENV_YML
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def sim_syn_to_power(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim-syn-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'sim-syn-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/sim-syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_power(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'syn-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def power_syn(self):
+        print("Executing power_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'power-syn',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'syn-to-power_input.json',
+            '-p', self.OBJ_DIR + 'sim-syn-to-power_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_formal(self):
+        print("Executing syn-to-formal")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-formal',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'syn-to-formal_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def formal_syn(self):
+        print("Executing formal_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'formal',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'syn-to-formal_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_timing(self):
+        print("Executing syn-to-timing")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-timing',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'syn-to-timing_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def timing_syn(self):
+        print("Executing timing_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'timing',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'syn-to-timing_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def par(self):
+        print("Executing par")
+        sys.argv = [
+            'hammer-vlsi',
+            'par',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'par-input.json'
+        ]
+        
+        # Add all project configs
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+        
+        if self.args:
+            sys.argv.extend(self.args.split())
+        
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_sim(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-sim',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'syn-to-sim_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def sim_syn(self):
+        print("Executing sim-syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim',
+            '--obj_dir', self.OBJ_DIR, #bwrc env yml
+            '-e', self.ENV_YML
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def sim_syn_to_power(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim-syn-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'sim-syn-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/sim-syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_power(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'syn-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def power_syn(self):
+        print("Executing power_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'power-syn',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'syn-to-power_input.json',
+            '-p', self.OBJ_DIR + 'sim-syn-to-power_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_formal(self):
+        print("Executing syn-to-formal")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-formal',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'syn-to-formal_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def formal_syn(self):
+        print("Executing formal_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'syn-to-formal_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def syn_to_timing(self):
+        print("Executing par-to-timing")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-to-timing',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'par-to-timing_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def timing_par(self):
+        print("Executing timing_par")
+        sys.argv = [
+            'hammer-vlsi',
+            'timing',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + 'par-to-timing_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        CLIDriver().main()
+
+    def drc(self):
+        print("Executing drc")
         print(f"Using config files:")
         print(f"ENV_YML: {self.ENV_YML}")
         print(f"PDK_CONF: {self.PDK_CONF}")
@@ -137,7 +666,7 @@ class AIRFlow:
         print(f"DESIGN_CONF: {self.DESIGN_CONF}")
         print(f"DESIGN_PDK_CONF: {self.DESIGN_PDK_CONF}")
         
-        # Add simulation config
+        # Add drc config
         self.SIM_CONF = os.path.join(self.e2e_dir, "configs-design", self.design, "sim-rtl.yml")
         print(f"SIM_CONF: {self.SIM_CONF}")
         
@@ -160,16 +689,9 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
 
-    def sim_rtl_to_power(self):
-        print("Executing sim-to-power-rtl")
-        
-    def power_rtl(self):
-        print("Executing power_rtl")
-
-    def syn(self):
-        print("Executing synthesis")
+    def lvs(self):
+        print("Executing lvs")
         print(f"Using config files:")
         print(f"ENV_YML: {self.ENV_YML}")
         print(f"PDK_CONF: {self.PDK_CONF}")
@@ -177,20 +699,20 @@ class AIRFlow:
         print(f"DESIGN_CONF: {self.DESIGN_CONF}")
         print(f"DESIGN_PDK_CONF: {self.DESIGN_PDK_CONF}")
         
-        # Add synthesis config
-        self.SYN_CONF = os.path.join(self.e2e_dir, "configs-design", self.design, "syn.yml")
-        print(f"SYN_CONF: {self.SYN_CONF}")
+        # Add lvs config
+        self.SIM_CONF = os.path.join(self.e2e_dir, "configs-design", self.design, "sim-rtl.yml")
+        print(f"SIM_CONF: {self.SIM_CONF}")
         
         sys.argv = [
             'hammer-vlsi',
-            'syn',
+            'sim',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
             '-p', self.PDK_CONF,
             '-p', self.TOOLS_CONF,
             '-p', self.DESIGN_CONF,
             '-p', self.DESIGN_PDK_CONF,
-            '-p', self.SYN_CONF
+            '-p', self.SIM_CONF
         ]
         
         if self.extra:
@@ -200,86 +722,6 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
-
-    def syn_to_par(self):
-        """
-        Generate par-input.json from synthesis outputs if it doesn't exist
-        """
-        par_input_json = f"{self.OBJ_DIR}/par-input.json"
-        
-        # Only generate if file doesn't exist
-        if not os.path.exists(par_input_json):
-            print("Generating par-input.json")
-            par_config = {
-                "vlsi.inputs.placement_constraints": [],
-                "vlsi.inputs.gds_merge": True,
-                "par.inputs": {
-                    "top_module": self.design,
-                    "input_files": [f"{self.OBJ_DIR}/syn-rundir/{self.design}.mapped.v"]
-                }
-            }
-            
-            # Write configuration to par-input.json
-            with open(par_input_json, 'w') as f:
-                json.dump(par_config, f, indent=2)
-        
-        return par_input_json
-
-    def sim_syn(self):
-        print("Executing sim_syn")
-
-    def power_syn(self):
-        print("Executing power_syn")
-
-    def formal_syn(self):
-        print("Executing formal_syn")
-
-    def timing_syn(self):
-        print("Executing timing_syn")
-
-    def par(self):
-        """Execute PAR flow."""
-        # Generate par-input.json
-        par_input_json = self.syn_to_par()
-
-        # Set up command line arguments
-        sys.argv = [
-            'hammer-vlsi',
-            'par',
-            '--obj_dir', self.OBJ_DIR,
-            '-e', self.ENV_YML,
-            '-p', par_input_json
-        ]
-        
-        # Add all project configs
-        for conf in self.PROJ_YMLS:
-            if conf:
-                sys.argv.extend(['-p', conf])
-        
-        if self.args:
-            sys.argv.extend(self.args.split())
-        
-        print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
-
-    def sim_par(self):
-        print("Executing sim_par")
-
-    def power_par(self):
-        print("Executing power_par")
-
-    def timing_par(self):
-        print("Executing timing_par")
-
-    def formal_par(self):
-        print("Executing formal_par")
-
-    def drc(self):
-        print("Executing drc")
-
-    def lvs(self):
-        print("Executing lvs")
 
     def clean(self):
         print("Executing clean")
