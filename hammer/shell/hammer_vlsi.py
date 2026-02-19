@@ -59,7 +59,7 @@ class AIRFlow:
         
         # synthesis and par configurations
         self.SYN_CONF = os.getenv('SYN_CONF', f"{self.e2e_dir}/configs-design/{self.design}/syn.yml")
-        self.PAR_CONF = os.getenv('PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/par.yml")
+        # self.PAR_CONF = os.getenv('PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/par.yml")
         
         # This should be your target, build is passed in
         self.makecmdgoals = os.getenv('MAKECMDGOALS', "build")
@@ -84,7 +84,7 @@ class AIRFlow:
             self.DESIGN_CONF, 
             self.DESIGN_PDK_CONF,
             self.SYN_CONF, 
-            self.PAR_CONF,
+            # self.PAR_CONF,
             self.extra
         ]
         
@@ -108,7 +108,7 @@ class AIRFlow:
         print(f"DESIGN_CONF: {self.DESIGN_CONF}")
         print(f"DESIGN_PDK_CONF: {self.DESIGN_PDK_CONF}")
         print(f"SYN_CONF: {self.SYN_CONF}")
-        print(f"PAR_CONF: {self.PAR_CONF}")
+        # print(f"PAR_CONF: {self.PAR_CONF}")
         print(f"SIM_RTL_CONF: {self.SIM_RTL_CONF}")
         print(f"SIM_SYN_CONF: {self.SIM_SYN_CONF}")
         print(f"SIM_PAR_CONF: {self.SIM_PAR_CONF}")

@@ -1195,29 +1195,29 @@ class HammerDatabase:
                         keyChangeFlag = True
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = value
-                        for stage in self.stageGraph.stageList:
-                            if stage.tag == tag:
-                                affectedStages.add(stage.name)
+                        for stageNode in self.stageGraph.stageList:
+                            if stageNode.tag == tag:
+                                affectedStages.add(stageNode.name)
                     elif(master_db_contents[setting] != value):
                         keyChangeFlag = True
                         # affectedSettings.append((setting,master_db_contents[setting],value))
                         master_db_contents[setting] = value
-                        for stage in self.stageGraph.stageList:
-                            if stage.tag == tag:
-                                affectedStages.add(stage.name)
+                        for stageNode in self.stageGraph.stageList:
+                            if stageNode.tag == tag:
+                                affectedStages.add(stageNode.name)
                 elif(not setting.startswith(self.stageGraph.stageTagTuple)):
                     if(setting not in master_db_contents):
                         keyChangeFlag = True
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = value
-                        for stage in self.stageGraph.stageList:
-                            affectedStages.add(stage.name)
+                        for stageNode in self.stageGraph.stageList:
+                            affectedStages.add(stageNode.name)
                     elif(master_db_contents[setting] != value):
                         keyChangeFlag = True
                         # affectedSettings.append((setting,master_db_contents[setting],value))
                         master_db_contents[setting] = value
-                        for stage in self.stageGraph.stageList:
-                            affectedStages.add(stage.name)
+                        for stageNode in self.stageGraph.stageList:
+                            affectedStages.add(stageNode.name)
             for setting, value in master_db_contents.items():
                 if(setting.startswith(tag + ".") and (setting not in new_db_contents)):
                     if setting == (stage + ".needsToRerun"):
@@ -1229,9 +1229,9 @@ class HammerDatabase:
                         keyChangeFlag = True
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = None
-                        for stage in self.stageGraph.stageList:
-                            if stage.tag == tag:
-                                affectedStages.add(stage.name)
+                        for stageNode in self.stageGraph.stageList:
+                            if stageNode.tag == tag:
+                                affectedStages.add(stageNode.name)
                 elif((not setting.startswith(self.stageGraph.stageTagTuple)) and (setting not in new_db_contents)):
                     if setting == (stage + ".needsToRerun"):
                         if value:
@@ -1242,8 +1242,8 @@ class HammerDatabase:
                         keyChangeFlag = True
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = None
-                        for stage in self.stageGraph.stageList:
-                            affectedStages.add(stage.name)
+                        for stageNode in self.stageGraph.stageList:
+                            affectedStages.add(stageNode.name)
             return keyChangeFlag # ,affectedSettings
 
         def propagateChangeFlag(stage:str):
