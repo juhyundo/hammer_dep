@@ -1230,7 +1230,7 @@ class HammerDatabase:
                             print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
                             # affectedSettings.append((setting,None,value))
                             master_db_contents[setting] = False
-                    else:
+                    elif master_db_contents[setting] != None:
                         keyChangeFlag = True
                         print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE DOES NOT EXIST")
                         # affectedSettings.append((setting,None,value))
@@ -1245,7 +1245,7 @@ class HammerDatabase:
                             print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
                             # affectedSettings.append((setting,None,value))
                             master_db_contents[setting] = False
-                    else:
+                    elif master_db_contents[setting] != None:
                         keyChangeFlag = True
                         print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE DOES NOT EXIST")
                         # affectedSettings.append((setting,None,value))
@@ -1280,9 +1280,11 @@ class HammerDatabase:
             propagateChangeFlag(stage)
             for affectedStage in affectedStages:
                 if affectedStage != stage:
-                    master_db_contents[stage + ".needsToRerun"] = True
+                    print("setting NeedsToReRun True for " + str(affectedStage))
+                    master_db_contents[affectedStage + ".needsToRerun"] = True
                 else:
-                    master_db_contents[stage + ".needsToRerun"] = False
+                    print("setting NeedsToReRun False for " + str(affectedStage))
+                    master_db_contents[affectedStage + ".needsToRerun"] = False
             print(f"Database changed, stages affected are {affectedStages}")
             master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
             master_path.write_text(master_db_contents_str)

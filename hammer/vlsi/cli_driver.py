@@ -594,7 +594,7 @@ class CLIDriver:
                         dump_config_to_yaml_file(os.path.join(driver.syn_tool.run_dir, "syn-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    return None
+                    return 0
             elif action_type == "par":
                 if driver.database.stage_change_check(stage = "par"):
                     if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
@@ -617,7 +617,7 @@ class CLIDriver:
                         dump_config_to_yaml_file(os.path.join(driver.par_tool.run_dir, "par-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    return None
+                    return 0
             elif action_type == "drc":
                 if driver.database.stage_change_check(stage = "drc"):
                     if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
@@ -640,7 +640,7 @@ class CLIDriver:
                         dump_config_to_yaml_file(os.path.join(driver.drc_tool.run_dir, "drc-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    return None
+                    return 0
             elif action_type == "lvs":
                 if driver.database.stage_change_check(stage = "lvs"):
                     if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
@@ -663,7 +663,7 @@ class CLIDriver:
                         dump_config_to_yaml_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    return None
+                    return 0
             elif action_type == "sram_generator":
                 if not driver.load_sram_generator_tool(get_or_else(self.sram_generator_rundir, "")):
                     return None
