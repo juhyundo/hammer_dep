@@ -1251,6 +1251,7 @@ class HammerDatabase:
             for laterStage in self.stageGraph.stageDict[stage].next:
                 propagateChangeFlag(laterStage.name)
 
+        # CODE FOR MANUAL EXECUTIONS. DUE TO AIRFLOW'S SEQUENTIAL EXECUTION, THIS IS NOT NECESSARY FOR SLEDGEHAMMER
         def recursiveStageCheck(stage:str) -> bool:
             stagePath.add(stage)
             prevStageFlag = False
@@ -1265,11 +1266,12 @@ class HammerDatabase:
             return prevStageFlag or curStageFlag
             
 
-        config_change_flag = recursiveStageCheck(stage)
+        config_change_flag = curStageCheck(self.stageGraph.stageDict[stage].tag, stage)
 
         if config_change_flag:
-            for stage in affectedStages:
-                if stage not in stagePath:
+            propagateChangeFlag(stage)
+            for affectedStage in affectedStages:
+                if affectedStage != stage:
                     master_db_contents[stage + ".needsToRerun"] = True
                 else:
                     master_db_contents[stage + ".needsToRerun"] = False
