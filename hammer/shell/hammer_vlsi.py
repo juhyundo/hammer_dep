@@ -931,6 +931,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('power_rtl', False):
             print("power_RTL parameter is True, executing power_rtl")
             flow = AIRFlow()
+            flow.sim_rtl_to_power()
             flow.power_rtl()
         else:
             print("power_RTL parameter is False, skipping")
@@ -955,6 +956,8 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('power_syn', False):
             print("power_Synthesis parameter is True, executing power_syn")
             flow = AIRFlow()
+            flow.syn_to_power()
+            flow.sim_syn_to_power()
             flow.power_syn()
         else:
             print("power_Synthesis parameter is False, skipping")
@@ -967,6 +970,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('timing_syn', False):
             print("timing_Synthesis parameter is True, executing timing_syn")
             flow = AIRFlow()
+            flow.syn_to_timing()
             flow.timing_syn()
         else:
             print("timing_Synthesis parameter is False, skipping")
@@ -979,6 +983,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('formal_syn', False):
             print("formal_Synthesis parameter is True, executing formal_syn")
             flow = AIRFlow()
+            flow.syn_to_formal()
             flow.formal_syn()
         else:
             print("formal_Synthesis parameter is False, skipping")
@@ -991,6 +996,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('sim_syn', False):
             print("sim_Synthesis parameter is True, executing sim_syn")
             flow = AIRFlow()
+            flow.syn_to_sim()
             flow.sim_syn()
         else:
             print("sim_Synthesis parameter is False, skipping")
@@ -1003,6 +1009,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing par")
             flow = AIRFlow()
+            flow.syn_to_par()
             flow.par()
         else:
             print("PAR parameter is False, skipping")
@@ -1015,6 +1022,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('formal_par', False):
             print("formal_PAR parameter is True, executing formal_par")
             flow = AIRFlow()
+            flow.par_to_formal()
             flow.formal_par()
         else:
             print("formal_PAR parameter is False, skipping")
@@ -1027,6 +1035,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('timing_par', False):
             print("timing_PAR parameter is True, executing timing_par")
             flow = AIRFlow()
+            flow.par_to_timing()
             flow.timing_par()
         else:
             print("timing_PAR parameter is False, skipping")
@@ -1039,6 +1048,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('sim_par', False):
             print("sim_PAR parameter is True, executing sim_par")
             flow = AIRFlow()
+            flow.par_to_sim()
             flow.sim_par()
         else:
             print("sim_PAR parameter is False, skipping")
@@ -1051,6 +1061,8 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('power_par', False):
             print("Power_PAR parameter is True, executing Power_Par")
             flow = AIRFlow()
+            flow.sim_par_to_power()
+            flow.par_to_power()
             flow.power_par()
         else:
             print("Power_PAR parameter is False, skipping")
@@ -1063,6 +1075,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('drc', False):
             print("DRC parameter is True, executing DRC")
             flow = AIRFlow()
+            flow.par_to_drc()
             flow.drc()
         else:
             print("DRC parameter is False, skipping")
@@ -1075,6 +1088,7 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('lvs', False):
             print("LVS parameter is True, executing LVS")
             flow = AIRFlow()
+            flow.par_to_lvs()
             flow.lvs()
         else:
             print("LVS parameter is False, skipping")
