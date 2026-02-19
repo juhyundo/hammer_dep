@@ -21,6 +21,7 @@ from airflow.models.param import Param
 from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime
 from airflow.exceptions import AirflowSkipException
+from airflow.exceptions import AirflowFailException
 from airflow.decorators import task, dag
 from airflow.models import Variable
 
@@ -132,14 +133,15 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def sim_rtl(self):
         print("Executing sim-rtl")
         sys.argv = [
             'hammer-vlsi',
-            'sim-rtl',
+            'sim',
             '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/sim-rundir/sim-rtl-output.json',
             '-e', self.ENV_YML
         ]
 
@@ -154,13 +156,13 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
 
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def sim_rtl_to_power(self):
         print("Executing sim-rtl-to-power")
         sys.argv = [
             'hammer-vlsi',
-            'sim-rtl-to-power',
+            'sim-to-power',
             '--obj_dir', self.OBJ_DIR,
             '-o', self.OBJ_DIR + '/sim-rtl-to-power_input.json',
             '-e', self.ENV_YML,
@@ -177,13 +179,13 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
         
     def power_rtl(self):
         print("Executing power-rtl")
         sys.argv = [
             'hammer-vlsi',
-            'power-rtl',
+            'power',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/sim-rtl-to-power_input.json'
@@ -199,7 +201,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def syn(self):
         print("Executing synthesis")
@@ -218,7 +220,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def syn_to_par(self):
         print("Executing syn-to-par")
@@ -238,7 +240,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
     
     def syn_to_sim(self):
         print("Executing syn-to-sim")
@@ -261,14 +263,15 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def sim_syn(self):
         print("Executing sim-syn")
         sys.argv = [
             'hammer-vlsi',
-            'sim',
+            'syn-sim',
             '--obj_dir', self.OBJ_DIR, #bwrc env yml
+            '-o', self.OBJ_DIR + '/syn-rundir/sim-syn-output.json',
             '-e', self.ENV_YML
         ]
         
@@ -282,13 +285,13 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def sim_syn_to_power(self):
         print("Executing syn-to-sim")
         sys.argv = [
             'hammer-vlsi',
-            'sim-syn-to-power',
+            'sim-to-power',
             '--obj_dir', self.OBJ_DIR,
             '-o', self.OBJ_DIR + '/sim-syn-to-power_input.json',
             '-e', self.ENV_YML,
@@ -306,7 +309,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def syn_to_power(self):
         print("Executing syn-to-sim")
@@ -329,13 +332,13 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def power_syn(self):
         print("Executing power_syn")
         sys.argv = [
             'hammer-vlsi',
-            'power-syn',
+            'power',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/syn-to-power_input.json',
@@ -352,7 +355,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def syn_to_formal(self):
         print("Executing syn-to-formal")
@@ -373,7 +376,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def formal_syn(self):
         print("Executing formal_syn")
@@ -393,7 +396,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def syn_to_timing(self):
         print("Executing syn-to-timing")
@@ -414,7 +417,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def timing_syn(self):
         print("Executing timing_syn")
@@ -434,7 +437,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def par(self):
         print("Executing par")
@@ -455,7 +458,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
         
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def par_to_sim(self):
         print("Executing par-to-sim")
@@ -478,14 +481,15 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def sim_par(self):
         print("Executing sim-par")
         sys.argv = [
             'hammer-vlsi',
-            'sim',
+            'par-sim',
             '--obj_dir', self.OBJ_DIR, #bwrc env yml
+            '-o', self.OBJ_DIR + '/par-rundir/sim-par-output.json',
             '-e', self.ENV_YML
         ]
         
@@ -499,13 +503,13 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def sim_par_to_power(self):
         print("Executing par-to-sim")
         sys.argv = [
             'hammer-vlsi',
-            'sim-par-to-power',
+            'sim-to-power',
             '--obj_dir', self.OBJ_DIR,
             '-o', self.OBJ_DIR + '/sim-par-to-power_input.json',
             '-e', self.ENV_YML,
@@ -523,7 +527,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def par_to_power(self):
         print("Executing par-to-sim")
@@ -546,13 +550,13 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def power_par(self):
         print("Executing power_par")
         sys.argv = [
             'hammer-vlsi',
-            'power-par',
+            'power',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/par-to-power_input.json',
@@ -569,7 +573,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def par_to_formal(self):
         print("Executing par-to-formal")
@@ -590,7 +594,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def formal_par(self):
         print("Executing formal_par")
@@ -610,7 +614,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def par_to_timing(self):
         print("Executing par-to-timing")
@@ -631,7 +635,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def timing_par(self):
         print("Executing timing_par")
@@ -651,7 +655,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def par_to_drc(self):
         print("Executing par-to-drc")
@@ -660,6 +664,7 @@ class AIRFlow:
             'par-to-drc',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
+            '-o', self.OBJ_DIR + '/drc-input.json',
             '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
         ]
         
@@ -671,7 +676,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def drc(self):
         print("Executing drc")
@@ -691,7 +696,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def par_to_lvs(self):
         print("Executing par-to-lvs")
@@ -700,6 +705,7 @@ class AIRFlow:
             'par-to-lvs',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
+            '-o', self.OBJ_DIR + '/lvs-input.json',
             '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
         ]
         
@@ -711,7 +717,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def lvs(self):
         print("Executing lvs")
@@ -720,7 +726,7 @@ class AIRFlow:
             'lvs',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
-            '-p', self.OBJ_DIR + '/drc-input.json'
+            '-p', self.OBJ_DIR + '/lvs-input.json'
         ]
 
         for conf in self.PROJ_YMLS:
@@ -731,7 +737,7 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def clean(self):
         print("Executing clean")
@@ -889,7 +895,8 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('build', False):
             print("Build parameter is True, executing build")
             flow = AIRFlow()
-            flow.build()
+            if flow.build():
+                raise AirflowFailException("build failed")
         else:
             print("Build parameter is False, skipping")
             raise AirflowSkipException("Build task skipped")
@@ -919,7 +926,8 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('sim_rtl', False):
             print("Sim-RTL parameter is True, executing sim_rtl")
             flow = AIRFlow()
-            flow.sim_rtl()
+            if flow.sim_rtl():
+                raise AirflowFailException("sim_rtl failed")
         else:
             print("Sim-RTL parameter is False, skipping")
             raise AirflowSkipException("Sim-RTL task skipped")
@@ -931,8 +939,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('power_rtl', False):
             print("power_RTL parameter is True, executing power_rtl")
             flow = AIRFlow()
-            flow.sim_rtl_to_power()
-            flow.power_rtl()
+            if flow.sim_rtl_to_power():
+                raise AirflowFailException("sim_rtl_to_power failed")
+            if flow.power_rtl():
+                raise AirflowFailException("power_rtl failed")
         else:
             print("power_RTL parameter is False, skipping")
             raise AirflowSkipException("power_RTL task skipped")
@@ -944,7 +954,8 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('syn', False):
             print("Synthesis parameter is True, executing syn")
             flow = AIRFlow()
-            flow.syn()
+            if flow.syn():
+                raise AirflowFailException("syn failed")
         else:
             print("Synthesis parameter is False, skipping")
             raise AirflowSkipException("Synthesis task skipped")
@@ -956,9 +967,12 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('power_syn', False):
             print("power_Synthesis parameter is True, executing power_syn")
             flow = AIRFlow()
-            flow.syn_to_power()
-            flow.sim_syn_to_power()
-            flow.power_syn()
+            if flow.syn_to_power():
+                raise AirflowFailException("syn_to_power failed")
+            if flow.sim_syn_to_power():
+                raise AirflowFailException("sim_syn_to_power failed")
+            if flow.power_syn():
+                raise AirflowFailException("power_syn failed")
         else:
             print("power_Synthesis parameter is False, skipping")
             raise AirflowSkipException("power_Synthesis task skipped")
@@ -970,8 +984,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('timing_syn', False):
             print("timing_Synthesis parameter is True, executing timing_syn")
             flow = AIRFlow()
-            flow.syn_to_timing()
-            flow.timing_syn()
+            if flow.syn_to_timing():
+                raise AirflowFailException("syn_to_timing failed")
+            if flow.timing_syn():
+                raise AirflowFailException("timing_syn failed")
         else:
             print("timing_Synthesis parameter is False, skipping")
             raise AirflowSkipException("timing_Synthesis task skipped")
@@ -983,8 +999,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('formal_syn', False):
             print("formal_Synthesis parameter is True, executing formal_syn")
             flow = AIRFlow()
-            flow.syn_to_formal()
-            flow.formal_syn()
+            if flow.syn_to_formal():
+                raise AirflowFailException("syn_to_formal failed")
+            if flow.formal_syn():
+                raise AirflowFailException("formal_syn failed")
         else:
             print("formal_Synthesis parameter is False, skipping")
             raise AirflowSkipException("formal_Synthesis task skipped")
@@ -996,8 +1014,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('sim_syn', False):
             print("sim_Synthesis parameter is True, executing sim_syn")
             flow = AIRFlow()
-            flow.syn_to_sim()
-            flow.sim_syn()
+            if flow.syn_to_sim():
+                raise AirflowFailException("syn_to_sim failed")
+            if flow.sim_syn():
+                raise AirflowFailException("sim_syn failed")
         else:
             print("sim_Synthesis parameter is False, skipping")
             raise AirflowSkipException("sim_Synthesis task skipped")
@@ -1009,8 +1029,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing par")
             flow = AIRFlow()
-            flow.syn_to_par()
-            flow.par()
+            if flow.syn_to_par():
+                raise AirflowFailException("syn_to_par failed")
+            if flow.par():
+                raise AirflowFailException("par failed")
         else:
             print("PAR parameter is False, skipping")
             raise AirflowSkipException("PAR task skipped")
@@ -1022,8 +1044,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('formal_par', False):
             print("formal_PAR parameter is True, executing formal_par")
             flow = AIRFlow()
-            flow.par_to_formal()
-            flow.formal_par()
+            if flow.par_to_formal():
+                raise AirflowFailException("par_to_formal failed")
+            if flow.formal_par():
+                raise AirflowFailException("formal_par failed")
         else:
             print("formal_PAR parameter is False, skipping")
             raise AirflowSkipException("formal_PAR task skipped")
@@ -1035,8 +1059,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('timing_par', False):
             print("timing_PAR parameter is True, executing timing_par")
             flow = AIRFlow()
-            flow.par_to_timing()
-            flow.timing_par()
+            if flow.par_to_timing():
+                raise AirflowFailException("par_to_timing failed")
+            if flow.timing_par():
+                raise AirflowFailException("timing_par failed")
         else:
             print("timing_PAR parameter is False, skipping")
             raise AirflowSkipException("timing_PAR task skipped")
@@ -1048,8 +1074,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('sim_par', False):
             print("sim_PAR parameter is True, executing sim_par")
             flow = AIRFlow()
-            flow.par_to_sim()
-            flow.sim_par()
+            if flow.par_to_sim():
+                raise AirflowFailException("par_to_sim failed")
+            if flow.sim_par():
+                raise AirflowFailException("sim_par failed")
         else:
             print("sim_PAR parameter is False, skipping")
             raise AirflowSkipException("sim_PAR task skipped")
@@ -1061,9 +1089,12 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('power_par', False):
             print("Power_PAR parameter is True, executing Power_Par")
             flow = AIRFlow()
-            flow.sim_par_to_power()
-            flow.par_to_power()
-            flow.power_par()
+            if flow.sim_par_to_power():
+                raise AirflowFailException("sim_par_to_power failed")
+            if flow.par_to_power():
+                raise AirflowFailException("par_to_power failed")
+            if flow.power_par():
+                raise AirflowFailException("power_par failed")
         else:
             print("Power_PAR parameter is False, skipping")
             raise AirflowSkipException("Power_PAR task skipped")
@@ -1075,8 +1106,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('drc', False):
             print("DRC parameter is True, executing DRC")
             flow = AIRFlow()
-            flow.par_to_drc()
-            flow.drc()
+            if flow.par_to_drc():
+                raise AirflowFailException("par_to_drc failed")
+            if flow.drc():
+                raise AirflowFailException("drc failed")
         else:
             print("DRC parameter is False, skipping")
             raise AirflowSkipException("DRC task skipped")
@@ -1088,8 +1121,10 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('lvs', False):
             print("LVS parameter is True, executing LVS")
             flow = AIRFlow()
-            flow.par_to_lvs()
-            flow.lvs()
+            if flow.par_to_lvs():
+                raise AirflowFailException("par_to_lvs failed")
+            if flow.lvs():
+                raise AirflowFailException("lvs failed")
         else:
             print("LVS parameter is False, skipping")
             raise AirflowSkipException("LVS task skipped")

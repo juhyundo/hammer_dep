@@ -1193,6 +1193,7 @@ class HammerDatabase:
                 if(setting.startswith(tag + ".")):
                     if(setting not in master_db_contents):
                         keyChangeFlag = True
+                        print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE DOES NOT EXIST. NEW VALUE: " + str(value))
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = value
                         for stageNode in self.stageGraph.stageList:
@@ -1200,6 +1201,7 @@ class HammerDatabase:
                                 affectedStages.add(stageNode.name)
                     elif(master_db_contents[setting] != value):
                         keyChangeFlag = True
+                        print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE: " + str(value))
                         # affectedSettings.append((setting,master_db_contents[setting],value))
                         master_db_contents[setting] = value
                         for stageNode in self.stageGraph.stageList:
@@ -1208,12 +1210,14 @@ class HammerDatabase:
                 elif(not setting.startswith(self.stageGraph.stageTagTuple)):
                     if(setting not in master_db_contents):
                         keyChangeFlag = True
+                        print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE DOES NOT EXIST. NEW VALUE: " + str(value))
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = value
                         for stageNode in self.stageGraph.stageList:
                             affectedStages.add(stageNode.name)
                     elif(master_db_contents[setting] != value):
                         keyChangeFlag = True
+                        print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE: " + str(value))
                         # affectedSettings.append((setting,master_db_contents[setting],value))
                         master_db_contents[setting] = value
                         for stageNode in self.stageGraph.stageList:
@@ -1223,10 +1227,12 @@ class HammerDatabase:
                     if setting == (stage + ".needsToRerun"):
                         if value:
                             keyChangeFlag = True
+                            print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
                             # affectedSettings.append((setting,None,value))
                             master_db_contents[setting] = False
                     else:
                         keyChangeFlag = True
+                        print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE DOES NOT EXIST")
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = None
                         for stageNode in self.stageGraph.stageList:
@@ -1236,10 +1242,12 @@ class HammerDatabase:
                     if setting == (stage + ".needsToRerun"):
                         if value:
                             keyChangeFlag = True
+                            print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
                             # affectedSettings.append((setting,None,value))
                             master_db_contents[setting] = False
                     else:
                         keyChangeFlag = True
+                        print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE DOES NOT EXIST")
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = None
                         for stageNode in self.stageGraph.stageList:
