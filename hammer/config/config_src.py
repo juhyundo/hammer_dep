@@ -1248,9 +1248,9 @@ class HammerDatabase:
                             affectedStages.add(stageNode.name)
             return keyChangeFlag # ,affectedSettings
 
-        def propagateChangeFlag(stage:str):
-            affectedStages.add(stage)
-            for laterStage in self.stageGraph.stageDict[stage].next:
+        def propagateChangeFlag(propStage:str):
+            affectedStages.add(propStage)
+            for laterStage in self.stageGraph.stageDict[propStage].next:
                 propagateChangeFlag(laterStage.name)
 
         # CODE FOR MANUAL EXECUTIONS. DUE TO AIRFLOW'S SEQUENTIAL EXECUTION, THIS IS NOT NECESSARY FOR SLEDGEHAMMER
