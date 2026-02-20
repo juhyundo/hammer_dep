@@ -91,60 +91,87 @@ def load_autota_config():
         print(f" Error reading config.yml: {e}")
         sys.exit(1)
 
-# 2. Load Lab Design Config (Local settings in labX/design.yml)
+# 2. Load Lab Design Config (Flexible Search for syn.yml)
 def load_lab_config():
-    config_path = os.path.join(CURRENT_LAB_DIR, "design.yml")
-    try:
-        with open(config_path, "r") as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f" Error: Could not find design.yml in {CURRENT_LAB_DIR}")
-        sys.exit(1)
-    except Exception as e:
-        print(f" Error reading design.yml: {e}")
-        sys.exit(1)
+    global ACTUAL_CONFIG_PATH
+    abs_lab_dir = os.path.abspath(CURRENT_LAB_DIR)
+    dir_parts = abs_lab_dir.split(os.sep)
+    
+    # Base fallback searches strictly for syn.yml
+    search_options = [
+        "syn.yml", 
+        "../syn.yml", 
+        "../../syn.yml"
+    ]
+
+    # Dynamically inject Hammer E2E paths to find e2e/configs-design/<design>/syn.yml
+    # It grabs the names of the current folder and its parents to guess the design name (e.g., 'gcd')
+    if len(dir_parts) >= 2:
+        for i in range(-1, -4, -1):
+            design_guess = dir_parts[i]
+            search_options.extend([
+                f"../../configs-design/{design_guess}/syn.yml",
+                f"../../../configs-design/{design_guess}/syn.yml",
+                f"../../../../configs-design/{design_guess}/syn.yml",
+                f"../../../../../configs-design/{design_guess}/syn.yml"
+            ])
+            
+    for opt in search_options:
+        config_path = os.path.join(CURRENT_LAB_DIR, opt)
+        if os.path.exists(config_path):
+            print(f" Using design config: {os.path.normpath(config_path)}")
+            ACTUAL_CONFIG_PATH = os.path.abspath(config_path)
+            try:
+                with open(config_path, "r") as f:
+                    return yaml.safe_load(f)
+            except Exception as e:
+                print(f" Error reading {config_path}: {e}")
+                sys.exit(1)
+                
+    print(f" Error: Could not find syn.yml relative to {CURRENT_LAB_DIR}")
+    # Do not exit here to avoid breaking the tool if syn.yml is not found.
+    # We can still provide some level of analysis on the log itself.
+    print(" Proceeding without a design config file.")
+    return {}
 
 # Load both configurations
 autota_config = load_autota_config()
 lab_config = load_lab_config()
 
-# Initialize Client using API Key from config.yml
-client = genai.Client(api_key=autota_config["api_key"])
-DEFAULT_LOG_DIR = "build/syn-rundir"
+try:
+    client = genai.Client(api_key=autota_config["api_key"])
+except Exception as e:
+    print(f" Error initializing Gemini Client: {e}")
+    print(" Proceeding but AI analysis will fail.")
+    client = None
+
+DEFAULT_LOG_DIR = "syn-rundir"
+ACTUAL_CONFIG_PATH = "" # Store this globally so the log saver knows which one we used
+
+# Removed duplicate load_lab_config
 
 # ==========================================
 # SMART LOG FILE SELECTION
 # ==========================================
 
 def get_target_log_file():
-    """
-    Determines which log file to read.
-    1. Check command line argument.
-    2. Check config.yml for custom dir, otherwise use DEFAULT.
-    3. Find latest file in that dir.
-    """
-    # Use config if present, otherwise default
     log_dir_relative = autota_config.get("synth_log_dir", DEFAULT_LOG_DIR)
     log_dir = os.path.join(CURRENT_LAB_DIR, log_dir_relative)
     
-    # CASE 1: User specified a filename (e.g. python gemini.py genus.log4)
     if len(sys.argv) > 1:
         requested_file = sys.argv[1]
         full_path = os.path.join(log_dir, requested_file)
-        
         if os.path.exists(full_path):
-            print(f" Using specified log: {requested_file}")
             return full_path
         else:
             print(f" Error: File '{requested_file}' not found in {log_dir_relative}")
             sys.exit(1)
 
-    # CASE 2: Auto-detect latest file
     if not os.path.exists(log_dir):
         print(f" Error: Log directory not found at: {log_dir_relative}")
-        print(" Did you run synthesis? (make synth)")
         sys.exit(1)
 
+    # Automatically grab the latest genus.log*
     search_pattern = os.path.join(log_dir, "genus.log*") 
     files = glob.glob(search_pattern)
 
@@ -156,32 +183,23 @@ def get_target_log_file():
     print(f" Using latest log: {os.path.basename(latest_file)}")
     return latest_file
 
-# Get the log path
 target_log_path = get_target_log_file()
-
-# Setup extraction command
 EXTRACT_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "extract.py")
 EXTRACT_CMD = ["python3", EXTRACT_SCRIPT_PATH, target_log_path]
 
 def get_timing_report_content():
-    """
-    Looks for the timing report in build/syn-rundir/reports/.
-    It finds any file ending in .setup_view.rpt
-    """
     log_dir_relative = autota_config.get("synth_log_dir", DEFAULT_LOG_DIR)
     reports_dir = os.path.join(CURRENT_LAB_DIR, log_dir_relative, "reports")
     
     if not os.path.exists(reports_dir):
         return "No reports directory found (Synthesis might have failed early)."
 
-    # Look for the specific pattern provided
     pattern = os.path.join(reports_dir, "*.setup_view.rpt")
     files = glob.glob(pattern)
 
     if not files:
         return "No '.setup_view.rpt' timing report found."
     
-    # Use the most recent report if multiple exist
     latest_report = max(files, key=os.path.getmtime)
     print(f" Including Timing Report: {os.path.basename(latest_report)}")
     
@@ -196,49 +214,45 @@ def get_timing_report_content():
 # ==========================================
 
 def get_hdl_source_files():
-    """
-    Finds the list of Verilog files from the LAB config (design.yml).
-    """
-    # Check standard 'synthesis.inputs' in design.yml
-    synth_inputs = lab_config.get("synthesis.inputs", {})
+    synth_inputs = lab_config.get("synthesis.inputs", {}) if lab_config else {}
     if "input_files" in synth_inputs:
         return synth_inputs["input_files"]
-
-    print(" Error: Could not find 'input_files' in synthesis.inputs inside design.yml.")
-    sys.exit(1)
+    print(" Warning: Could not find 'input_files' in synthesis.inputs. Proceeding without HDL source files.")
+    return []
 
 def get_file_content_smart(filename):
-    path_a = os.path.join(CURRENT_LAB_DIR, filename)       # e.g. "src/divider.v"
-    path_b = os.path.join(CURRENT_LAB_DIR, "src", filename) # e.g. "divider.v"
+    # Flexible search paths for E2E Hammer builds
+    search_paths = [
+        os.path.join(CURRENT_LAB_DIR, filename),
+        os.path.join(CURRENT_LAB_DIR, "src", filename),
+        os.path.join(CURRENT_LAB_DIR, "..", "..", "src", filename),
+        os.path.join(CURRENT_LAB_DIR, "..", "..", "..", "src", filename)
+    ]
 
-    if os.path.exists(path_a):
-        with open(path_a, "r") as f: return f.read()
-    elif os.path.exists(path_b):
-        with open(path_b, "r") as f: return f.read()
-    else:
-        print(f" Warning: Could not find source file: {filename}")
-        return None
+    for path in search_paths:
+        if os.path.exists(path):
+            with open(path, "r") as f: return f.read()
+            
+    print(f" Warning: Could not find source file: {filename}")
+    return None
 
 def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
-    # Load AI settings from config.yml
     settings = autota_config.get("ai_settings", {})
     model_name = settings.get("model", "gemini-3-flash-preview")
     prompt_text = settings.get("prompt", "Analyze these issues.")
 
-    # NEW: Read the raw design.yml file to send to Gemini
-    design_yml_path = os.path.join(CURRENT_LAB_DIR, "design.yml")
-    design_yml_raw = ""
+    # Safely read the config file we actually found earlier
     try:
-        with open(design_yml_path, "r") as f:
-            design_yml_raw = f.read()
+        with open(ACTUAL_CONFIG_PATH, "r") as f:
+            config_raw = f.read()
     except Exception as e:
-        design_yml_raw = f"Error reading design.yml: {e}"
+        config_raw = f"Error reading config: {e}"
 
     full_prompt = (
         f"{prompt_text}\n"
         "---------------------------------------------------\n"
-        "DESIGN.YML CONTENT:\n"
-        f"{design_yml_raw}\n\n"
+        f"CONFIG ({os.path.basename(ACTUAL_CONFIG_PATH)}) CONTENT:\n"
+        f"{config_raw}\n\n"
         "LOG ISSUES:\n"
         f"{synthesis_issues}\n\n"
         "VERILOG SOURCE:\n"
@@ -248,58 +262,37 @@ def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
     )
     
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=full_prompt
-        )
+        response = client.models.generate_content(model=model_name, contents=full_prompt)
         return response.text
     except Exception as e:
         return f"API Error: {e}"
 
-def save_persistent_log(analysis, target_log_path, design_yml_path, synthesis_issues, hdl_code, timing_report):
-    """
-    Saves a log containing Gemini output and context.
-    Naming convention: autoTA_<original_log_name>
-    """
+def save_persistent_log(analysis, target_log_path, config_path, synthesis_issues, hdl_code, timing_report):
     log_dir = os.path.join(CURRENT_LAB_DIR, "autota_logs")
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    # Extract the base name (e.g., genus.log9) and prefix it
     original_log_name = os.path.basename(target_log_path)
     log_filename = os.path.join(log_dir, f"autoTA_{original_log_name}")
 
-    # Read raw design.yml for the log
     try:
-        with open(design_yml_path, "r") as f:
-            design_yml_raw = f.read()
+        with open(config_path, "r") as f:
+            config_raw = f.read()
     except:
-        design_yml_raw = "Could not read design.yml"
+        config_raw = "Could not read config file"
 
-    # Construct the combined log content
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = f"================ AUTO-TA SESSION | {timestamp} ================\n"
     header += f"SOURCE LOG: {original_log_name}\n"
     
     combined_content = [
-        header,
-        "\n### 1. GEMINI ANALYSIS ###\n",
-        analysis,
-        "\n" + "="*60 + "\n",
-        "### 2. DESIGN.YML CONTENT ###\n",
-        design_yml_raw,
-        "\n" + "="*60 + "\n",
-        "### 3. SYNTHESIS LOG (ISSUES) ###\n",
-        synthesis_issues,
-        "\n" + "="*60 + "\n",
-        "### 4. VERILOG SOURCE FILES ###\n",
-        hdl_code,
-        "\n" + "="*60 + "\n",
-        "### 5. TIMING REPORT ###\n",
-        timing_report
+        header, "\n### 1. GEMINI ANALYSIS ###\n", analysis,
+        "\n" + "="*60 + "\n", f"### 2. {os.path.basename(config_path)} CONTENT ###\n", config_raw,
+        "\n" + "="*60 + "\n", "### 3. SYNTHESIS LOG (ISSUES) ###\n", synthesis_issues,
+        "\n" + "="*60 + "\n", "### 4. VERILOG SOURCE FILES ###\n", hdl_code,
+        "\n" + "="*60 + "\n", "### 5. TIMING REPORT ###\n", timing_report
     ]
 
-    # Write to file
     try:
         with open(log_filename, "w") as f:
             f.write("\n".join(combined_content))
@@ -313,11 +306,8 @@ def save_persistent_log(analysis, target_log_path, design_yml_path, synthesis_is
 
 def main():
     print(f" Running AutoTA for: {os.path.basename(CURRENT_LAB_DIR)}")
-
-    # 1. Run Extraction
     run_shell_command(EXTRACT_CMD)
 
-    # 2. Check Issues
     if not os.path.exists(SYNTH_ISSUES_FILE):
         print(" Error: synthesis_issues.log was not created.")
         sys.exit(1)
@@ -329,7 +319,6 @@ def main():
         print(" No synthesis issues found in this log. Good job!")
         return
 
-    # 3. Read Source Files (From design.yml)
     target_files = get_hdl_source_files()
     files_str = ", ".join(target_files)
     print(f" Found issues. Analyzing {files_str} source files...")
@@ -340,30 +329,18 @@ def main():
         if content:
             hdl_code += f"\n\n//FILE: {filename}\n{content}"
 
-    # 4. Get Timing Report Content
     timing_report_content = get_timing_report_content()
     
-    # 5. Gemini Analysis (Using settings from config.yml)
-    print("\n Gemini Analysis:\n")
-    print("-----------------------------------------------")
+    print("\n Gemini Analysis:\n" + "-"*47)
     analysis = analyze_issues(synthesis_issues, hdl_code, timing_report_content)
 
     if RICH_AVAILABLE:
         console.print(Markdown(analysis))
     else:
         print(analysis)
-    print("\n-----------------------------------------------")
+    print("\n" + "-"*47)
 
-    # 6. SAVE LOG (Updated with target_log_path)
-    design_yml_path = os.path.join(CURRENT_LAB_DIR, "design.yml")
-    save_persistent_log(
-        analysis, 
-        target_log_path, # This variable is defined globally in your script via get_target_log_file()
-        design_yml_path, 
-        synthesis_issues, 
-        hdl_code, 
-        timing_report_content
-    )
+    save_persistent_log(analysis, target_log_path, ACTUAL_CONFIG_PATH, synthesis_issues, hdl_code, timing_report_content)
 
 def run_shell_command(command):
     try:
