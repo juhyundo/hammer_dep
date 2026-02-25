@@ -211,7 +211,6 @@ class AIRFlow:
             'hammer-vlsi',
             'syn',
             '--obj_dir', self.OBJ_DIR,
-            '-o', self.OBJ_DIR + '/syn-rundir/syn-output.json',
             '-e', self.ENV_YML
         ]
         
@@ -752,9 +751,11 @@ class AIRFlow:
         return CLIDriver().main()
 
     def clean(self):
-        print("Executing clean")
+        print(f"Executing clean. OBJ_DIR={self.OBJ_DIR}")
         if os.path.exists(self.OBJ_DIR):
             subprocess.run(f"rm -rf {self.OBJ_DIR} hammer-vlsi-*.log", shell=True, check=True)
+        else:
+            print(f"OBJ_DIR path does not exist. No action taken")
 
 
 
@@ -897,8 +898,7 @@ def create_hammer_dag_gcd():
         """Clean the build directory"""
         print("Starting clean task")
         flow = AIRFlow()
-        if os.path.exists(flow.OBJ_DIR):
-            subprocess.run(f"rm -rf {flow.OBJ_DIR} hammer-vlsi-*.log", shell=True, check=True)
+        flow.clean()
     
     @task
     def build(**context):
