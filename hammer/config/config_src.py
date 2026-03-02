@@ -1179,7 +1179,7 @@ class HammerDatabase:
             loaded = json.loads(text)
             master_db_contents = loaded if isinstance(loaded, dict) else None
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
-            master_db_contents = None
+            master_db_contents = dict()
 
         affectedStages = set()
         stagePath = set()
@@ -1190,7 +1190,7 @@ class HammerDatabase:
             keyChangeFlag = False
             # affectedSettings = []
             for setting, value in new_db_contents.items():
-                if(setting.startswith(tag + ".")):
+                if(setting.startswith(tag + ".") and not (setting.startswith(tag + ".outputs"))):
                     if(setting not in master_db_contents):
                         keyChangeFlag = True
                         print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE DOES NOT EXIST. NEW VALUE: " + str(value))
@@ -1229,7 +1229,7 @@ class HammerDatabase:
                         print("DEBUG DEPENDENCY CHECK. NEEDS TO RERUN WAS TRUE")
                         # affectedSettings.append((setting,None,value))
                         master_db_contents[setting] = False
-                elif(setting.startswith(tag + ".") and (setting not in new_db_contents)):
+                elif(setting.startswith(tag + ".") and (setting not in new_db_contents) and not (setting.startswith(tag + ".outputs"))):
                     if master_db_contents[setting] != None:
                         keyChangeFlag = True
                         print(str(setting) + " DEBUG DEPENDENCY CHECK. OLD VALUE: " + str(master_db_contents[setting]) + ". NEW VALUE DOES NOT EXIST")

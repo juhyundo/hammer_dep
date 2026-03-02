@@ -590,7 +590,8 @@ class CLIDriver:
                 return None
 
             if action_type == "synthesis" or action_type == "syn":
-                if driver.database.stage_change_check(stage = "syn"):
+                print(driver.obj_dir)
+                if driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
                         return None
                     else:
@@ -613,7 +614,7 @@ class CLIDriver:
                 else:
                     return 0
             elif action_type == "par":
-                if driver.database.stage_change_check(stage = "par"):
+                if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
                         return None
                     else:

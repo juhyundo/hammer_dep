@@ -141,7 +141,7 @@ class AIRFlow:
             'hammer-vlsi',
             'sim',
             '--obj_dir', self.OBJ_DIR,
-            '-o', self.OBJ_DIR + '/sim-rundir/sim-rtl-output.json',
+            '--sim_rundir', self.OBJ_DIR + '/sim-rtl-rundir/',
             '-e', self.ENV_YML
         ]
 
@@ -165,8 +165,7 @@ class AIRFlow:
             'sim-to-power',
             '--obj_dir', self.OBJ_DIR,
             '-o', self.OBJ_DIR + '/sim-rtl-to-power_input.json',
-            '-e', self.ENV_YML,
-            '-p', self.OBJ_DIR + '/sim-rundir/sim-rtl-output.json'
+            '-e', self.ENV_YML
         ]
         
         for conf in self.PROJ_YMLS:
@@ -174,6 +173,7 @@ class AIRFlow:
                 sys.argv.extend(['-p', conf])
             
         sys.argv.extend(['-p', self.POWER_RTL_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/sim-rtl-rundir/sim-output.json'])
 
         if self.args:
             sys.argv.extend(self.args.split())
@@ -187,8 +187,8 @@ class AIRFlow:
             'hammer-vlsi',
             'power',
             '--obj_dir', self.OBJ_DIR,
-            '-e', self.ENV_YML,
-            '-p', self.OBJ_DIR + '/sim-rtl-to-power_input.json'
+            '--power_rundir', self.OBJ_DIR + '/power-rtl-rundir/',
+            '-e', self.ENV_YML
         ]
         
         for conf in self.PROJ_YMLS:
@@ -196,6 +196,8 @@ class AIRFlow:
                 sys.argv.extend(['-p', conf])
             
         sys.argv.extend(['-p', self.POWER_RTL_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/sim-rtl-to-power_input.json'])
+        
 
         if self.args:
             sys.argv.extend(self.args.split())
@@ -228,13 +230,15 @@ class AIRFlow:
             'hammer-vlsi',
             'syn-to-par',
             '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/par-input.json',
             '-e', self.ENV_YML,
-            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
         ]
         
         for conf in self.PROJ_YMLS:
             if conf:
                 sys.argv.extend(['-p', conf])
+
+        sys.argv.extend(['-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'])
 
         if self.args:
             sys.argv.extend(self.args.split())
@@ -249,8 +253,7 @@ class AIRFlow:
             'syn-to-sim',
             '--obj_dir', self.OBJ_DIR,
             '-o', self.OBJ_DIR + '/syn-to-sim_input.json',
-            '-e', self.ENV_YML,
-            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+            '-e', self.ENV_YML
         ]
         
         for conf in self.PROJ_YMLS:
@@ -258,6 +261,7 @@ class AIRFlow:
                 sys.argv.extend(['-p', conf])
             
         sys.argv.extend(['-p', self.SIM_SYN_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'])
 
         if self.args:
             sys.argv.extend(self.args.split())
@@ -271,7 +275,7 @@ class AIRFlow:
             'hammer-vlsi',
             'syn-sim',
             '--obj_dir', self.OBJ_DIR, #bwrc env yml
-            '-o', self.OBJ_DIR + '/syn-rundir/sim-syn-output.json',
+            '--sim_rundir', self.OBJ_DIR + '/sim-syn-rundir/',
             '-e', self.ENV_YML
         ]
         
@@ -280,6 +284,7 @@ class AIRFlow:
                 sys.argv.extend(['-p', conf])
             
         sys.argv.extend(['-p', self.SIM_SYN_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/syn-to-sim_input.json'])
 
         if self.args:
             sys.argv.extend(self.args.split())
@@ -293,9 +298,8 @@ class AIRFlow:
             'hammer-vlsi',
             'sim-to-power',
             '--obj_dir', self.OBJ_DIR,
-            '-o', self.OBJ_DIR + '/sim-syn-to-power_input.json',
-            '-e', self.ENV_YML,
-            '-p', self.OBJ_DIR + '/syn-rundir/sim-syn-output.json'
+            '-o', self.OBJ_DIR + 'sim-syn-to-power_input.json',
+            '-e', self.ENV_YML
         ]
         
         for conf in self.PROJ_YMLS:
@@ -304,6 +308,7 @@ class AIRFlow:
             
         sys.argv.extend(['-p', self.POWER_SYN_CONF])
         sys.argv.extend(['-p', self.SIM_SYN_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/sim-syn-rundir/sim-output.json'])
 
         if self.args:
             sys.argv.extend(self.args.split())
@@ -340,6 +345,7 @@ class AIRFlow:
             'hammer-vlsi',
             'power',
             '--obj_dir', self.OBJ_DIR,
+            '--power_rundir', self.OBJ_DIR + '/power-syn-rundir/',
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/syn-to-power_input.json',
             '-p', self.OBJ_DIR + '/sim-syn-to-power_input.json'
@@ -384,6 +390,7 @@ class AIRFlow:
             'hammer-vlsi',
             'formal',
             '--obj_dir', self.OBJ_DIR,
+            '--formal_rundir', self.OBJ_DIR + '/formal-syn-rundir/',
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/syn-to-formal_input.json'
         ]
@@ -425,6 +432,7 @@ class AIRFlow:
             'hammer-vlsi',
             'timing',
             '--obj_dir', self.OBJ_DIR,
+            '--timing_rundir', self.OBJ_DIR + '/timing-syn-rundir/',
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/syn-to-timing_input.json'
         ]
@@ -489,7 +497,7 @@ class AIRFlow:
             'hammer-vlsi',
             'par-sim',
             '--obj_dir', self.OBJ_DIR, #bwrc env yml
-            '-o', self.OBJ_DIR + '/par-rundir/sim-par-output.json',
+            '--sim_rundir', self.OBJ_DIR + '/sim-par-rundir/',
             '-e', self.ENV_YML
         ]
         
@@ -558,6 +566,7 @@ class AIRFlow:
             'hammer-vlsi',
             'power',
             '--obj_dir', self.OBJ_DIR,
+            '--power_rundir', self.OBJ_DIR + '/power-par-rundir/',
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/par-to-power_input.json',
             '-p', self.OBJ_DIR + '/sim-par-to-power_input.json'
@@ -602,6 +611,7 @@ class AIRFlow:
             'hammer-vlsi',
             'formal',
             '--obj_dir', self.OBJ_DIR,
+            '--formal_rundir', self.OBJ_DIR + '/sim-rtl-rundir/',
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/par-to-formal_input.json'
         ]
@@ -643,6 +653,7 @@ class AIRFlow:
             'hammer-vlsi',
             'timing',
             '--obj_dir', self.OBJ_DIR,
+            '--timing_rundir', self.OBJ_DIR + '/timing-par-rundir/',
             '-e', self.ENV_YML,
             '-p', self.OBJ_DIR + '/par-to-timing_input.json'
         ]
@@ -740,9 +751,11 @@ class AIRFlow:
         return CLIDriver().main()
 
     def clean(self):
-        print("Executing clean")
+        print(f"Executing clean. OBJ_DIR={self.OBJ_DIR}")
         if os.path.exists(self.OBJ_DIR):
             subprocess.run(f"rm -rf {self.OBJ_DIR} hammer-vlsi-*.log", shell=True, check=True)
+        else:
+            print(f"OBJ_DIR path does not exist. No action taken")
 
 
 
@@ -885,8 +898,7 @@ def create_hammer_dag_gcd():
         """Clean the build directory"""
         print("Starting clean task")
         flow = AIRFlow()
-        if os.path.exists(flow.OBJ_DIR):
-            subprocess.run(f"rm -rf {flow.OBJ_DIR} hammer-vlsi-*.log", shell=True, check=True)
+        flow.clean()
     
     @task
     def build(**context):
