@@ -24,6 +24,7 @@ from .hammer_vlsi_impl import HammerTool, HammerVLSISettings
 from .hooks import HammerToolHookAction, HammerStartStopStep
 from .driver import HammerDriver, HammerDriverOptions
 from .hammer_build_systems import BuildSystems
+from . import rtl_check
 
 from functools import reduce
 from textwrap import dedent
@@ -572,6 +573,22 @@ class CLIDriver:
             assert driver.tech is not None, "must have a technology"
             with open(KEY_PATH, 'r') as f:
                 key_history = json.load(f)
+
+            # Ignore comments/whitespace in RTL
+            # Store the computed fingerprint into the master database so stage_change_check
+            # can treat RTL changes as dependency changes.
+            try:
+                if driver.database.has_setting("synthesis.inputs.input_files"):
+                    rtl_inputs = list(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
+                    overall_sha256, _digests = rtl_check.digest_files(rtl_inputs)
+                    driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
+            except FileNotFoundError as e:
+                driver.log.error(f"RTL fingerprint input file missing: {e.filename}")
+                return None
+            except Exception as e:
+                driver.log.error(f"Failed to compute RTL fingerprint: {e}")
+                return None
+
             if action_type == "synthesis" or action_type == "syn":
                 if driver.database.stage_change_check(stage = "syn"):
                     if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
