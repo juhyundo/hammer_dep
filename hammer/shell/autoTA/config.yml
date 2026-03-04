@@ -2,7 +2,7 @@
 # AutoTA Configuration
 # ==========================================
 autota:
-  api_key: "YOUR_API_KEY_HERE"
+  # API key is managed via env var. Run: gemini.py --set-key YOUR_KEY && source ~/.bashrc
   # No need to specify log directory. It assumes "build/syn-rundir" by default.
   # It also assumes the most recent run by default. Use an earlier run by
   # specifying in command line (as shown in README.md)

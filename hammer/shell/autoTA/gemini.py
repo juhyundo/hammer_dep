@@ -15,6 +15,10 @@ SCRIPT_NAME = os.path.basename(__file__)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def get_bashrc_path() -> str:
+    return os.path.expanduser("~/.bashrc")
+
+
 def print_help() -> None:
     print("\n" + "=" * 60)
     print("AutoTA+ — AI-Powered VLSI Log Analyzer (Sledgehammer)")
@@ -25,19 +29,80 @@ def print_help() -> None:
     print("   --phase syn       Synthesis logs (Genus)        [default]")
     print("   --phase sim_rtl   RTL simulation logs")
     print("   --phase par       Place-and-route logs (Innovus)")
+    print("\nAPI KEY MANAGEMENT:")
+    print("   --set-key KEY     Save Gemini API key to ~/.bashrc")
+    print("   --show-key        Display current API key status")
     print("\nEXAMPLES:")
+    print(f"   {SCRIPT_NAME} --set-key AIzaSyA...      # First-time setup")
+    print("   source ~/.bashrc                         # Apply the key")
     print(f"   {SCRIPT_NAME} --phase syn               # Analyze latest syn log")
     print(f"   {SCRIPT_NAME} --phase par               # Analyze latest PAR log")
     print(f"   {SCRIPT_NAME} --phase syn genus.log2    # Analyze specific log")
-    print("\nCONFIGURATION:")
-    print("   API key and AI settings are in autoTA/config.yml")
     print("=" * 60 + "\n")
 
 
+def set_api_key(api_key: str) -> None:
+    bashrc_path = get_bashrc_path()
+    if os.path.exists(bashrc_path):
+        with open(bashrc_path, "r") as f:
+            lines = f.readlines()
+    else:
+        lines = []
+
+    filtered = [l for l in lines
+                if "AUTOTA_API_KEY" not in l and l.strip() != "# AutoTA+ Gemini API Key"]
+    filtered.append("\n# AutoTA+ Gemini API Key\n")
+    filtered.append(f'export AUTOTA_API_KEY="{api_key}"\n')
+
+    with open(bashrc_path, "w") as f:
+        f.writelines(filtered)
+
+    print("\n" + "=" * 60)
+    print("✅ API key saved to ~/.bashrc")
+    print("=" * 60)
+    print("\nNEXT STEP: source ~/.bashrc")
+    print("=" * 60 + "\n")
+
+
+def show_api_key() -> None:
+    api_key = os.environ.get("AUTOTA_API_KEY")
+    print("\n" + "=" * 60)
+    if api_key:
+        masked = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key[:4] + "..."
+        print(f"✅ API Key: CONFIGURED  ({masked})")
+    else:
+        print("❌ API Key: NOT SET")
+        print(f"\nRun: {SCRIPT_NAME} --set-key YOUR_KEY && source ~/.bashrc")
+    print("=" * 60 + "\n")
+
+
+def get_api_key() -> str:
+    api_key = os.environ.get("AUTOTA_API_KEY")
+    if api_key:
+        return api_key
+    print("\n" + "=" * 60)
+    print("❌ No API key configured.")
+    print(f"\nRun: {SCRIPT_NAME} --set-key YOUR_KEY && source ~/.bashrc")
+    print("Get a key from: https://aistudio.google.com/apikey")
+    print("=" * 60 + "\n")
+    sys.exit(1)
+
+
 def _handle_early_commands() -> None:
-    """Handle --help BEFORE conda bootstrap."""
-    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+    """Handle --help/--set-key/--show-key BEFORE conda bootstrap."""
+    argv = sys.argv[1:]
+    if "--help" in argv or "-h" in argv:
         print_help()
+        sys.exit(0)
+    if "--show-key" in argv:
+        show_api_key()
+        sys.exit(0)
+    if "--set-key" in argv:
+        idx = argv.index("--set-key")
+        if idx + 1 >= len(argv):
+            print(f"Usage: {SCRIPT_NAME} --set-key YOUR_API_KEY")
+            sys.exit(1)
+        set_api_key(argv[idx + 1])
         sys.exit(0)
 
 
@@ -177,11 +242,11 @@ def load_lab_config():
 autota_config = load_autota_config()
 lab_config = load_lab_config()
 
+api_key = get_api_key()
 try:
-    client = genai.Client(api_key=autota_config["api_key"])
+    client = genai.Client(api_key=api_key)
 except Exception as e:
     print(f" Error initializing Gemini Client: {e}")
-    print(" Check api_key in autoTA/config.yml")
     client = None
 
 DEFAULT_LOG_DIR = CURRENT_PHASE["log_dir"]
