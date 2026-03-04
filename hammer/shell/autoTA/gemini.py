@@ -72,7 +72,26 @@ except ImportError:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CURRENT_LAB_DIR = os.getcwd()
-SYNTH_ISSUES_FILE = os.path.join(CURRENT_LAB_DIR, "synthesis_issues.log")
+
+# ==========================================
+# PHASE ARGUMENT
+# ==========================================
+import argparse
+_parser = argparse.ArgumentParser(description="AutoTA AI log analyzer")
+_parser.add_argument("--phase", default="syn", choices=["syn", "sim_rtl", "par"],
+                     help="VLSI phase to analyze (default: syn)")
+_parser.add_argument("logfile", nargs="?", default=None, help="Specific log file to analyze")
+_args, _remaining = _parser.parse_known_args()
+PHASE = _args.phase
+
+# Phase-dependent settings
+PHASE_CONFIG = {
+    "syn":     {"log_dir": "syn-rundir",     "log_glob": "genus.log*",   "config_name": "syn.yml",     "issues_file": "synthesis_issues.log", "prompt_key": "prompt"},
+    "sim_rtl": {"log_dir": "sim-rundir",     "log_glob": "*.log",        "config_name": "sim-rtl.yml", "issues_file": "sim_issues.log",       "prompt_key": "sim_rtl_prompt"},
+    "par":     {"log_dir": "par-rundir",     "log_glob": "innovus.log*", "config_name": "par.yml",     "issues_file": "par_issues.log",       "prompt_key": "par_prompt"},
+}
+CURRENT_PHASE = PHASE_CONFIG[PHASE]
+ISSUES_FILE = os.path.join(CURRENT_LAB_DIR, CURRENT_PHASE["issues_file"])
 
 # 1. Load AutoTA Config (Global settings in autoTA/config.yml)
 def load_autota_config():
@@ -91,29 +110,29 @@ def load_autota_config():
         print(f" Error reading config.yml: {e}")
         sys.exit(1)
 
-# 2. Load Lab Design Config (Flexible Search for syn.yml)
+# 2. Load Lab Design Config (phase-aware: looks for syn.yml, sim-rtl.yml, or par.yml)
 def load_lab_config():
     global ACTUAL_CONFIG_PATH
+    config_name = CURRENT_PHASE["config_name"]
     abs_lab_dir = os.path.abspath(CURRENT_LAB_DIR)
     dir_parts = abs_lab_dir.split(os.sep)
     
-    # Base fallback searches strictly for syn.yml
+    # Base fallback searches
     search_options = [
-        "syn.yml", 
-        "../syn.yml", 
-        "../../syn.yml"
+        config_name, 
+        f"../{config_name}", 
+        f"../../{config_name}"
     ]
 
-    # Dynamically inject Hammer E2E paths to find e2e/configs-design/<design>/syn.yml
-    # It grabs the names of the current folder and its parents to guess the design name (e.g., 'gcd')
+    # Dynamically inject Hammer E2E paths
     if len(dir_parts) >= 2:
         for i in range(-1, -4, -1):
             design_guess = dir_parts[i]
             search_options.extend([
-                f"../../configs-design/{design_guess}/syn.yml",
-                f"../../../configs-design/{design_guess}/syn.yml",
-                f"../../../../configs-design/{design_guess}/syn.yml",
-                f"../../../../../configs-design/{design_guess}/syn.yml"
+                f"../../configs-design/{design_guess}/{config_name}",
+                f"../../../configs-design/{design_guess}/{config_name}",
+                f"../../../../configs-design/{design_guess}/{config_name}",
+                f"../../../../../configs-design/{design_guess}/{config_name}"
             ])
             
     for opt in search_options:
@@ -128,9 +147,7 @@ def load_lab_config():
                 print(f" Error reading {config_path}: {e}")
                 sys.exit(1)
                 
-    print(f" Error: Could not find syn.yml relative to {CURRENT_LAB_DIR}")
-    # Do not exit here to avoid breaking the tool if syn.yml is not found.
-    # We can still provide some level of analysis on the log itself.
+    print(f" Error: Could not find {config_name} relative to {CURRENT_LAB_DIR}")
     print(" Proceeding without a design config file.")
     return {}
 
@@ -145,7 +162,7 @@ except Exception as e:
     print(" Proceeding but AI analysis will fail.")
     client = None
 
-DEFAULT_LOG_DIR = "syn-rundir"
+DEFAULT_LOG_DIR = CURRENT_PHASE["log_dir"]
 ACTUAL_CONFIG_PATH = "" # Store this globally so the log saver knows which one we used
 
 # Removed duplicate load_lab_config
@@ -158,25 +175,26 @@ def get_target_log_file():
     log_dir_relative = autota_config.get("synth_log_dir", DEFAULT_LOG_DIR)
     log_dir = os.path.join(CURRENT_LAB_DIR, log_dir_relative)
     
-    if len(sys.argv) > 1:
-        requested_file = sys.argv[1]
-        full_path = os.path.join(log_dir, requested_file)
+    # If a specific logfile was passed via --phase arg parsing
+    if _args.logfile:
+        full_path = os.path.join(log_dir, _args.logfile)
         if os.path.exists(full_path):
             return full_path
         else:
-            print(f" Error: File '{requested_file}' not found in {log_dir_relative}")
+            print(f" Error: File '{_args.logfile}' not found in {log_dir_relative}")
             sys.exit(1)
 
     if not os.path.exists(log_dir):
         print(f" Error: Log directory not found at: {log_dir_relative}")
         sys.exit(1)
 
-    # Automatically grab the latest genus.log*
-    search_pattern = os.path.join(log_dir, "genus.log*") 
+    # Grab the latest log matching phase-specific glob
+    log_glob = CURRENT_PHASE["log_glob"]
+    search_pattern = os.path.join(log_dir, log_glob) 
     files = glob.glob(search_pattern)
 
     if not files:
-        print(f" Error: No 'genus.log*' files found in {log_dir_relative}")
+        print(f" Error: No '{log_glob}' files found in {log_dir_relative}")
         sys.exit(1)
         
     latest_file = max(files, key=os.path.getmtime)
@@ -185,7 +203,7 @@ def get_target_log_file():
 
 target_log_path = get_target_log_file()
 EXTRACT_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "extract.py")
-EXTRACT_CMD = ["python3", EXTRACT_SCRIPT_PATH, target_log_path]
+EXTRACT_CMD = ["python3", EXTRACT_SCRIPT_PATH, "--phase", PHASE, target_log_path]
 
 def get_timing_report_content():
     log_dir_relative = autota_config.get("synth_log_dir", DEFAULT_LOG_DIR)
@@ -239,7 +257,8 @@ def get_file_content_smart(filename):
 def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
     settings = autota_config.get("ai_settings", {})
     model_name = settings.get("model", "gemini-3-flash-preview")
-    prompt_text = settings.get("prompt", "Analyze these issues.")
+    prompt_key = CURRENT_PHASE["prompt_key"]
+    prompt_text = settings.get(prompt_key, settings.get("prompt", "Analyze these issues."))
 
     # Safely read the config file we actually found earlier
     try:
@@ -305,14 +324,14 @@ def save_persistent_log(analysis, target_log_path, config_path, synthesis_issues
 # ==========================================
 
 def main():
-    print(f" Running AutoTA for: {os.path.basename(CURRENT_LAB_DIR)}")
+    print(f" Running AutoTA for: {os.path.basename(CURRENT_LAB_DIR)} (phase: {PHASE})")
     run_shell_command(EXTRACT_CMD)
 
-    if not os.path.exists(SYNTH_ISSUES_FILE):
-        print(" Error: synthesis_issues.log was not created.")
+    if not os.path.exists(ISSUES_FILE):
+        print(f" Error: {CURRENT_PHASE['issues_file']} was not created.")
         sys.exit(1)
 
-    with open(SYNTH_ISSUES_FILE, "r") as f:
+    with open(ISSUES_FILE, "r") as f:
         synthesis_issues = f.read().strip()
 
     if not synthesis_issues:
