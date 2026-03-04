@@ -1,6 +1,6 @@
 # Commercial tool licenses/paths
 mentor.mentor_home: "/ecad/tools/mentor"
-mentor.MGLS_LICENSE_FILE: "1717@bwrcflex-1.eecs.berkeley.edu:1717@bwrcflex-2.eecs.berkeley.edu"
+mentor.MGLS_LICENSE_FILE: "MGLS_LICENSE_FILE=1717@bwrcflex-1.eecs.berkeley.edu:1717@bwrcflex-2.eecs.berkeley.edu:1717@license-srv.eecs.berkeley.edu"
 mentor.extra_env_vars: [{"LM_PROJECT": "bwrc_users", "USE_CALIBRE_VCO", "aoi"}]
 
 cadence.cadence_home: "/ecad/tools/cadence"
@@ -9,8 +9,7 @@ cadence.extra_env_vars: [{"LM_PROJECT": "bwrc_users"}]
 
 synopsys.synopsys_home: "/ecad/tools/synopsys"
 synopsys.SNPSLMD_LICENSE_FILE: "1709@flex-lic.millennium.berkeley.edu:1701@bwrcflex-1.eecs.berkeley.edu:1701@bwrcflex-2.eecs.berkeley.edu"
-synopsys.MGLS_LICENSE_FILE: "1717@bwrcflex-1.eecs.berkeley.edu:1717@bwrcflex-2.eecs.berkeley.edu"
-
+synopsys.MGLS_LICENSE_FILE: "MGLS_LICENSE_FILE=1717@bwrcflex-1.eecs.berkeley.edu:1717@bwrcflex-2.eecs.berkeley.edu:1717@license-srv.eecs.berkeley.edu"
 # Commercial tool versions
 synthesis.genus.version: "211"
 par.innovus.version: "211"
