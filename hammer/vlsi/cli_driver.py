@@ -24,7 +24,7 @@ from .hammer_vlsi_impl import HammerTool, HammerVLSISettings
 from .hooks import HammerToolHookAction, HammerStartStopStep
 from .driver import HammerDriver, HammerDriverOptions
 from .hammer_build_systems import BuildSystems
-from . import rtl_check
+from . import rtl_check, hook_check
 
 from functools import reduce
 from textwrap import dedent
@@ -588,6 +588,30 @@ class CLIDriver:
             except Exception as e:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")
                 return None
+
+            # Hook fingerprint — detect changes to tech/user/tool hooks per stage.
+            # Stored as {stage_tag}.hooks_fingerprint_sha256 so stage_change_check
+            # picks it up automatically (key starts with the stage's tag prefix).
+            _STAGE_HOOK_META = {
+                "synthesis": ("synthesis", "get_tech_syn_hooks", "vlsi.core.synthesis_tool"),
+                "par":       ("par",       "get_tech_par_hooks", "vlsi.core.par_tool"),
+                "drc":       ("drc",       "get_tech_drc_hooks", "vlsi.core.drc_tool"),
+                "lvs":       ("lvs",       "get_tech_lvs_hooks", "vlsi.core.lvs_tool"),
+            }
+            if action_type in _STAGE_HOOK_META:
+                stage_tag, tech_method, tool_cfg_key = _STAGE_HOOK_META[action_type]
+                try:
+                    tool_name = driver.database.get_setting(tool_cfg_key, nullvalue="")
+                    tech_hooks = getattr(driver.tech, tech_method)(tool_name)
+                    hook_fp = hook_check.fingerprint_stage_hooks(
+                        tech_hooks=tech_hooks,
+                        user_hooks=list(extra_hooks or []),
+                        tool_name=tool_name,
+                        stage=stage_tag,
+                    )
+                    driver.database.set_setting(f"{stage_tag}.hooks_fingerprint_sha256", hook_fp)
+                except Exception as e:
+                    driver.log.warning(f"Failed to compute hook fingerprint for {stage_tag}: {e}")
 
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
