@@ -342,11 +342,11 @@ def create_hammer_dag_gcd():
     #@task.branch(trigger_rule=TriggerRule.ONE_SUCCESS)
     @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
     def sim_or_syn_decide(**context):
-        """Decide whether to run sim_rtl or syn"""
+        """Decide which downstream tasks to run — can select multiple"""
         if context['dag_run'].conf.get('sim_rtl', False):
             return 'sim_rtl'
         elif (context['dag_run'].conf.get('syn', False) or 
-            context['dag_run'].conf.get('par', False)):
+             context['dag_run'].conf.get('par', False)):
             return 'syn_decider'
         return 'exit_'
 
@@ -427,7 +427,7 @@ def create_hammer_dag_gcd():
             flow = AIRFlow()
             current_script_dir = os.path.dirname(os.path.abspath(__file__))
             gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
-            command = ["python3", gemini_path]
+            command = ["python3", gemini_path, "--phase", "syn"]
             print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
 
             result = subprocess.run(command, cwd=flow.OBJ_DIR, check=True, capture_output=True, text=True)
@@ -443,6 +443,58 @@ def create_hammer_dag_gcd():
             print("Synthesis parameter is False, skipping")
             raise AirflowSkipException("Synthesis task skipped")
 
+    @task(trigger_rule=TriggerRule.ALL_DONE)  # Always runs after sim_rtl (pass or fail)
+    def sim_rtl_debug(**context):
+        """Run autoTA on sim-rtl logs — always runs to proactively flag syn/par risks"""
+        print("Starting sim_rtl debug")
+        if context['dag_run'].conf.get('sim_rtl', False):
+            flow = AIRFlow()
+            current_script_dir = os.path.dirname(os.path.abspath(__file__))
+            gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
+            command = ["python3", gemini_path, "--phase", "sim_rtl"]
+            print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
+
+            result = subprocess.run(command, cwd=flow.OBJ_DIR, check=True, capture_output=True, text=True)
+
+            print("Terminal Output:")
+            print(result.stdout)
+
+            if result.stderr:
+                print("Terminal Errors:")
+                print(result.stderr)
+        else:
+            print("sim_rtl parameter is False, skipping")
+            raise AirflowSkipException("sim_rtl task skipped")
+
+    @task(trigger_rule=TriggerRule.ALL_DONE)  # Runs after par completes, but only analyzes on failure
+    def par_debug(**context):
+        """Run autoTA on PAR logs — only performs analysis when par fails"""
+        print("Starting par debug")
+        if not context['dag_run'].conf.get('par', False):
+            print("PAR parameter is False, skipping")
+            raise AirflowSkipException("par task skipped")
+
+        # Check if par actually failed
+        par_ti = context['dag_run'].get_task_instance('par')
+        if par_ti and par_ti.state == 'success':
+            print("PAR passed — skipping debug analysis")
+            raise AirflowSkipException("PAR succeeded, no debug needed")
+
+        flow = AIRFlow()
+        current_script_dir = os.path.dirname(os.path.abspath(__file__))
+        gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
+        command = ["python3", gemini_path, "--phase", "par"]
+        print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
+
+        result = subprocess.run(command, cwd=flow.OBJ_DIR, check=True, capture_output=True, text=True)
+
+        print("Terminal Output:")
+        print(result.stdout)
+
+        if result.stderr:
+            print("Terminal Errors:")
+            print(result.stderr)
+
     @task(trigger_rule=TriggerRule.NONE_FAILED)
     def exit_():
         """Exit task"""
@@ -456,11 +508,13 @@ def create_hammer_dag_gcd():
     build = build()
     sim_or_syn_decide = sim_or_syn_decide()
     sim_rtl = sim_rtl()
+    sim_rtl_debug = sim_rtl_debug()
     syn_decide = syn_decider()
     syn = syn()
     syn_debug = syn_debug()
     par_decide = par_decider()
     par = par()
+    par_debug = par_debug()
     exit_ = exit_()
 
     # Set up dependencies to ensure deciders always run
@@ -469,11 +523,11 @@ def create_hammer_dag_gcd():
     build_decide >> [build, sim_or_syn_decide, exit_]
     build >> sim_or_syn_decide
     sim_or_syn_decide >> [sim_rtl, syn_decide, exit_]
-    # sim_rtl >> exit_
+    sim_rtl >> sim_rtl_debug >> exit_ # debug is a follow-up leaf to sim_rtl
     syn_decide >> [syn, par_decide, exit_]
     syn >> syn_debug >> par_decide
     par_decide >> [par, exit_]
-    par >> exit_
+    par >> par_debug >> exit_  # debug inserted between par and exit_
 
     return {
         'clean': clean,
@@ -481,11 +535,13 @@ def create_hammer_dag_gcd():
         'build': build,
         'sim_or_syn_decide': sim_or_syn_decide,
         'sim_rtl': sim_rtl,
+        'sim_rtl_debug': sim_rtl_debug,
         'syn_decide': syn_decide,
         'syn': syn,
         'syn_debug': syn_debug,
         'par_decide': par_decide,
-        'par': par
+        'par': par,
+        'par_debug': par_debug
     }
 
 # Create the DAG
