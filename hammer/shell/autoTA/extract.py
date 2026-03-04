@@ -1,20 +1,36 @@
 import re
 import sys
+import argparse
 from collections import defaultdict
 
-# Check if file path is provided as command-line argument
-if len(sys.argv) < 2:
-  print("Usage: python extract.py <log_file_path> [output_file_path]")
-  print("Example: python extract.py synth.log")
-  print("Example: python extract.py synth.log custom_output.log")
+# Parse arguments
+parser = argparse.ArgumentParser(description="Extract issues from VLSI tool logs")
+parser.add_argument("log_file", nargs="?", help="Path to the log file to analyze")
+parser.add_argument("-o", "--output", default=None, help="Output file path")
+parser.add_argument("--phase", default="syn", choices=["syn", "sim_rtl", "par"],
+                    help="VLSI phase to extract issues for (default: syn)")
+args = parser.parse_args()
+
+if not args.log_file:
+  parser.print_help()
   sys.exit(1)
 
-# File paths
-file_path = sys.argv[1]
-output_file_path = sys.argv[2] if len(sys.argv) > 2 else 'synthesis_issues.log'
+file_path = args.log_file
 
-# Define issue categories with associated keywords and severity levels
-categories_info = {
+# Default output file name depends on phase
+DEFAULT_OUTPUT = {
+    "syn": "synthesis_issues.log",
+    "sim_rtl": "sim_issues.log",
+    "par": "par_issues.log",
+}
+output_file_path = args.output if args.output else DEFAULT_OUTPUT[args.phase]
+
+# ==========================================
+# Phase-specific issue keyword categories
+# ==========================================
+
+# --- Synthesis (Genus) ---
+syn_categories_info = {
  "Undeclared Signals": (["implicitly declared"], "Major"),
  "Missing Drivers": (["has no driver"], "Critical"),
  "Latch Issues": (["Latch inferred"], "Major"),
@@ -25,9 +41,42 @@ categories_info = {
  "Errors": (["Error", "ERROR", "error"], "Critical"),
  "Warnings": (["Warning", "WARNING", "warning"], "Major"),
  "Resource Utilization": (["Creating decoders for process"], "Minor"),
- "Hierarchy/Blackbox": (["black box", "module not found", "unresolved"], "Critical"), #New
- "Sensitivity List": (["incomplete sensitivity", "missing from sensitivity"], "Major"), #New
+ "Hierarchy/Blackbox": (["black box", "module not found", "unresolved"], "Critical"),
+ "Sensitivity List": (["incomplete sensitivity", "missing from sensitivity"], "Major"),
 }
+
+# --- RTL Simulation (VCS / Xcelium) ---
+sim_categories_info = {
+ "Test Failure": (["FAIL", "FAILED", "TEST FAILED", "MISMATCH"], "Critical"),
+ "Assertion Failure": (["assertion", "SVA", "assert failed"], "Critical"),
+ "Timeout": (["timeout", "TIMEOUT", "timed out"], "Critical"),
+ "X-Propagation": (["x-prop", "X-propagation", "unknown value"], "Major"),
+ "Undefined Signal": (["undefined", "uninitialized", "x value"], "Major"),
+ "Simulation Errors": (["Error", "ERROR", "error"], "Critical"),
+ "Simulation Warnings": (["Warning", "WARNING", "warning"], "Major"),
+ "Deprecated Constructs": (["deprecated", "not recommended"], "Minor"),
+}
+
+# --- Place and Route (Innovus) ---
+par_categories_info = {
+ "DRC Violations": (["DRC", "design rule", "spacing violation"], "Critical"),
+ "Congestion": (["congestion", "overflow", "routing overflow"], "Major"),
+ "Hold Violations": (["hold violation", "hold slack"], "Critical"),
+ "Setup Violations": (["setup violation", "setup slack", "negative slack"], "Critical"),
+ "Antenna Violations": (["antenna", "antenna violation"], "Major"),
+ "Short Circuits": (["short", "short circuit"], "Critical"),
+ "Placement Errors": (["placement", "cannot place", "overlap"], "Critical"),
+ "PAR Errors": (["Error", "ERROR", "error"], "Critical"),
+ "PAR Warnings": (["Warning", "WARNING", "warning"], "Major"),
+}
+
+# Select active categories based on phase
+PHASE_CATEGORIES = {
+    "syn": syn_categories_info,
+    "sim_rtl": sim_categories_info,
+    "par": par_categories_info,
+}
+categories_info = PHASE_CATEGORIES[args.phase]
 
 # Data structure for storing categorized issues
 found_issues = defaultdict(lambda: {"logs": set(), "severity": None})
