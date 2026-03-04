@@ -1,52 +1,81 @@
+#!/usr/bin/env python3
 import sys
 import os
 import subprocess
-from datetime import datetime
-import sys
-import os
-import subprocess
+import re
+import gzip
+import json
+import time
 from datetime import datetime
 
 # ==========================================
-# AUTO-SETUP BLOCK (Start)
+# SCRIPT NAME & EARLY COMMANDS
 # ==========================================
-# If imports fail, this block restarts the script inside the correct Conda env.
-
-# Get the directory where this script is located (e.g., .../autoTA)
+SCRIPT_NAME = os.path.basename(__file__)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def print_help() -> None:
+    print("\n" + "=" * 60)
+    print("AutoTA+ — AI-Powered VLSI Log Analyzer (Sledgehammer)")
+    print("=" * 60)
+    print("\nUSAGE:")
+    print(f"   {SCRIPT_NAME} [--phase PHASE] [logfile]")
+    print("\nPHASES:")
+    print("   --phase syn       Synthesis logs (Genus)        [default]")
+    print("   --phase sim_rtl   RTL simulation logs")
+    print("   --phase par       Place-and-route logs (Innovus)")
+    print("\nEXAMPLES:")
+    print(f"   {SCRIPT_NAME} --phase syn               # Analyze latest syn log")
+    print(f"   {SCRIPT_NAME} --phase par               # Analyze latest PAR log")
+    print(f"   {SCRIPT_NAME} --phase syn genus.log2    # Analyze specific log")
+    print("\nCONFIGURATION:")
+    print("   API key and AI settings are in autoTA/config.yml")
+    print("=" * 60 + "\n")
+
+
+def _handle_early_commands() -> None:
+    """Handle --help BEFORE conda bootstrap."""
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print_help()
+        sys.exit(0)
+
+
+_handle_early_commands()
+
+# ==========================================
+# AUTO-SETUP BLOCK (Conda bootstrap)
+# ==========================================
+
+def _pick_conda_executable() -> str:
+    conda_exe = os.environ.get("AUTOTA_CONDA")
+    if conda_exe and os.path.isfile(conda_exe) and os.access(conda_exe, os.X_OK):
+        return conda_exe
+    bundled = os.path.join(SCRIPT_DIR, "conda", "bin", "conda")
+    if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+        return bundled
+    return "conda"
+
+
 try:
-    # Attempt to import critical libraries
     from google import genai
     import yaml
     import glob
 except ImportError:
-    # 2. RECURSION GUARD: Prevent infinite loops if the environment is broken
-    if os.environ.get("GEMINI_AUTO_SETUP") == "1":
-        print(" Error: Auto-setup loop detected. The Conda environment failed to load dependencies.")
+    if os.environ.get("AUTOTA_REEXEC") == "1":
+        print("Error: Auto-setup loop detected. Conda environment failed to load dependencies.")
         sys.exit(1)
 
-    # If imports fail, we assume the environment is not set up.
-    print("----------------------------------------------------------")
-    print(" Conda Environment not detected -- setting up Conda automatically.")
-    print("----------------------------------------------------------")
-
-    # Get the absolute path of this script and any arguments passed to it
     script_abs_path = os.path.abspath(__file__)
     script_args = " ".join(sys.argv[1:])
+    conda_exe = _pick_conda_executable()
 
-    # 1. FIXED PATH: Point directly to the conda folder inside autoTA
-    conda_dir = os.path.join(SCRIPT_DIR, "conda")
-
-    # 3. CLEANED UP CODE: Construct the Bash command with the recursion flag
     cmd = (
-        f"export GEMINI_AUTO_SETUP=1; "
-        f"eval \"$({conda_dir}/bin/conda shell.bash hook)\"; "
+        f"export AUTOTA_REEXEC=1; "
+        f"eval \"$({conda_exe} shell.bash hook)\"; "
         "conda activate; "
         f"python3 \"{script_abs_path}\" {script_args}"
     )
-
-    # Replace the current process with the new one
     try:
         os.execv("/bin/bash", ["bash", "-c", cmd])
     except Exception as e:
@@ -54,10 +83,9 @@ except ImportError:
         sys.exit(1)
 
 # ==========================================
-# AUTO-SETUP BLOCK (End)
+# POST-BOOTSTRAP IMPORTS
 # ==========================================
 
-# Standard imports
 try:
     from rich.console import Console
     from rich.markdown import Markdown
@@ -67,33 +95,33 @@ except ImportError:
     RICH_AVAILABLE = False
 
 # ==========================================
-# CONFIGURATION LOADING
+# CONFIGURATION & GLOBALS
 # ==========================================
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CURRENT_LAB_DIR = os.getcwd()
+ACTUAL_CONFIG_PATH = ""
 
-# ==========================================
-# PHASE ARGUMENT
-# ==========================================
 import argparse
-_parser = argparse.ArgumentParser(description="AutoTA AI log analyzer")
+_parser = argparse.ArgumentParser(description="AutoTA+ AI log analyzer", add_help=False)
 _parser.add_argument("--phase", default="syn", choices=["syn", "sim_rtl", "par"],
                      help="VLSI phase to analyze (default: syn)")
 _parser.add_argument("logfile", nargs="?", default=None, help="Specific log file to analyze")
 _args, _remaining = _parser.parse_known_args()
 PHASE = _args.phase
 
-# Phase-dependent settings
 PHASE_CONFIG = {
-    "syn":     {"log_dir": "syn-rundir",     "log_glob": "genus.log*",   "config_name": "syn.yml",     "issues_file": "synthesis_issues.log", "prompt_key": "prompt"},
-    "sim_rtl": {"log_dir": "sim-rundir",     "log_glob": "*.log",        "config_name": "sim-rtl.yml", "issues_file": "sim_issues.log",       "prompt_key": "sim_rtl_prompt"},
-    "par":     {"log_dir": "par-rundir",     "log_glob": "innovus.log*", "config_name": "par.yml",     "issues_file": "par_issues.log",       "prompt_key": "par_prompt"},
+    "syn":     {"log_dir": "syn-rundir",  "log_glob": "genus.log*",   "config_name": "syn.yml",     "issues_file": "synthesis_issues.log", "prompt_key": "prompt"},
+    "sim_rtl": {"log_dir": "sim-rundir",  "log_glob": "*.log",        "config_name": "sim-rtl.yml", "issues_file": "sim_issues.log",       "prompt_key": "sim_rtl_prompt"},
+    "par":     {"log_dir": "par-rundir",  "log_glob": "innovus.log*", "config_name": "par.yml",     "issues_file": "par_issues.log",       "prompt_key": "par_prompt"},
 }
 CURRENT_PHASE = PHASE_CONFIG[PHASE]
 ISSUES_FILE = os.path.join(CURRENT_LAB_DIR, CURRENT_PHASE["issues_file"])
 
-# 1. Load AutoTA Config (Global settings in autoTA/config.yml)
+# ==========================================
+# CONFIG LOADING
+# ==========================================
+
+
 def load_autota_config():
     config_path = os.path.join(SCRIPT_DIR, "config.yml")
     try:
@@ -110,21 +138,14 @@ def load_autota_config():
         print(f" Error reading config.yml: {e}")
         sys.exit(1)
 
-# 2. Load Lab Design Config (phase-aware: looks for syn.yml, sim-rtl.yml, or par.yml)
+
 def load_lab_config():
     global ACTUAL_CONFIG_PATH
     config_name = CURRENT_PHASE["config_name"]
     abs_lab_dir = os.path.abspath(CURRENT_LAB_DIR)
     dir_parts = abs_lab_dir.split(os.sep)
-    
-    # Base fallback searches
-    search_options = [
-        config_name, 
-        f"../{config_name}", 
-        f"../../{config_name}"
-    ]
 
-    # Dynamically inject Hammer E2E paths
+    search_options = [config_name, f"../{config_name}", f"../../{config_name}"]
     if len(dir_parts) >= 2:
         for i in range(-1, -4, -1):
             design_guess = dir_parts[i]
@@ -134,7 +155,7 @@ def load_lab_config():
                 f"../../../../configs-design/{design_guess}/{config_name}",
                 f"../../../../../configs-design/{design_guess}/{config_name}"
             ])
-            
+
     for opt in search_options:
         config_path = os.path.join(CURRENT_LAB_DIR, opt)
         if os.path.exists(config_path):
@@ -146,12 +167,13 @@ def load_lab_config():
             except Exception as e:
                 print(f" Error reading {config_path}: {e}")
                 sys.exit(1)
-                
+
     print(f" Error: Could not find {config_name} relative to {CURRENT_LAB_DIR}")
     print(" Proceeding without a design config file.")
     return {}
 
-# Load both configurations
+
+# Load configs and initialize client
 autota_config = load_autota_config()
 lab_config = load_lab_config()
 
@@ -159,87 +181,212 @@ try:
     client = genai.Client(api_key=autota_config["api_key"])
 except Exception as e:
     print(f" Error initializing Gemini Client: {e}")
-    print(" Proceeding but AI analysis will fail.")
+    print(" Check api_key in autoTA/config.yml")
     client = None
 
 DEFAULT_LOG_DIR = CURRENT_PHASE["log_dir"]
-ACTUAL_CONFIG_PATH = "" # Store this globally so the log saver knows which one we used
-
-# Removed duplicate load_lab_config
 
 # ==========================================
 # SMART LOG FILE SELECTION
 # ==========================================
 
+
 def get_target_log_file():
     log_dir_relative = autota_config.get("synth_log_dir", DEFAULT_LOG_DIR)
     log_dir = os.path.join(CURRENT_LAB_DIR, log_dir_relative)
-    
-    # If a specific logfile was passed via --phase arg parsing
+
     if _args.logfile:
         full_path = os.path.join(log_dir, _args.logfile)
         if os.path.exists(full_path):
             return full_path
-        else:
-            print(f" Error: File '{_args.logfile}' not found in {log_dir_relative}")
-            sys.exit(1)
+        print(f" Error: File '{_args.logfile}' not found in {log_dir_relative}")
+        sys.exit(1)
 
     if not os.path.exists(log_dir):
         print(f" Error: Log directory not found at: {log_dir_relative}")
         sys.exit(1)
 
-    # Grab the latest log matching phase-specific glob
     log_glob = CURRENT_PHASE["log_glob"]
-    search_pattern = os.path.join(log_dir, log_glob) 
-    files = glob.glob(search_pattern)
-
+    files = glob.glob(os.path.join(log_dir, log_glob))
     if not files:
         print(f" Error: No '{log_glob}' files found in {log_dir_relative}")
         sys.exit(1)
-        
+
     latest_file = max(files, key=os.path.getmtime)
     print(f" Using latest log: {os.path.basename(latest_file)}")
     return latest_file
+
 
 target_log_path = get_target_log_file()
 EXTRACT_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "extract.py")
 EXTRACT_CMD = ["python3", EXTRACT_SCRIPT_PATH, "--phase", PHASE, target_log_path]
 
+# ==========================================
+# TIMING REPORT ANALYSIS
+# ==========================================
+
+
+def _read_text_maybe_gz(path: str) -> str:
+    """Read a text file that may be gzip-compressed."""
+    try:
+        if path.endswith(".gz"):
+            with gzip.open(path, "rt", errors="replace") as f:
+                return f.read()
+        with open(path, "r", errors="replace") as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading timing report {path}: {e}"
+
+
+def _parse_timing_report_text(text: str) -> str:
+    """Extract compact summary: WNS/TNS + top 2 critical paths."""
+    try:
+        lines = text.splitlines(keepends=True)
+        summary = []
+        critical_paths = []
+        current = []
+        in_summary = False
+        in_path = False
+
+        for line in lines:
+            if re.search(r"Timing Summary|WNS|TNS|Slack", line):
+                in_summary = True
+            if in_summary and line.strip() == "":
+                in_summary = False
+            if in_summary:
+                summary.append(line)
+
+            if re.search(r"Startpoint:|Endpoint:|Path Group:|Critical Path", line):
+                if current and len(critical_paths) < 2:
+                    critical_paths.append("".join(current))
+                current = [line]
+                in_path = True
+                continue
+
+            if in_path:
+                current.append(line)
+                if line.strip() == "" or re.match(r"^-{5,}$", line.strip()):
+                    in_path = False
+
+        if current and len(critical_paths) < 2:
+            critical_paths.append("".join(current))
+
+        out = "=== TIMING SUMMARY (key metrics) ===\n"
+        out += "".join(summary[:20]).strip() + "\n"
+        out += "\n=== TOP 2 CRITICAL PATHS ===\n"
+        out += "\n".join(critical_paths[:2]).strip()
+
+        if len(out) > 3000:
+            out = out[:3000] + "\n... [truncated for token efficiency]"
+        return out.strip() if out.strip() else text[:2000]
+    except Exception as e:
+        return f"Error parsing timing report: {e}"
+
+
+def _pick_best_par_timing_reports(timing_dir: str) -> list:
+    """Prefer postRoute setup+hold reports; fallback to postCTS."""
+    def latest(patterns):
+        matches = []
+        for p in patterns:
+            matches.extend(glob.glob(os.path.join(timing_dir, p)))
+        return max(matches, key=os.path.getmtime) if matches else None
+
+    setup = latest(["*postRoute*all.tarpt.gz", "*postRoute*all*.tarpt.gz",
+                     "*postRoute*all.tarpt", "*postRoute*all*.rpt.gz", "*postRoute*all*.rpt"])
+    hold = latest(["*postRoute*all*hold.tarpt.gz", "*postRoute*all*hold*.tarpt.gz",
+                    "*postRoute*all*hold.tarpt", "*postRoute*all*hold*.rpt.gz", "*postRoute*all*hold*.rpt"])
+
+    if setup is None:
+        setup = latest(["*postCTS*all.tarpt.gz", "*postCTS*all*.tarpt.gz",
+                         "*postCTS*all.tarpt", "*postCTS*all*.rpt.gz", "*postCTS*all*.rpt"])
+    if hold is None:
+        hold = latest(["*postCTS*all*hold.tarpt.gz", "*postCTS*all*hold*.tarpt.gz",
+                        "*postCTS*all*hold.tarpt", "*postCTS*all*hold*.rpt.gz", "*postCTS*all*hold*.rpt"])
+
+    out = []
+    if setup:
+        out.append(setup)
+    if hold and hold != setup:
+        out.append(hold)
+    return out[:2]
+
+
 def get_timing_report_content():
+    """Phase-aware timing report extraction."""
+    if PHASE == "sim_rtl":
+        return "No timing report for RTL simulation phase."
+
+    if PHASE == "par":
+        timing_dir = os.path.join(CURRENT_LAB_DIR, "par-rundir", "timingReports")
+        if not os.path.exists(timing_dir):
+            return "No timingReports directory found in par-rundir."
+
+        chosen = _pick_best_par_timing_reports(timing_dir)
+        if not chosen:
+            candidates = glob.glob(os.path.join(timing_dir, "*.tarpt*")) + \
+                         glob.glob(os.path.join(timing_dir, "*.rpt*"))
+            if not candidates:
+                return "No timing reports found in par-rundir/timingReports."
+            chosen = [max(candidates, key=os.path.getmtime)]
+
+        blocks = []
+        for path in chosen:
+            raw = _read_text_maybe_gz(path)
+            blocks.append(f"=== PAR TIMING: {os.path.basename(path)} ===\n{_parse_timing_report_text(raw)}")
+            print(f" Including PAR Timing: {os.path.basename(path)}")
+        return "\n\n".join(blocks)
+
+    # SYN timing reports
     log_dir_relative = autota_config.get("synth_log_dir", DEFAULT_LOG_DIR)
     reports_dir = os.path.join(CURRENT_LAB_DIR, log_dir_relative, "reports")
-    
     if not os.path.exists(reports_dir):
-        return "No reports directory found (Synthesis might have failed early)."
+        return "No reports directory found (synthesis might have failed early)."
 
-    pattern = os.path.join(reports_dir, "*.setup_view.rpt")
-    files = glob.glob(pattern)
-
+    files = glob.glob(os.path.join(reports_dir, "*.setup_view.rpt"))
     if not files:
-        return "No '.setup_view.rpt' timing report found."
-    
+        files = glob.glob(os.path.join(reports_dir, "*timing*.rpt"))
+    if not files:
+        return "No timing report found."
+
     latest_report = max(files, key=os.path.getmtime)
     print(f" Including Timing Report: {os.path.basename(latest_report)}")
-    
     try:
         with open(latest_report, "r") as f:
-            return f.read()
+            raw = f.read()
+        return _parse_timing_report_text(raw)
     except Exception as e:
         return f"Error reading timing report: {e}"
 
+
 # ==========================================
-# FILE RETRIEVAL & AI LOGIC
+# FILE RETRIEVAL & COMMENT STRIPPING
 # ==========================================
+
 
 def get_hdl_source_files():
     synth_inputs = lab_config.get("synthesis.inputs", {}) if lab_config else {}
     if "input_files" in synth_inputs:
         return synth_inputs["input_files"]
-    print(" Warning: Could not find 'input_files' in synthesis.inputs. Proceeding without HDL source files.")
+    print(" Warning: Could not find 'input_files' in synthesis.inputs.")
     return []
 
-def get_file_content_smart(filename):
-    # Flexible search paths for E2E Hammer builds
+
+def _strip_comments(text: str, ext: str) -> str:
+    """Remove comments based on file extension to save tokens."""
+    if ext in ('.v', '.sv', '.vh'):
+        text = re.sub(r'/\*[\s\S]*?\*/', '', text)   # block comments
+        text = re.sub(r'//.*', '', text)               # line comments
+    elif ext in ('.yml', '.yaml', '.sh'):
+        text = re.sub(r'#.*', '', text)
+    elif ext in ('.log', '.rpt', '.out'):
+        text = re.sub(r'(//|#).*', '', text)
+    # Remove blank lines left behind
+    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+    return "\n".join(lines)
+
+
+def get_file_content_smart(filename, max_chars: int = 15000):
+    """Locate file, strip comments, truncate if needed."""
     search_paths = [
         os.path.join(CURRENT_LAB_DIR, filename),
         os.path.join(CURRENT_LAB_DIR, "src", filename),
@@ -247,12 +394,33 @@ def get_file_content_smart(filename):
         os.path.join(CURRENT_LAB_DIR, "..", "..", "..", "src", filename)
     ]
 
+    raw_content = None
     for path in search_paths:
         if os.path.exists(path):
-            with open(path, "r") as f: return f.read()
-            
-    print(f" Warning: Could not find source file: {filename}")
-    return None
+            with open(path, "r") as f:
+                raw_content = f.read()
+            break
+
+    if raw_content is None:
+        print(f" Warning: Could not find source file: {filename}")
+        return None
+
+    ext = os.path.splitext(filename)[1].lower()
+    content = _strip_comments(raw_content, ext)
+
+    # Truncate keeping head + tail if too long
+    if len(content) > max_chars:
+        half = max_chars // 2
+        content = (content[:half] +
+                   "\n\n... [middle section truncated for token efficiency] ...\n\n" +
+                   content[-half:])
+    return content
+
+
+# ==========================================
+# AI ANALYSIS
+# ==========================================
+
 
 def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
     settings = autota_config.get("ai_settings", {})
@@ -260,7 +428,6 @@ def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
     prompt_key = CURRENT_PHASE["prompt_key"]
     prompt_text = settings.get(prompt_key, settings.get("prompt", "Analyze these issues."))
 
-    # Safely read the config file we actually found earlier
     try:
         with open(ACTUAL_CONFIG_PATH, "r") as f:
             config_raw = f.read()
@@ -279,17 +446,93 @@ def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
         "TIMING REPORT:\n"
         f"{timing_report_content}"
     )
-    
+
     try:
         response = client.models.generate_content(model=model_name, contents=full_prompt)
+        usage = getattr(response, "usage_metadata", None)
+        if usage:
+            prompt_tok = getattr(usage, "prompt_token_count", 0)
+            output_tok = getattr(usage, "candidates_token_count", 0)
+            total_tok = getattr(usage, "total_token_count", 0)
+            print(f"\n[TOKEN USAGE]  Input: {prompt_tok:,}  Output: {output_tok:,}  Total: {total_tok:,}")
         return response.text
     except Exception as e:
         return f"API Error: {e}"
 
-def save_persistent_log(analysis, target_log_path, config_path, synthesis_issues, hdl_code, timing_report):
+
+# ==========================================
+# SESSION LOGGING & AUDIT
+# ==========================================
+
+
+def log_session(analysis, target_log_path, config_path, synthesis_issues,
+                hdl_code, timing_report):
+    """Write a tamper-resistant JSON session archive."""
+    log_dir = os.path.join(SCRIPT_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    user = os.environ.get("USER", "unknown")
+
+    # Git metadata
+    try:
+        git_user = subprocess.check_output(
+            ["git", "config", "user.name"], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        git_user = "not_configured"
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True,
+            cwd=CURRENT_LAB_DIR, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        git_hash = "no_commit"
+
+    session_data = {
+        "metadata": {
+            "user": user,
+            "git_user": git_user,
+            "git_commit": git_hash,
+            "working_dir": CURRENT_LAB_DIR,
+            "phase": PHASE.upper(),
+            "log_file": os.path.basename(target_log_path),
+            "config_file": os.path.basename(config_path) if config_path else "",
+            "timestamp": timestamp,
+        },
+        "ai_response": analysis,
+        "logs": {
+            "issues_extracted": synthesis_issues,
+            "timing_report": timing_report,
+        },
+        "source_code": hdl_code,
+    }
+
+    archive_filename = f"autoTA_{user}_{PHASE}_{timestamp}.json"
+    archive_path = os.path.join(log_dir, archive_filename)
+
+    try:
+        fd = os.open(archive_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(session_data, f, indent=2)
+        # Seal: read-only for group, nothing else
+        os.chmod(archive_path, 0o440)
+        print(f" Session sealed: logs/{archive_filename}")
+    except FileExistsError:
+        print(f" Warning: Session log already exists: {archive_filename}")
+    except PermissionError:
+        print(f" Warning: Permission denied writing to {log_dir}")
+    except Exception as e:
+        print(f" Warning: Could not save session log: {e}")
+
+    # Also save the old-style persistent log for backwards compatibility
+    _save_persistent_log(analysis, target_log_path, config_path,
+                         synthesis_issues, hdl_code, timing_report)
+
+
+def _save_persistent_log(analysis, target_log_path, config_path,
+                         synthesis_issues, hdl_code, timing_report):
+    """Legacy text-based log (autota_logs/ in the design dir)."""
     log_dir = os.path.join(CURRENT_LAB_DIR, "autota_logs")
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+    os.makedirs(log_dir, exist_ok=True)
 
     original_log_name = os.path.basename(target_log_path)
     log_filename = os.path.join(log_dir, f"autoTA_{original_log_name}")
@@ -297,34 +540,45 @@ def save_persistent_log(analysis, target_log_path, config_path, synthesis_issues
     try:
         with open(config_path, "r") as f:
             config_raw = f.read()
-    except:
+    except Exception:
         config_raw = "Could not read config file"
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = f"================ AUTO-TA SESSION | {timestamp} ================\n"
     header += f"SOURCE LOG: {original_log_name}\n"
-    
-    combined_content = [
+
+    combined = [
         header, "\n### 1. GEMINI ANALYSIS ###\n", analysis,
-        "\n" + "="*60 + "\n", f"### 2. {os.path.basename(config_path)} CONTENT ###\n", config_raw,
-        "\n" + "="*60 + "\n", "### 3. SYNTHESIS LOG (ISSUES) ###\n", synthesis_issues,
-        "\n" + "="*60 + "\n", "### 4. VERILOG SOURCE FILES ###\n", hdl_code,
-        "\n" + "="*60 + "\n", "### 5. TIMING REPORT ###\n", timing_report
+        "\n" + "=" * 60 + "\n", f"### 2. {os.path.basename(config_path)} CONTENT ###\n", config_raw,
+        "\n" + "=" * 60 + "\n", "### 3. LOG ISSUES ###\n", synthesis_issues,
+        "\n" + "=" * 60 + "\n", "### 4. SOURCE FILES ###\n", hdl_code,
+        "\n" + "=" * 60 + "\n", "### 5. TIMING REPORT ###\n", timing_report
     ]
 
     try:
         with open(log_filename, "w") as f:
-            f.write("\n".join(combined_content))
-        print(f" Session log saved to: autota_logs/{os.path.basename(log_filename)}")
+            f.write("\n".join(combined))
+        print(f" Text log saved: autota_logs/{os.path.basename(log_filename)}")
     except Exception as e:
-        print(f" Error saving persistent log: {e}")
+        print(f" Error saving text log: {e}")
+
 
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
 
+
+def run_shell_command(command):
+    try:
+        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, cwd=CURRENT_LAB_DIR)
+    except Exception as e:
+        print(f" Failed to run command: {e}")
+
+
 def main():
-    print(f" Running AutoTA for: {os.path.basename(CURRENT_LAB_DIR)} (phase: {PHASE})")
+    print(f"\n Running AutoTA+ for: {os.path.basename(CURRENT_LAB_DIR)} (phase: {PHASE})")
+    print("=" * 60)
     run_shell_command(EXTRACT_CMD)
 
     if not os.path.exists(ISSUES_FILE):
@@ -335,12 +589,11 @@ def main():
         synthesis_issues = f.read().strip()
 
     if not synthesis_issues:
-        print(" No synthesis issues found in this log. Good job!")
+        print(" No issues found in this log. Good job!")
         return
 
     target_files = get_hdl_source_files()
-    files_str = ", ".join(target_files)
-    print(f" Found issues. Analyzing {files_str} source files...")
+    print(f" Source files: {', '.join(target_files)}")
 
     hdl_code = ""
     for filename in target_files:
@@ -349,23 +602,19 @@ def main():
             hdl_code += f"\n\n//FILE: {filename}\n{content}"
 
     timing_report_content = get_timing_report_content()
-    
-    print("\n Gemini Analysis:\n" + "-"*47)
+
+    print("\n Analyzing with Gemini...\n" + "-" * 47)
     analysis = analyze_issues(synthesis_issues, hdl_code, timing_report_content)
 
     if RICH_AVAILABLE:
         console.print(Markdown(analysis))
     else:
         print(analysis)
-    print("\n" + "-"*47)
+    print("\n" + "-" * 47)
 
-    save_persistent_log(analysis, target_log_path, ACTUAL_CONFIG_PATH, synthesis_issues, hdl_code, timing_report_content)
+    log_session(analysis, target_log_path, ACTUAL_CONFIG_PATH,
+                synthesis_issues, hdl_code, timing_report_content)
 
-def run_shell_command(command):
-    try:
-        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=CURRENT_LAB_DIR)
-    except Exception as e:
-        print(f" Failed to run command: {e}")
 
 if __name__ == "__main__":
     main()

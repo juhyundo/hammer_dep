@@ -1,85 +1,91 @@
 import re
 import sys
-import argparse
 from collections import defaultdict
 
-# Parse arguments
-parser = argparse.ArgumentParser(description="Extract issues from VLSI tool logs")
-parser.add_argument("log_file", nargs="?", help="Path to the log file to analyze")
-parser.add_argument("-o", "--output", default=None, help="Output file path")
-parser.add_argument("--phase", default="syn", choices=["syn", "sim_rtl", "par"],
-                    help="VLSI phase to extract issues for (default: syn)")
-args = parser.parse_args()
+# Parse args with minimal disruption to existing positional args
+phase = "syn"
+positional = []
+i = 1
+while i < len(sys.argv):
+  if sys.argv[i] == "--phase":
+    if i + 1 >= len(sys.argv):
+      print("Usage: python extract.py <log_file_path> [output_file_path] [--phase syn|par]")
+      sys.exit(1)
+    phase = sys.argv[i + 1].lower()
+    i += 2
+  else:
+    positional.append(sys.argv[i])
+    i += 1
 
-if not args.log_file:
-  parser.print_help()
+# Check if file path is provided as command-line argument
+if len(positional) < 1:
+  print("Usage: python extract.py <log_file_path> [output_file_path] [--phase syn|par]")
+  print("Example: python extract.py synth.log")
+  print("Example: python extract.py synth.log custom_output.log")
+  print("Example: python extract.py par.log --phase par")
   sys.exit(1)
 
-file_path = args.log_file
+if phase not in ["syn", "par"]:
+  print("Error: --phase must be 'syn' or 'par'")
+  sys.exit(1)
 
-# Default output file name depends on phase
-DEFAULT_OUTPUT = {
-    "syn": "synthesis_issues.log",
-    "sim_rtl": "sim_issues.log",
-    "par": "par_issues.log",
-}
-output_file_path = args.output if args.output else DEFAULT_OUTPUT[args.phase]
+# File paths
+file_path = positional[0]
+default_out = "synthesis_issues.log" if phase == "syn" else "par_issues.log"
+output_file_path = positional[1] if len(positional) > 1 else default_out
 
-# ==========================================
-# Phase-specific issue keyword categories
-# ==========================================
-
-# --- Synthesis (Genus) ---
+# Define issue categories with associated keywords and severity levels
 syn_categories_info = {
- "Undeclared Signals": (["implicitly declared"], "Major"),
- "Missing Drivers": (["has no driver"], "Critical"),
- "Latch Issues": (["Latch inferred"], "Major"),
- "Conflicting Drivers": (["multiple conflicting drivers", "Driver - driver conflict"], "Critical"),
- "Combinational Loop": (["combinational loop", "logic loop"], "Critical"),
- "Optimized Out": (["removing D path"], "Minor"),
- "Unsynthesizable": (["not synthesizable", "unsynthesizable"], "Critical"),
- "Errors": (["Error", "ERROR", "error"], "Critical"),
- "Warnings": (["Warning", "WARNING", "warning"], "Major"),
- "Resource Utilization": (["Creating decoders for process"], "Minor"),
- "Hierarchy/Blackbox": (["black box", "module not found", "unresolved"], "Critical"),
- "Sensitivity List": (["incomplete sensitivity", "missing from sensitivity"], "Major"),
+  "Undeclared Signals": (["implicitly declared"], "Major"),
+  "Missing Drivers": (["has no driver"], "Critical"),
+  "Latch Issues": (["Latch inferred"], "Critical"),
+  "Conflicting Drivers": (["multiple conflicting drivers", "Driver - driver conflict"], "Critical"),
+  "Combinational Loop": (["combinational loop", "logic loop"], "Critical"),
+  "Optimized Out": (["removing D path"], "Minor"),
+  "Unsynthesizable": (["not synthesizable", "unsynthesizable"], "Major"),
+  "Hierarchy/Blackbox": (["black box", "module not found", "unresolved"], "Major"),
+  "Sensitivity List": (["incomplete sensitivity", "missing from sensitivity"], "Major"),
+  "Resource Utilization": (["Creating decoders for process"], "Minor"),
+  "Errors": (["Error", "ERROR", "error"], "Critical"),
+  "Warnings": (["Warning", "WARNING", "warning"], "Major"),
 }
 
-# --- RTL Simulation (VCS / Xcelium) ---
-sim_categories_info = {
- "Test Failure": (["FAIL", "FAILED", "TEST FAILED", "MISMATCH"], "Critical"),
- "Assertion Failure": (["assertion", "SVA", "assert failed"], "Critical"),
- "Timeout": (["timeout", "TIMEOUT", "timed out"], "Critical"),
- "X-Propagation": (["x-prop", "X-propagation", "unknown value"], "Major"),
- "Undefined Signal": (["undefined", "uninitialized", "x value"], "Major"),
- "Simulation Errors": (["Error", "ERROR", "error"], "Critical"),
- "Simulation Warnings": (["Warning", "WARNING", "warning"], "Major"),
- "Deprecated Constructs": (["deprecated", "not recommended"], "Minor"),
-}
-
-# --- Place and Route (Innovus) ---
 par_categories_info = {
- "DRC Violations": (["DRC", "design rule", "spacing violation"], "Critical"),
- "Congestion": (["congestion", "overflow", "routing overflow"], "Major"),
- "Hold Violations": (["hold violation", "hold slack"], "Critical"),
- "Setup Violations": (["setup violation", "setup slack", "negative slack"], "Critical"),
- "Antenna Violations": (["antenna", "antenna violation"], "Major"),
- "Short Circuits": (["short", "short circuit"], "Critical"),
- "Placement Errors": (["placement", "cannot place", "overlap"], "Critical"),
- "PAR Errors": (["Error", "ERROR", "error"], "Critical"),
- "PAR Warnings": (["Warning", "WARNING", "warning"], "Major"),
+  "PAR Timing Setup Violations": (["Setup Check", "setup violation", "negative slack", "timing constraint violated"], "Critical"),
+  "PAR Timing Hold Violations": (["Hold Check", "hold violation", "negative hold slack"], "Critical"),
+  "DRC Violations": (["DRC violation", "short circuit", "open circuit"], "Major"),
+  "Library / Tech File Errors": (["cannot open lef", "missing lef", "layer not found", "technology file not found"], "Major"),
+  "Routing / Congestion": (["congestion", "overflow", "global route", "detailed route", "route failed", "cannot route", "unroutable", "detour"], "Critical"),
+  "Errors": (["Error", "ERROR", "error"], "Critical"),
+  "Warnings": (["Warning", "WARNING", "warning"], "Major"),
 }
 
-# Select active categories based on phase
-PHASE_CATEGORIES = {
-    "syn": syn_categories_info,
-    "sim_rtl": sim_categories_info,
-    "par": par_categories_info,
-}
-categories_info = PHASE_CATEGORIES[args.phase]
+categories_info = syn_categories_info if phase == "syn" else par_categories_info
 
 # Data structure for storing categorized issues
 found_issues = defaultdict(lambda: {"logs": set(), "severity": None})
+
+def mask_pdk_info(text):
+  """
+  Mask PDK-specific information to prevent NDA leaks.
+  This is more aggressive to catch various PDK naming patterns.
+  """
+  pdk_patterns = [
+    (r'\bsky130\w*', 'PDK'),
+    (r'\bsky\d+\w*', 'PDK'),
+    (r'\bts\d+\w*', 'PDK'),
+    (r'\btsmc\w*', 'PDK'),
+    (r'\basap\d+\w*', 'PDK'),
+    (r'\bsaed\d+\w*', 'PDK'),
+    (r'/\w+/PDK/\w+', '/PDK/path'),
+    (r'sky130_\w+_\w+', 'PDK_lib'),
+  ]
+
+  result = text
+  for pattern, replacement in pdk_patterns:
+    result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+
+  return result
 
 def process_log_entry(entry, category, issues_reference):
   """Adds an issue entry to the category while ensuring uniqueness."""
@@ -98,9 +104,9 @@ def analyze_log(log_lines):
 
     if not line:
       idx += 1
-      continue # Skip empty lines
+      continue  # Skip empty lines
 
-    category_matched = None # Stores the matched category
+    category_matched = None  # Stores the matched category
 
     for category, (keywords, severity) in categories_info.items():
       keyword_match = any(re.search(rf'\b{re.escape(k)}\b', line, re.IGNORECASE) for k in keywords)
@@ -114,22 +120,19 @@ def analyze_log(log_lines):
           idx += 1
 
         full_issue = "\n".join(issue_block)
-        
-        # --- NEW CODE: Replace PDK names ---
-        # Matches 'sky' or 'tsmc' followed by zero or more digits (case insensitive)
-        pdk_pattern = r'(sky\d*|ts\d*)'
-        full_issue = re.sub(pdk_pattern, 'PDK', full_issue, flags=re.IGNORECASE)
-        # -----------------------------------
+
+        # Mask PDK information
+        full_issue = mask_pdk_info(full_issue)
 
         # Check if this exact issue block already exists in this category
         if full_issue not in found_issues[category]["logs"]:
           process_log_entry(full_issue, category, found_issues)
-        
+
         category_matched = category
-        break # Ensure each log entry is categorized only once
+        break  # Ensure each log entry is categorized only once
 
     if category_matched is None:
-      idx += 1 # Move to the next line if no match was found
+      idx += 1  # Move to the next line if no match was found
 
 # Execute log analysis
 try:
@@ -149,10 +152,10 @@ try:
       logs = data["logs"]
       if logs:
         output_file.write(f"{category} (Severity: {data['severity']}):\n")
-        for log_entry in sorted(logs, key=lambda x: len(x)): # Sorted for better readability
+        for log_entry in sorted(logs, key=lambda x: len(x)):  # Sorted for better readability
           output_file.write("  " + log_entry.replace("\n", "\n  ") + "\n")
         output_file.write("\n")
-  print(f"Synthesis issues have been saved to {output_file_path}")
+  print(f"{phase.upper()} issues have been saved to {output_file_path}")
 except Exception as e:
   print(f"Error writing output file: {e}")
   sys.exit(1)

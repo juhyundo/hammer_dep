@@ -1161,6 +1161,9 @@ def create_hammer_dag_gcd():
             if result.stderr:
                 print("Terminal Errors:")
                 print(result.stderr)
+            print(f"\n=== Session Logs ===")
+            print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
+            print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
         else:
             print("Synthesis parameter is False, skipping")
             raise AirflowSkipException("Synthesis task skipped")
@@ -1181,6 +1184,9 @@ def create_hammer_dag_gcd():
             if result.stderr:
                 print("Terminal Errors:")
                 print(result.stderr)
+            print(f"\n=== Session Logs ===")
+            print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
+            print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
         else:
             print("sim_rtl parameter is False, skipping")
             raise AirflowSkipException("sim_rtl task skipped")
@@ -1192,10 +1198,16 @@ def create_hammer_dag_gcd():
         if not context['dag_run'].conf.get('par', False):
             print("PAR parameter is False, skipping")
             raise AirflowSkipException("par task skipped")
-        par_ti = context['dag_run'].get_task_instance('par')
-        if par_ti and par_ti.state == 'success':
-            print("PAR passed - skipping debug analysis")
-            raise AirflowSkipException("PAR succeeded, no debug needed")
+        # Check if par actually failed — use Airflow 3 compatible API
+        try:
+            ti = context['ti']
+            upstream_tis = ti.get_dagrun().get_task_instances()
+            par_ti = next((t for t in upstream_tis if t.task_id == 'par'), None)
+            if par_ti and par_ti.state == 'success':
+                print("PAR passed - skipping debug analysis")
+                raise AirflowSkipException("PAR succeeded, no debug needed")
+        except (AttributeError, StopIteration):
+            print("Could not check PAR state, running analysis anyway")
         flow = AIRFlow()
         current_script_dir = os.path.dirname(os.path.abspath(__file__))
         gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
@@ -1207,6 +1219,9 @@ def create_hammer_dag_gcd():
         if result.stderr:
             print("Terminal Errors:")
             print(result.stderr)
+        print(f"\n=== Session Logs ===")
+        print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
+        print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
 
     @task(trigger_rule=TriggerRule.NONE_FAILED)
     def exit_():
@@ -1244,14 +1259,14 @@ def create_hammer_dag_gcd():
     sim_rtl >> [sim_rtl_debug, power_rtl, exit_]
     sim_rtl_debug >> exit_
     power_rtl >> exit_
-    syn >> [syn_debug, timing_syn, power_syn, formal_syn, sim_syn, par, exit_]
-    syn_debug >> exit_
+    syn >> syn_debug
+    syn_debug >> [timing_syn, power_syn, formal_syn, sim_syn, par, exit_]
     timing_syn >> exit_
     sim_syn >> [power_syn, exit_]
     formal_syn >> exit_
     power_syn >> exit_
-    par >> [par_debug, timing_par, power_par, formal_par, sim_par, drc, lvs, exit_]
-    par_debug >> exit_
+    par >> par_debug
+    par_debug >> [timing_par, power_par, formal_par, sim_par, drc, lvs, exit_]
     power_par >> exit_
     formal_par >> exit_
     sim_par >> [power_par, exit_]

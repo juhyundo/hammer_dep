@@ -3,9 +3,8 @@
 # ==========================================
 autota:
   api_key: "YOUR_API_KEY_HERE"
-
-  # No need to specify log directory. It assumes "build/syn-rundir" by default. 
-  # It also assumes the most recent run by default. Use an earlier run by 
+  # No need to specify log directory. It assumes "build/syn-rundir" by default.
+  # It also assumes the most recent run by default. Use an earlier run by
   # specifying in command line (as shown in README.md)
 
   # AI Configuration
