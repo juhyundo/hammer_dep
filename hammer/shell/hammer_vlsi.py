@@ -904,7 +904,21 @@ def create_hammer_dag_gcd():
     def build(**context):
         """Execute build task"""
         print("Starting build task")
-        if context['dag_run'].conf.get('build', False):
+        if (context['dag_run'].conf.get('build', False) or 
+            context['dag_run'].conf.get('sim_rtl', False) or
+            context['dag_run'].conf.get('power_rtl', False) or
+            context['dag_run'].conf.get('syn', False) or
+            context['dag_run'].conf.get('formal_syn', False) or
+            context['dag_run'].conf.get('timing_syn', False) or
+            context['dag_run'].conf.get('power_syn', False) or
+            context['dag_run'].conf.get('sim_syn', False) or
+            context['dag_run'].conf.get('par', False) or
+            context['dag_run'].conf.get('power_par', False) or
+            context['dag_run'].conf.get('sim_par', False) or
+            context['dag_run'].conf.get('formal_par', False) or
+            context['dag_run'].conf.get('timing_par', False) or
+            context['dag_run'].conf.get('drc', False) or
+            context['dag_run'].conf.get('lvs', False)):
             print("Build parameter is True, executing build")
             flow = AIRFlow()
             if flow.build():
@@ -935,7 +949,8 @@ def create_hammer_dag_gcd():
     def sim_rtl(**context):
         """Execute RTL simulation task"""
         print("Starting sim_rtl task")
-        if context['dag_run'].conf.get('sim_rtl', False):
+        if (context['dag_run'].conf.get('sim_rtl', False) or 
+            context['dag_run'].conf.get('power_rtl', False)):
             print("Sim-RTL parameter is True, executing sim_rtl")
             flow = AIRFlow()
             if flow.sim_rtl():
@@ -963,7 +978,18 @@ def create_hammer_dag_gcd():
     def syn(**context):
         """Execute synthesis task"""
         print("Starting syn task")
-        if context['dag_run'].conf.get('syn', False):
+        if (context['dag_run'].conf.get('syn', False) or
+            context['dag_run'].conf.get('formal_syn', False) or
+            context['dag_run'].conf.get('timing_syn', False) or
+            context['dag_run'].conf.get('power_syn', False) or
+            context['dag_run'].conf.get('sim_syn', False) or
+            context['dag_run'].conf.get('par', False) or
+            context['dag_run'].conf.get('power_par', False) or
+            context['dag_run'].conf.get('sim_par', False) or
+            context['dag_run'].conf.get('formal_par', False) or
+            context['dag_run'].conf.get('timing_par', False) or
+            context['dag_run'].conf.get('drc', False) or
+            context['dag_run'].conf.get('lvs', False)):
             print("Synthesis parameter is True, executing syn")
             flow = AIRFlow()
             if flow.syn():
@@ -1023,7 +1049,8 @@ def create_hammer_dag_gcd():
     def sim_syn(**context):
         """Execute sim_synthesis task"""
         print("Starting sim_syn task")
-        if context['dag_run'].conf.get('sim_syn', False):
+        if (context['dag_run'].conf.get('power_syn', False) or
+            context['dag_run'].conf.get('sim_syn', False)):
             print("sim_Synthesis parameter is True, executing sim_syn")
             flow = AIRFlow()
             if flow.syn_to_sim():
@@ -1038,7 +1065,13 @@ def create_hammer_dag_gcd():
     def par(**context):
         """Execute PAR task"""
         print("Starting par task")
-        if context['dag_run'].conf.get('par', False):
+        if (context['dag_run'].conf.get('par', False) or
+            context['dag_run'].conf.get('power_par', False) or
+            context['dag_run'].conf.get('sim_par', False) or
+            context['dag_run'].conf.get('formal_par', False) or
+            context['dag_run'].conf.get('timing_par', False) or
+            context['dag_run'].conf.get('drc', False) or
+            context['dag_run'].conf.get('lvs', False)):
             print("PAR parameter is True, executing par")
             flow = AIRFlow()
             if flow.syn_to_par():
@@ -1083,7 +1116,8 @@ def create_hammer_dag_gcd():
     def sim_par(**context):
         """Execute sim_PAR task"""
         print("Starting sim_par task")
-        if context['dag_run'].conf.get('sim_par', False):
+        if (context['dag_run'].conf.get('power_par', False) or
+            context['dag_run'].conf.get('sim_par', False)):
             print("sim_PAR parameter is True, executing sim_par")
             flow = AIRFlow()
             if flow.par_to_sim():
