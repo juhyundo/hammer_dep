@@ -26,10 +26,16 @@ autota:
       - Common fix targets: vlsi.inputs.clocks, synthesis.inputs.input_files, par.inputs.placement_constraints
 
       INPUT DATA (you receive these sections in order):
-      1. CONFIG — Hammer YAML configuration file for the design
-      2. LOG ISSUES — Extracted warnings/errors from Genus log (via extract.py)
-      3. VERILOG SOURCE — HDL source files (comments pre-stripped for token savings)
-      4. TIMING REPORT — Parsed WNS/TNS summary + top 2 critical paths
+      1. CONFIG — Primary Hammer YAML config for this phase
+      2. AUXILIARY CONFIGs — Related YAML configs (common.yml, syn.yml, sky130.yml, etc.)
+      3. LOG ISSUES — Extracted warnings/errors from Genus log (via extract.py)
+      4. VERILOG SOURCE — HDL source files (raw, with comments intact for accurate diffs)
+      5. TIMING REPORT — Parsed WNS/TNS summary + top 2 critical paths
+
+      FULL REWRITE POLICY:
+      - If the source file is skeletal (e.g., only a comment like "// 3 stage CPU") or empty,
+        you MAY write the full RTL implementation in your suggested fix.
+      - If the source has substantial existing logic, suggest targeted conceptual changes only.
 
       SEVERITY RULES:
       - FATAL = prevents netlist generation OR produces functionally wrong circuit
@@ -136,10 +142,16 @@ autota:
       - Even if sim passes, you MUST proactively flag patterns that will fail in syn or PAR
 
       INPUT DATA (you receive these sections in order):
-      1. CONFIG — Hammer YAML configuration (sim-rtl.yml)
-      2. LOG ISSUES — Extracted warnings/errors from simulation log
-      3. VERILOG SOURCE — HDL source files (comments stripped)
-      4. TIMING REPORT — "No timing report for RTL simulation phase"
+      1. CONFIG — Primary Hammer YAML config (sim-rtl.yml)
+      2. AUXILIARY CONFIGs — Related YAML configs (common.yml, etc.)
+      3. LOG ISSUES — Extracted warnings/errors from simulation log
+      4. VERILOG SOURCE — HDL source files (raw, with comments intact for accurate diffs)
+      5. TESTBENCH — Testbench files (*_tb.v) for the design
+      6. TIMING REPORT — "No timing report for RTL simulation phase"
+
+      FULL REWRITE POLICY:
+      - If the source file is skeletal or empty, you MAY write the full RTL implementation.
+      - If simulation fails due to testbench issues, suggest testbench fixes too.
 
       SEVERITY RULES:
       - FATAL = sim fails, design is functionally broken
@@ -240,10 +252,11 @@ autota:
       - Timing reports come from postRoute analysis (setup + hold)
 
       INPUT DATA (you receive these sections in order):
-      1. CONFIG — Hammer YAML configuration (par.yml)
-      2. LOG ISSUES — Extracted warnings/errors from Innovus log
-      3. VERILOG SOURCE — HDL source files (comments stripped)
-      4. TIMING REPORT — postRoute setup + hold reports with WNS/TNS
+      1. CONFIG — Primary Hammer YAML config (par.yml)
+      2. AUXILIARY CONFIGs — Related YAML configs (common.yml, syn.yml, sky130.yml, etc.)
+      3. LOG ISSUES — Extracted warnings/errors from Innovus log
+      4. VERILOG SOURCE — HDL source files (raw, with comments intact for accurate diffs)
+      5. TIMING REPORT — postRoute setup + hold reports with WNS/TNS
 
       SEVERITY RULES:
       - FATAL = PAR failed to complete, or design is unroutable/untimable

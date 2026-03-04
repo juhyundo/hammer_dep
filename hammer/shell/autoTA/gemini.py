@@ -436,22 +436,83 @@ def get_hdl_source_files():
     return []
 
 
-def _strip_comments(text: str, ext: str) -> str:
-    """Remove comments based on file extension to save tokens."""
-    if ext in ('.v', '.sv', '.vh'):
-        text = re.sub(r'/\*[\s\S]*?\*/', '', text)   # block comments
-        text = re.sub(r'//.*', '', text)               # line comments
-    elif ext in ('.yml', '.yaml', '.sh'):
-        text = re.sub(r'#.*', '', text)
-    elif ext in ('.log', '.rpt', '.out'):
-        text = re.sub(r'(//|#).*', '', text)
-    # Remove blank lines left behind
-    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
-    return "\n".join(lines)
+def get_auxiliary_config_files():
+    """Find ALL YAML configs in the design config directory.
+
+    Every stage gets every config file so the AI can predict
+    downstream issues (e.g., syn_debug sees par.yml to forecast PAR problems).
+
+    Returns a dict of {filename: content}.
+    """
+    config_dir = os.path.dirname(ACTUAL_CONFIG_PATH) if ACTUAL_CONFIG_PATH else None
+    results = {}
+
+    if not config_dir or not os.path.isdir(config_dir):
+        return results
+
+    for name in sorted(os.listdir(config_dir)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        path = os.path.join(config_dir, name)
+        # Skip the primary config (already sent separately)
+        if os.path.abspath(path) == os.path.abspath(ACTUAL_CONFIG_PATH):
+            continue
+        try:
+            with open(path, "r") as f:
+                content = f.read()
+            results[name] = content
+            print(f" Loaded config: {name}")
+        except Exception:
+            pass
+    return results
 
 
-def get_file_content_smart(filename, max_chars: int = 15000):
-    """Locate file, strip comments, truncate if needed."""
+def get_testbench_files():
+    """Find testbench files for sim_rtl phase.
+
+    Returns a dict of {filename: content}.
+    """
+    if PHASE != "sim_rtl":
+        return {}
+
+    results = {}
+    # Check sim config for testbench info
+    sim_inputs = lab_config.get("sim.inputs", {}) if lab_config else {}
+    tb_name = sim_inputs.get("tb_name", "")
+
+    # Search for testbench files
+    tb_patterns = []
+    if tb_name:
+        tb_patterns.append(f"{tb_name}.v")
+        tb_patterns.append(f"{tb_name}.sv")
+
+    # Also search for any *_tb.v files in the source directory
+    search_dirs = [
+        CURRENT_LAB_DIR,
+        os.path.join(CURRENT_LAB_DIR, "src"),
+        os.path.join(CURRENT_LAB_DIR, "..", "..", "src"),
+    ]
+
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
+        for f in os.listdir(search_dir):
+            if f.endswith((".v", ".sv")) and ("_tb" in f or "tb_" in f or f in [p for p in tb_patterns]):
+                fpath = os.path.join(search_dir, f)
+                if f not in results:
+                    try:
+                        content = get_file_content_smart(fpath)
+                        if content:
+                            results[f] = content
+                            print(f" Loaded testbench: {f}")
+                    except Exception:
+                        pass
+    return results
+
+
+def get_file_content_smart(filename, max_chars: int = 30000):
+    """Locate file and truncate if needed. No comment stripping — AI needs
+    raw content so it can generate accurate diffs."""
     search_paths = [
         os.path.join(CURRENT_LAB_DIR, filename),
         os.path.join(CURRENT_LAB_DIR, "src", filename),
@@ -470,16 +531,13 @@ def get_file_content_smart(filename, max_chars: int = 15000):
         print(f" Warning: Could not find source file: {filename}")
         return None
 
-    ext = os.path.splitext(filename)[1].lower()
-    content = _strip_comments(raw_content, ext)
-
     # Truncate keeping head + tail if too long
-    if len(content) > max_chars:
+    if len(raw_content) > max_chars:
         half = max_chars // 2
-        content = (content[:half] +
-                   "\n\n... [middle section truncated for token efficiency] ...\n\n" +
-                   content[-half:])
-    return content
+        raw_content = (raw_content[:half] +
+                       "\n\n... [middle section truncated] ...\n\n" +
+                       raw_content[-half:])
+    return raw_content
 
 
 # ==========================================
@@ -487,7 +545,8 @@ def get_file_content_smart(filename, max_chars: int = 15000):
 # ==========================================
 
 
-def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
+def analyze_issues(synthesis_issues, hdl_code, timing_report_content,
+                   aux_configs=None, testbench_code=None):
     settings = autota_config.get("ai_settings", {})
     model_name = settings.get("model", "gemini-3-flash-preview")
     prompt_key = CURRENT_PHASE["prompt_key"]
@@ -499,15 +558,29 @@ def analyze_issues(synthesis_issues, hdl_code, timing_report_content):
     except Exception as e:
         config_raw = f"Error reading config: {e}"
 
+    # Build auxiliary configs section
+    aux_section = ""
+    if aux_configs:
+        for name, content in aux_configs.items():
+            aux_section += f"\nAUXILIARY CONFIG ({name}):\n{content}\n"
+
+    # Build testbench section
+    tb_section = ""
+    if testbench_code:
+        for name, content in testbench_code.items():
+            tb_section += f"\n//TESTBENCH: {name}\n{content}\n"
+
     full_prompt = (
         f"{prompt_text}\n"
         "---------------------------------------------------\n"
         f"CONFIG ({os.path.basename(ACTUAL_CONFIG_PATH)}) CONTENT:\n"
         f"{config_raw}\n\n"
+        f"{aux_section}"
         "LOG ISSUES:\n"
         f"{synthesis_issues}\n\n"
         "VERILOG SOURCE:\n"
         f"{hdl_code}\n\n"
+        f"{tb_section}"
         "TIMING REPORT:\n"
         f"{timing_report_content}"
     )
@@ -593,6 +666,84 @@ def log_session(analysis, target_log_path, config_path, synthesis_issues,
                          synthesis_issues, hdl_code, timing_report)
 
 
+def archive_patch_session(analysis, phase, source_files_used):
+    """Create a timestamped archive with backups of files the AI may patch.
+
+    Structure:
+        autota_patches/
+        └── YYYY-MM-DD_HHMMSS_phase/
+            ├── manifest.json    # metadata, file list, AI diagnosis
+            ├── ai_analysis.md   # full AI response
+            └── originals/       # backup copies of all source + config files
+
+    Returns the archive directory path (for Airflow log output).
+    """
+    patches_dir = os.path.join(CURRENT_LAB_DIR, "autota_patches")
+    timestamp = time.strftime("%Y-%m-%d_%H%M%S")
+    session_dir = os.path.join(patches_dir, f"{timestamp}_{phase}")
+    originals_dir = os.path.join(session_dir, "originals")
+    os.makedirs(originals_dir, exist_ok=True)
+
+    # Git commit hash
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True,
+            cwd=CURRENT_LAB_DIR, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        git_hash = "unknown"
+
+    # Back up all source files the AI was given
+    backed_up = []
+    for filepath in source_files_used:
+        abspath = os.path.abspath(filepath)
+        if os.path.exists(abspath):
+            import shutil
+            dest = os.path.join(originals_dir, os.path.basename(abspath))
+            try:
+                shutil.copy2(abspath, dest)
+                backed_up.append({
+                    "original_path": abspath,
+                    "backup": f"originals/{os.path.basename(abspath)}",
+                })
+            except Exception as e:
+                print(f" Warning: Could not back up {abspath}: {e}")
+
+    # Save AI analysis
+    analysis_path = os.path.join(session_dir, "ai_analysis.md")
+    try:
+        with open(analysis_path, "w") as f:
+            f.write(analysis)
+    except Exception:
+        pass
+
+    # Write manifest
+    manifest = {
+        "timestamp": timestamp,
+        "phase": phase.upper(),
+        "git_commit": git_hash,
+        "user": os.environ.get("USER", "unknown"),
+        "working_dir": CURRENT_LAB_DIR,
+        "files_backed_up": backed_up,
+    }
+    manifest_path = os.path.join(session_dir, "manifest.json")
+    try:
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+    except Exception:
+        pass
+
+    print(f"\n{'=' * 60}")
+    print(f" ARCHIVE CREATED")
+    print(f"{'=' * 60}")
+    print(f"  Location:   {session_dir}")
+    print(f"  Manifest:   {manifest_path}")
+    print(f"  Originals:  {originals_dir}/")
+    print(f"  AI Report:  {analysis_path}")
+    print(f"  Files:      {len(backed_up)} backed up")
+    print(f"{'=' * 60}")
+    return session_dir
+
+
 def _save_persistent_log(analysis, target_log_path, config_path,
                          synthesis_issues, hdl_code, timing_report):
     """Legacy text-based log (autota_logs/ in the design dir)."""
@@ -661,21 +812,49 @@ def main():
     print(f" Source files: {', '.join(target_files)}")
 
     hdl_code = ""
+    all_source_paths = []  # track all files for archiving
     for filename in target_files:
         content = get_file_content_smart(filename)
         if content:
             hdl_code += f"\n\n//FILE: {filename}\n{content}"
+            # Resolve actual path for archiving
+            for search in [CURRENT_LAB_DIR,
+                           os.path.join(CURRENT_LAB_DIR, "src"),
+                           os.path.join(CURRENT_LAB_DIR, "..", "..", "src"),
+                           os.path.join(CURRENT_LAB_DIR, "..", "..", "..", "src")]:
+                candidate = os.path.join(search, filename)
+                if os.path.exists(candidate):
+                    all_source_paths.append(candidate)
+                    break
+
+    # Gather auxiliary configs and testbench files
+    aux_configs = get_auxiliary_config_files()
+    testbench_code = get_testbench_files()
+
+    # Track config paths for archiving
+    if ACTUAL_CONFIG_PATH and os.path.exists(ACTUAL_CONFIG_PATH):
+        all_source_paths.append(ACTUAL_CONFIG_PATH)
+    config_dir = os.path.dirname(ACTUAL_CONFIG_PATH) if ACTUAL_CONFIG_PATH else None
+    if config_dir:
+        for name in aux_configs:
+            p = os.path.join(config_dir, name)
+            if os.path.exists(p):
+                all_source_paths.append(p)
 
     timing_report_content = get_timing_report_content()
 
     print("\n Analyzing with Gemini...\n" + "-" * 47)
-    analysis = analyze_issues(synthesis_issues, hdl_code, timing_report_content)
+    analysis = analyze_issues(synthesis_issues, hdl_code, timing_report_content,
+                              aux_configs=aux_configs, testbench_code=testbench_code)
 
     if RICH_AVAILABLE:
         console.print(Markdown(analysis))
     else:
         print(analysis)
     print("\n" + "-" * 47)
+
+    # Archive: back up originals before any patching
+    archive_patch_session(analysis, PHASE, all_source_paths)
 
     log_session(analysis, target_log_path, ACTUAL_CONFIG_PATH,
                 synthesis_issues, hdl_code, timing_report_content)

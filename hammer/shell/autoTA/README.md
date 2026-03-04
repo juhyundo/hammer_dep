@@ -56,8 +56,49 @@ Run from your **design build directory** (e.g., `build-sky130-cm/gcd/`), or the 
 | `extract.py` | Log parser — extracts warnings/errors by category and severity |
 | `config.yml` | AI model settings and phase-specific prompts |
 
-## Output
+## What Gets Sent to the AI
 
-- **Console:** Markdown-formatted analysis (rendered via Rich if available)
-- **`autota_logs/`:** Text session logs in the design build directory
-- **`logs/`:** JSON audit archives (tamper-protected) in the autoTA directory
+Each phase sends different files to give the AI full context:
+
+| Data | syn | sim_rtl | par |
+|------|-----|---------|-----|
+| Primary config | `syn.yml` | `sim-rtl.yml` | `par.yml` |
+| Auxiliary configs | `common.yml`, `sky130.yml` | `common.yml` | `common.yml`, `syn.yml`, `sky130.yml` |
+| HDL source files | ✅ | ✅ | ✅ |
+| Testbench files | — | ✅ (`*_tb.v`) | — |
+| Timing report | `.setup_view.rpt` | — | postRoute reports |
+| Log issues | Genus log | Sim log | Innovus log |
+
+Files are sent **raw** (no comment stripping) so the AI can generate accurate diffs.
+
+## Output & Logs
+
+### Console
+Markdown-formatted analysis rendered via Rich (if installed), otherwise plain text.
+
+### Session Logs (shared, tamper-protected)
+```
+autoTA/logs/autoTA_<user>_<phase>_<timestamp>.json
+```
+JSON archives sealed with read-only permissions. Contains the full AI response, extracted issues, source code, and timing report.
+
+### Legacy Text Logs (design-local)
+```
+<build-dir>/autota_logs/autoTA_<logfile>
+```
+Human-readable text log in the design build directory.
+
+### Patch Archives (design-local)
+```
+<build-dir>/autota_patches/YYYY-MM-DD_HHMMSS_<phase>/
+├── manifest.json      # timestamp, phase, git commit, list of backed-up files
+├── ai_analysis.md     # full AI response
+└── originals/         # backup copies of all source + config files
+```
+Created every run. Before any AI-suggested patch is applied, the originals are preserved here. Each archive folder is named by timestamp and phase for easy lookup.
+
+**Finding what you need:**
+- **Latest analysis?** → Sort `autota_patches/` by name (newest is last)
+- **What files were involved?** → Read `manifest.json`
+- **What did the AI say?** → Read `ai_analysis.md`
+- **Need to rollback?** → Copy files from `originals/` back to their original paths (listed in `manifest.json`)

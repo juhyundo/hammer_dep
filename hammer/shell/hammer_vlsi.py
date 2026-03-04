@@ -1164,6 +1164,7 @@ def create_hammer_dag_gcd():
             print(f"\n=== Session Logs ===")
             print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
             print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
+            print(f"  Patch archive:   {flow.OBJ_DIR}/autota_patches/")
         else:
             print("Synthesis parameter is False, skipping")
             raise AirflowSkipException("Synthesis task skipped")
@@ -1187,6 +1188,7 @@ def create_hammer_dag_gcd():
             print(f"\n=== Session Logs ===")
             print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
             print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
+            print(f"  Patch archive:   {flow.OBJ_DIR}/autota_patches/")
         else:
             print("sim_rtl parameter is False, skipping")
             raise AirflowSkipException("sim_rtl task skipped")
@@ -1222,6 +1224,7 @@ def create_hammer_dag_gcd():
         print(f"\n=== Session Logs ===")
         print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
         print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
+        print(f"  Patch archive:   {flow.OBJ_DIR}/autota_patches/")
 
     @task(trigger_rule=TriggerRule.NONE_FAILED)
     def exit_():
