@@ -24,6 +24,7 @@ from .hammer_vlsi_impl import HammerTool, HammerVLSISettings
 from .hooks import HammerToolHookAction, HammerStartStopStep
 from .driver import HammerDriver, HammerDriverOptions
 from .hammer_build_systems import BuildSystems
+from . import rtl_check
 
 from functools import reduce
 from textwrap import dedent
@@ -34,12 +35,9 @@ from hammer.utils import add_dicts, deeplist, deepdict, get_or_else, check_funct
 from hammer.config import HammerJSONEncoder
 
 from airflow.models.dag import DAG
-#from airflow.operators.python import PythonOperator
-#from airflow.models.baseoperator import chain
-#from airflow.decorators import task, dag
-from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk.bases.operator import chain
-from airflow.sdk import task, dag
+from airflow.operators.python import PythonOperator
+from airflow.models.baseoperator import chain
+from airflow.decorators import task, dag
 from datetime import datetime, timedelta
 
 #import pdb
@@ -575,86 +573,115 @@ class CLIDriver:
             assert driver.tech is not None, "must have a technology"
             with open(KEY_PATH, 'r') as f:
                 key_history = json.load(f)
+
+            # Ignore comments/whitespace in RTL
+            # Store the computed fingerprint into the master database so stage_change_check
+            # can treat RTL changes as dependency changes.
+            try:
+                if driver.database.has_setting("synthesis.inputs.input_files"):
+                    rtl_inputs = list(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
+                    overall_sha256, _digests = rtl_check.digest_files(rtl_inputs)
+                    driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
+            except FileNotFoundError as e:
+                driver.log.error(f"RTL fingerprint input file missing: {e.filename}")
+                return None
+            except Exception as e:
+                driver.log.error(f"Failed to compute RTL fingerprint: {e}")
+                return None
+
             if action_type == "synthesis" or action_type == "syn":
-                if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
-                    return None
+                print(driver.obj_dir)
+                if driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
+                    if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
+                        return None
+                    else:
+                        post_load_func_checked(driver)
+                    assert driver.syn_tool is not None, "load_synthesis_tool was unsuccessful"
+                    success, output = driver.run_synthesis(
+                            driver.syn_tool.get_tool_hooks() + \
+                            driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
+                            list(extra_hooks or []))
+                    if not success:
+                        driver.log.error("Synthesis tool did not succeed")
+                        return None
+                    post_run_func_checked(driver)
+                    dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output.json"), output)
+                    dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output-full.json"),
+                                            self.get_full_config(driver, output))
+                    if driver.dump_history:
+                        dump_config_to_yaml_file(os.path.join(driver.syn_tool.run_dir, "syn-output-history.yml"),
+                                                add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    post_load_func_checked(driver)
-                assert driver.syn_tool is not None, "load_synthesis_tool was unsuccessful"
-                success, output = driver.run_synthesis(
-                        driver.syn_tool.get_tool_hooks() + \
-                        driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
-                        list(extra_hooks or []))
-                if not success:
-                    driver.log.error("Synthesis tool did not succeed")
-                    return None
-                post_run_func_checked(driver)
-                dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output.json"), output)
-                dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output-full.json"),
-                                         self.get_full_config(driver, output))
-                if driver.dump_history:
-                    dump_config_to_yaml_file(os.path.join(driver.syn_tool.run_dir, "syn-output-history.yml"),
-                                            add_key_history(self.get_full_config(driver, output), key_history))
+                    return 0
             elif action_type == "par":
-                if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
-                    return None
+                if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
+                    if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
+                        return None
+                    else:
+                        post_load_func_checked(driver)
+                    assert driver.par_tool is not None, "load_par_tool was unsuccessful"
+                    success, output = driver.run_par(
+                            driver.par_tool.get_tool_hooks() + \
+                            driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
+                            list(extra_hooks or []))
+                    if not success:
+                        driver.log.error("Place-and-route tool did not succeed")
+                        return None
+                    post_run_func_checked(driver)
+                    dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output.json"), output)
+                    dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output-full.json"),
+                                            self.get_full_config(driver, output))
+                    if driver.dump_history:
+                        dump_config_to_yaml_file(os.path.join(driver.par_tool.run_dir, "par-output-history.yml"),
+                                                add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    post_load_func_checked(driver)
-                assert driver.par_tool is not None, "load_par_tool was unsuccessful"
-                success, output = driver.run_par(
-                        driver.par_tool.get_tool_hooks() + \
-                        driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
-                        list(extra_hooks or []))
-                if not success:
-                    driver.log.error("Place-and-route tool did not succeed")
-                    return None
-                post_run_func_checked(driver)
-                dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output.json"), output)
-                dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output-full.json"),
-                                         self.get_full_config(driver, output))
-                if driver.dump_history:
-                    dump_config_to_yaml_file(os.path.join(driver.par_tool.run_dir, "par-output-history.yml"),
-                                            add_key_history(self.get_full_config(driver, output), key_history))
+                    return 0
             elif action_type == "drc":
-                if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
-                    return None
+                if driver.database.stage_change_check(stage = "drc"):
+                    if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
+                        return None
+                    else:
+                        post_load_func_checked(driver)
+                    assert driver.drc_tool is not None, "load_drc_tool was unsuccessful"
+                    success, output = driver.run_drc(
+                            driver.drc_tool.get_tool_hooks() + \
+                            driver.tech.get_tech_drc_hooks(driver.drc_tool.name) + \
+                            list(extra_hooks or []))
+                    if not success:
+                        driver.log.error("DRC tool did not succeed")
+                        return None
+                    post_run_func_checked(driver)
+                    dump_config_to_json_file(os.path.join(driver.drc_tool.run_dir, "drc-output.json"), output)
+                    dump_config_to_json_file(os.path.join(driver.drc_tool.run_dir, "drc-output-full.json"),
+                                            self.get_full_config(driver, output))
+                    if driver.dump_history:
+                        dump_config_to_yaml_file(os.path.join(driver.drc_tool.run_dir, "drc-output-history.yml"),
+                                                add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    post_load_func_checked(driver)
-                assert driver.drc_tool is not None, "load_drc_tool was unsuccessful"
-                success, output = driver.run_drc(
-                        driver.drc_tool.get_tool_hooks() + \
-                        driver.tech.get_tech_drc_hooks(driver.drc_tool.name) + \
-                        list(extra_hooks or []))
-                if not success:
-                    driver.log.error("DRC tool did not succeed")
-                    return None
-                post_run_func_checked(driver)
-                dump_config_to_json_file(os.path.join(driver.drc_tool.run_dir, "drc-output.json"), output)
-                dump_config_to_json_file(os.path.join(driver.drc_tool.run_dir, "drc-output-full.json"),
-                                         self.get_full_config(driver, output))
-                if driver.dump_history:
-                    dump_config_to_yaml_file(os.path.join(driver.drc_tool.run_dir, "drc-output-history.yml"),
-                                            add_key_history(self.get_full_config(driver, output), key_history))
+                    return 0
             elif action_type == "lvs":
-                if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
-                    return None
+                if driver.database.stage_change_check(stage = "lvs"):
+                    if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
+                        return None
+                    else:
+                        post_load_func_checked(driver)
+                    assert driver.lvs_tool is not None, "load_lvs_tool was unsuccessful"
+                    success, output = driver.run_lvs(
+                            driver.lvs_tool.get_tool_hooks() + \
+                            driver.tech.get_tech_lvs_hooks(driver.lvs_tool.name) + \
+                            list(extra_hooks or []))
+                    if not success:
+                        driver.log.error("LVS tool did not succeed")
+                        return None
+                    post_run_func_checked(driver)
+                    dump_config_to_json_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output.json"), output)
+                    dump_config_to_json_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output-full.json"),
+                                            self.get_full_config(driver, output))
+                    if driver.dump_history:
+                        dump_config_to_yaml_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output-history.yml"),
+                                                add_key_history(self.get_full_config(driver, output), key_history))
                 else:
-                    post_load_func_checked(driver)
-                assert driver.lvs_tool is not None, "load_lvs_tool was unsuccessful"
-                success, output = driver.run_lvs(
-                        driver.lvs_tool.get_tool_hooks() + \
-                        driver.tech.get_tech_lvs_hooks(driver.lvs_tool.name) + \
-                        list(extra_hooks or []))
-                if not success:
-                    driver.log.error("LVS tool did not succeed")
-                    return None
-                post_run_func_checked(driver)
-                dump_config_to_json_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output.json"), output)
-                dump_config_to_json_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output-full.json"),
-                                         self.get_full_config(driver, output))
-                if driver.dump_history:
-                    dump_config_to_yaml_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output-history.yml"),
-                                            add_key_history(self.get_full_config(driver, output), key_history))
+                    return 0
             elif action_type == "sram_generator":
                 if not driver.load_sram_generator_tool(get_or_else(self.sram_generator_rundir, "")):
                     return None
@@ -1749,7 +1776,7 @@ class CLIDriver:
             sys.exit(1)
 
         #sys.exit(self.run_main_parsed(vars(parser.parse_args(args))))
-        self.run_main_parsed(vars(parser.parse_args(args)))
+        return self.run_main_parsed(vars(parser.parse_args(args))) 
 
 @task
 def import_task_to_dag():

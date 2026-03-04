@@ -16,16 +16,13 @@ import sys
 import json
 
 from airflow.models.dag import DAG
-#from airflow.operators.python import PythonOperator
-#from airflow.models.param import Param
-#from airflow.utils.trigger_rule import TriggerRule
-from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import Param
-from airflow.task.trigger_rule import TriggerRule
+from airflow.operators.python import PythonOperator
+from airflow.models.param import Param
+from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime
 from airflow.exceptions import AirflowSkipException
-#from airflow.decorators import task, dag
-from airflow.sdk import task, dag
+from airflow.exceptions import AirflowFailException
+from airflow.decorators import task, dag
 from airflow.models import Variable
 
 import pendulum
@@ -63,22 +60,23 @@ class AIRFlow:
         
         # synthesis and par configurations
         self.SYN_CONF = os.getenv('SYN_CONF', f"{self.e2e_dir}/configs-design/{self.design}/syn.yml")
-        self.PAR_CONF = os.getenv('PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/par.yml")
+        # self.PAR_CONF = os.getenv('PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/par.yml")
         
         # This should be your target, build is passed in
         self.makecmdgoals = os.getenv('MAKECMDGOALS', "build")
         
         # simulation and power configurations
-        self.SIM_CONF = os.getenv('SIM_CONF',
-            f"{self.e2e_dir}/configs-design/{self.design}/sim-rtl.yml" if '-rtl' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/sim-syn.yml" if '-syn' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/sim-par.yml" if '-par' in self.makecmdgoals else ''
-        )
-        self.POWER_CONF = os.getenv('POWER_CONF',
-            f"{self.e2e_dir}/configs-design/{self.design}/power-rtl-{self.pdk}.yml" if 'power-rtl' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/power-syn-{self.pdk}.yml" if 'power-syn' in self.makecmdgoals else
-            f"{self.e2e_dir}/configs-design/{self.design}/power-par-{self.pdk}.yml" if 'power-par' in self.makecmdgoals else ''
-        )
+        self.SIM_RTL_CONF = os.getenv('SIM_RTL_CONF', f"{self.e2e_dir}/configs-design/{self.design}/sim-rtl.yml")
+
+        self.SIM_SYN_CONF = os.getenv('SIM_SYN_CONF', f"{self.e2e_dir}/configs-design/{self.design}/sim-syn.yml")
+
+        self.SIM_PAR_CONF = os.getenv('SIM_PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/sim-par.yml")
+
+        self.POWER_RTL_CONF = os.getenv('POWER_RTL_CONF', f"{self.e2e_dir}/configs-design/{self.design}/power-rtl-{self.pdk}.yml")
+
+        self.POWER_SYN_CONF = os.getenv('POWER_SYN_CONF', f"{self.e2e_dir}/configs-design/{self.design}/power-syn-{self.pdk}.yml")
+
+        self.POWER_PAR_CONF = os.getenv('POWER_PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/power-par-{self.pdk}.yml")
 
         # create project configuration
         self.PROJ_YMLS = [
@@ -87,8 +85,7 @@ class AIRFlow:
             self.DESIGN_CONF, 
             self.DESIGN_PDK_CONF,
             self.SYN_CONF, 
-            self.SIM_CONF, 
-            self.POWER_CONF, 
+            # self.PAR_CONF,
             self.extra
         ]
         
@@ -111,131 +108,353 @@ class AIRFlow:
         print(f"TOOLS_CONF: {self.TOOLS_CONF}")
         print(f"DESIGN_CONF: {self.DESIGN_CONF}")
         print(f"DESIGN_PDK_CONF: {self.DESIGN_PDK_CONF}")
+        print(f"SYN_CONF: {self.SYN_CONF}")
+        # print(f"PAR_CONF: {self.PAR_CONF}")
+        print(f"SIM_RTL_CONF: {self.SIM_RTL_CONF}")
+        print(f"SIM_SYN_CONF: {self.SIM_SYN_CONF}")
+        print(f"SIM_PAR_CONF: {self.SIM_PAR_CONF}")
+        print(f"POWER_RTL_CONF: {self.POWER_RTL_CONF}")
+        print(f"POWER_SYN_CONF: {self.POWER_SYN_CONF}")
+        print(f"POWER_PAR_CONF: {self.POWER_PAR_CONF}")
         
         sys.argv = [
             'hammer-vlsi',
             'build',
             '--obj_dir', self.OBJ_DIR,
-            '-e', self.ENV_YML,
-            '-p', self.PDK_CONF,
-            '-p', self.TOOLS_CONF,
-            '-p', self.DESIGN_CONF,
-            '-p', self.DESIGN_PDK_CONF
+            '-e', self.ENV_YML
         ]
-        
-        if self.extra:
-            sys.argv.extend(['-p', self.extra])
-        
+
+        # Add all project configs
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
         if self.args:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def sim_rtl(self):
         print("Executing sim-rtl")
-        print(f"Using config files:")
-        print(f"ENV_YML: {self.ENV_YML}")
-        print(f"PDK_CONF: {self.PDK_CONF}")
-        print(f"TOOLS_CONF: {self.TOOLS_CONF}")
-        print(f"DESIGN_CONF: {self.DESIGN_CONF}")
-        print(f"DESIGN_PDK_CONF: {self.DESIGN_PDK_CONF}")
-        
-        # Add simulation config
-        self.SIM_CONF = os.path.join(self.e2e_dir, "configs-design", self.design, "sim-rtl.yml")
-        print(f"SIM_CONF: {self.SIM_CONF}")
-        
         sys.argv = [
             'hammer-vlsi',
             'sim',
             '--obj_dir', self.OBJ_DIR,
-            '-e', self.ENV_YML,
-            '-p', self.PDK_CONF,
-            '-p', self.TOOLS_CONF,
-            '-p', self.DESIGN_CONF,
-            '-p', self.DESIGN_PDK_CONF,
-            '-p', self.SIM_CONF
+            '--sim_rundir', self.OBJ_DIR + '/sim-rtl-rundir/',
+            '-e', self.ENV_YML
+        ]
+
+        # Add all project configs
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_RTL_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def sim_rtl_to_power(self):
+        print("Executing sim-rtl-to-power")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/sim-rtl-to-power_input.json',
+            '-e', self.ENV_YML
         ]
         
-        if self.extra:
-            sys.argv.extend(['-p', self.extra])
-        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_RTL_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/sim-rtl-rundir/sim-output.json'])
+
         if self.args:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
+        
+    def power_rtl(self):
+        print("Executing power-rtl")
+        sys.argv = [
+            'hammer-vlsi',
+            'power',
+            '--obj_dir', self.OBJ_DIR,
+            '--power_rundir', self.OBJ_DIR + '/power-rtl-rundir/',
+            '-e', self.ENV_YML
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_RTL_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/sim-rtl-to-power_input.json'])
+        
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
 
     def syn(self):
         print("Executing synthesis")
-        print(f"Using config files:")
-        print(f"ENV_YML: {self.ENV_YML}")
-        print(f"PDK_CONF: {self.PDK_CONF}")
-        print(f"TOOLS_CONF: {self.TOOLS_CONF}")
-        print(f"DESIGN_CONF: {self.DESIGN_CONF}")
-        print(f"DESIGN_PDK_CONF: {self.DESIGN_PDK_CONF}")
-        
-        # Add synthesis config
-        self.SYN_CONF = os.path.join(self.e2e_dir, "configs-design", self.design, "syn.yml")
-        print(f"SYN_CONF: {self.SYN_CONF}")
-        
         sys.argv = [
             'hammer-vlsi',
             'syn',
             '--obj_dir', self.OBJ_DIR,
-            '-e', self.ENV_YML,
-            '-p', self.PDK_CONF,
-            '-p', self.TOOLS_CONF,
-            '-p', self.DESIGN_CONF,
-            '-p', self.DESIGN_PDK_CONF,
-            '-p', self.SYN_CONF
+            '-e', self.ENV_YML
         ]
         
-        if self.extra:
-            sys.argv.extend(['-p', self.extra])
-        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
         if self.args:
             sys.argv.extend(self.args.split())
             
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
 
     def syn_to_par(self):
-        """
-        Generate par-input.json from synthesis outputs if it doesn't exist
-        """
-        par_input_json = f"{self.OBJ_DIR}/par-input.json"
+        print("Executing syn-to-par")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-par',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/par-input.json',
+            '-e', self.ENV_YML,
+        ]
         
-        # Only generate if file doesn't exist
-        if not os.path.exists(par_input_json):
-            print("Generating par-input.json")
-            par_config = {
-                "vlsi.inputs.placement_constraints": [],
-                "vlsi.inputs.gds_merge": True,
-                "par.inputs": {
-                    "top_module": self.design,
-                    "input_files": [f"{self.OBJ_DIR}/syn-rundir/{self.design}.mapped.v"]
-                }
-            }
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        sys.argv.extend(['-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
             
-            # Write configuration to par-input.json
-            with open(par_input_json, 'w') as f:
-                json.dump(par_config, f, indent=2)
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+    
+    def syn_to_sim(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-sim',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/syn-to-sim_input.json',
+            '-e', self.ENV_YML
+        ]
         
-        return par_input_json
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def sim_syn(self):
+        print("Executing sim-syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-sim',
+            '--obj_dir', self.OBJ_DIR, #bwrc env yml
+            '--sim_rundir', self.OBJ_DIR + '/sim-syn-rundir/',
+            '-e', self.ENV_YML
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/syn-to-sim_input.json'])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def sim_syn_to_power(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + 'sim-syn-to-power_input.json',
+            '-e', self.ENV_YML
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/sim-syn-rundir/sim-output.json'])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def syn_to_power(self):
+        print("Executing syn-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/syn-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def power_syn(self):
+        print("Executing power_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'power',
+            '--obj_dir', self.OBJ_DIR,
+            '--power_rundir', self.OBJ_DIR + '/power-syn-rundir/',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-to-power_input.json',
+            '-p', self.OBJ_DIR + '/sim-syn-to-power_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_SYN_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def syn_to_formal(self):
+        print("Executing syn-to-formal")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-formal',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/syn-to-formal_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def formal_syn(self):
+        print("Executing formal_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'formal',
+            '--obj_dir', self.OBJ_DIR,
+            '--formal_rundir', self.OBJ_DIR + '/formal-syn-rundir/',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-to-formal_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def syn_to_timing(self):
+        print("Executing syn-to-timing")
+        sys.argv = [
+            'hammer-vlsi',
+            'syn-to-timing',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/syn-to-timing_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def timing_syn(self):
+        print("Executing timing_syn")
+        sys.argv = [
+            'hammer-vlsi',
+            'timing',
+            '--obj_dir', self.OBJ_DIR,
+            '--timing_rundir', self.OBJ_DIR + '/timing-syn-rundir/',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/syn-to-timing_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
 
     def par(self):
-        """Execute PAR flow."""
-        # Generate par-input.json
-        par_input_json = self.syn_to_par()
-
-        # Set up command line arguments
+        print("Executing par")
         sys.argv = [
             'hammer-vlsi',
             'par',
             '--obj_dir', self.OBJ_DIR,
             '-e', self.ENV_YML,
-            '-p', par_input_json
+            '-p', self.OBJ_DIR + '/par-input.json'
         ]
         
         # Add all project configs
@@ -247,12 +466,296 @@ class AIRFlow:
             sys.argv.extend(self.args.split())
         
         print(f"Running command: {' '.join(sys.argv)}")
-        CLIDriver().main()
+        return CLIDriver().main()
+
+    def par_to_sim(self):
+        print("Executing par-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-to-sim',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/par-to-sim_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_PAR_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def sim_par(self):
+        print("Executing sim-par")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-sim',
+            '--obj_dir', self.OBJ_DIR, #bwrc env yml
+            '--sim_rundir', self.OBJ_DIR + '/sim-par-rundir/',
+            '-e', self.ENV_YML
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.SIM_PAR_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def sim_par_to_power(self):
+        print("Executing par-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'sim-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/sim-par-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-rundir/sim-par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_PAR_CONF])
+        sys.argv.extend(['-p', self.SIM_PAR_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def par_to_power(self):
+        print("Executing par-to-sim")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-to-power',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/par-to-power_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_PAR_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def power_par(self):
+        print("Executing power_par")
+        sys.argv = [
+            'hammer-vlsi',
+            'power',
+            '--obj_dir', self.OBJ_DIR,
+            '--power_rundir', self.OBJ_DIR + '/power-par-rundir/',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-to-power_input.json',
+            '-p', self.OBJ_DIR + '/sim-par-to-power_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+            
+        sys.argv.extend(['-p', self.POWER_PAR_CONF])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def par_to_formal(self):
+        print("Executing par-to-formal")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-to-formal',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/par-to-formal_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def formal_par(self):
+        print("Executing formal_par")
+        sys.argv = [
+            'hammer-vlsi',
+            'formal',
+            '--obj_dir', self.OBJ_DIR,
+            '--formal_rundir', self.OBJ_DIR + '/sim-rtl-rundir/',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-to-formal_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def par_to_timing(self):
+        print("Executing par-to-timing")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-to-timing',
+            '--obj_dir', self.OBJ_DIR,
+            '-o', self.OBJ_DIR + '/par-to-timing_input.json',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def timing_par(self):
+        print("Executing timing_par")
+        sys.argv = [
+            'hammer-vlsi',
+            'timing',
+            '--obj_dir', self.OBJ_DIR,
+            '--timing_rundir', self.OBJ_DIR + '/timing-par-rundir/',
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/par-to-timing_input.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def par_to_drc(self):
+        print("Executing par-to-drc")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-to-drc',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-o', self.OBJ_DIR + '/drc-input.json',
+            '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def drc(self):
+        print("Executing drc")
+        sys.argv = [
+            'hammer-vlsi',
+            'drc',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/drc-input.json'
+        ]
+
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+        
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def par_to_lvs(self):
+        print("Executing par-to-lvs")
+        sys.argv = [
+            'hammer-vlsi',
+            'par-to-lvs',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-o', self.OBJ_DIR + '/lvs-input.json',
+            '-p', self.OBJ_DIR + '/par-rundir/par-output.json'
+        ]
+        
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
+
+    def lvs(self):
+        print("Executing lvs")
+        sys.argv = [
+            'hammer-vlsi',
+            'lvs',
+            '--obj_dir', self.OBJ_DIR,
+            '-e', self.ENV_YML,
+            '-p', self.OBJ_DIR + '/lvs-input.json'
+        ]
+
+        for conf in self.PROJ_YMLS:
+            if conf:
+                sys.argv.extend(['-p', conf])
+        
+        if self.args:
+            sys.argv.extend(self.args.split())
+            
+        print(f"Running command: {' '.join(sys.argv)}")
+        return CLIDriver().main()
 
     def clean(self):
-        print("Executing clean")
+        print(f"Executing clean. OBJ_DIR={self.OBJ_DIR}")
         if os.path.exists(self.OBJ_DIR):
             subprocess.run(f"rm -rf {self.OBJ_DIR} hammer-vlsi-*.log", shell=True, check=True)
+        else:
+            print(f"OBJ_DIR path does not exist. No action taken")
 
 
 
@@ -282,17 +785,83 @@ class AIRFlow:
             title='RTL Simulation',
             description='Run RTL simulation'
         ),
+        'power_rtl': Param(
+            default=False,
+            type='boolean',
+            title='RTL Power Simulation',
+            description='Run RTL Power simulation'
+        ),
         'syn': Param(
             default=False,
             type='boolean',
             title='Synthesis',
             description='Run logic synthesis'
         ),
+        'sim_syn': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Synthesis',
+            description='Run synthesis simulation'
+        ),
+        'timing_syn': Param(
+            default=False,
+            type='boolean',
+            title='Timing Synthesis',
+            description='Get timing from synthesis'
+        ),
+        'formal_syn': Param(
+            default=False,
+            type='boolean',
+            title='Formal Synthesis',
+            description='Get formal from synthesis'
+        ),
+        'power_syn': Param(
+            default=False,
+            type='boolean',
+            title='Power Synthesis',
+            description='Get power from synthesis'
+        ),
         'par': Param(
             default=False,
             type='boolean',
             title='Place and Route',
             description='Run place and route'
+        ),
+        'drc': Param(
+            default=False,
+            type='boolean',
+            title='Design Rule Check',
+            description='Run design rule check'
+        ),
+        'lvs': Param(
+            default=False,
+            type='boolean',
+            title='Layout Versus Schematic',
+            description='Run layout versus schematic'
+        ),
+        'sim_par': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Place and Route',
+            description='Run place and route simulation'
+        ),
+        'timing_par': Param(
+            default=False,
+            type='boolean',
+            title='Timing Place and Route',
+            description='get timing from place and route'
+        ),
+        'formal_par': Param(
+            default=False,
+            type='boolean',
+            title='Formal Place and Route',
+            description='Get formal from place and route'
+        ),
+        'power_par': Param(
+            default=False,
+            type='boolean',
+            title='Power Place and Route',
+            description='Get power from place and route'
         )
     },
     render_template_as_native_obj=True
@@ -306,9 +875,21 @@ def create_hammer_dag_gcd():
             return "clean"
         elif (context['dag_run'].conf.get('build', False) or 
             context['dag_run'].conf.get('sim_rtl', False) or
+            context['dag_run'].conf.get('power_rtl', False) or
             context['dag_run'].conf.get('syn', False) or
-            context['dag_run'].conf.get('par', False)):
-            return "build_decider"
+            context['dag_run'].conf.get('formal_syn', False) or
+            context['dag_run'].conf.get('timing_syn', False) or
+            context['dag_run'].conf.get('power_syn', False) or
+            context['dag_run'].conf.get('sim_syn', False) or
+            context['dag_run'].conf.get('par', False) or
+            context['dag_run'].conf.get('power_par', False) or
+            context['dag_run'].conf.get('sim_par', False) or
+            context['dag_run'].conf.get('formal_par', False) or
+            context['dag_run'].conf.get('timing_par', False) or
+            context['dag_run'].conf.get('drc', False) or
+            context['dag_run'].conf.get('lvs', False)):
+            # return "build_decider"
+            return "build"
         else:
             return "exit_"
 
@@ -317,8 +898,7 @@ def create_hammer_dag_gcd():
         """Clean the build directory"""
         print("Starting clean task")
         flow = AIRFlow()
-        if os.path.exists(flow.OBJ_DIR):
-            subprocess.run(f"rm -rf {flow.OBJ_DIR} hammer-vlsi-*.log", shell=True, check=True)
+        flow.clean()
     
     @task
     def build(**context):
@@ -327,7 +907,8 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('build', False):
             print("Build parameter is True, executing build")
             flow = AIRFlow()
-            flow.build()
+            if flow.build():
+                raise AirflowFailException("build failed")
         else:
             print("Build parameter is False, skipping")
             raise AirflowSkipException("Build task skipped")
@@ -340,15 +921,15 @@ def create_hammer_dag_gcd():
     #Need to either find trigger flag to pass in, so this task runs if build_decider is success or change flow graph
     #@task
     #@task.branch(trigger_rule=TriggerRule.ONE_SUCCESS)
-    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
-    def sim_or_syn_decide(**context):
-        """Decide which downstream tasks to run — can select multiple"""
-        if context['dag_run'].conf.get('sim_rtl', False):
-            return 'sim_rtl'
-        elif (context['dag_run'].conf.get('syn', False) or 
-             context['dag_run'].conf.get('par', False)):
-            return 'syn_decider'
-        return 'exit_'
+    # @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    # def sim_or_syn_decide(**context):
+    #     """Decide whether to run sim_rtl or syn"""
+    #     if context['dag_run'].conf.get('sim_rtl', False):
+    #         return 'sim_rtl'
+    #     elif (context['dag_run'].conf.get('syn', False) or 
+    #         context['dag_run'].conf.get('par', False)):
+    #         return 'syn'
+    #     return 'exit_'
 
     @task
     def sim_rtl(**context):
@@ -357,10 +938,26 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('sim_rtl', False):
             print("Sim-RTL parameter is True, executing sim_rtl")
             flow = AIRFlow()
-            flow.sim_rtl()
+            if flow.sim_rtl():
+                raise AirflowFailException("sim_rtl failed")
         else:
             print("Sim-RTL parameter is False, skipping")
             raise AirflowSkipException("Sim-RTL task skipped")
+
+    @task
+    def power_rtl(**context):
+        """Execute power_RTL simulation task"""
+        print("Starting power_rtl task")
+        if context['dag_run'].conf.get('power_rtl', False):
+            print("power_RTL parameter is True, executing power_rtl")
+            flow = AIRFlow()
+            if flow.sim_rtl_to_power():
+                raise AirflowFailException("sim_rtl_to_power failed")
+            if flow.power_rtl():
+                raise AirflowFailException("power_rtl failed")
+        else:
+            print("power_RTL parameter is False, skipping")
+            raise AirflowSkipException("power_RTL task skipped")
 
     @task
     def syn(**context):
@@ -369,10 +966,73 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('syn', False):
             print("Synthesis parameter is True, executing syn")
             flow = AIRFlow()
-            flow.syn()
+            if flow.syn():
+                raise AirflowFailException("syn failed")
         else:
             print("Synthesis parameter is False, skipping")
             raise AirflowSkipException("Synthesis task skipped")
+
+    @task
+    def power_syn(**context):
+        """Execute power_synthesis task"""
+        print("Starting power_syn task")
+        if context['dag_run'].conf.get('power_syn', False):
+            print("power_Synthesis parameter is True, executing power_syn")
+            flow = AIRFlow()
+            if flow.syn_to_power():
+                raise AirflowFailException("syn_to_power failed")
+            if flow.sim_syn_to_power():
+                raise AirflowFailException("sim_syn_to_power failed")
+            if flow.power_syn():
+                raise AirflowFailException("power_syn failed")
+        else:
+            print("power_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("power_Synthesis task skipped")
+
+    @task
+    def timing_syn(**context):
+        """Execute timing_synthesis task"""
+        print("Starting timing_syn task")
+        if context['dag_run'].conf.get('timing_syn', False):
+            print("timing_Synthesis parameter is True, executing timing_syn")
+            flow = AIRFlow()
+            if flow.syn_to_timing():
+                raise AirflowFailException("syn_to_timing failed")
+            if flow.timing_syn():
+                raise AirflowFailException("timing_syn failed")
+        else:
+            print("timing_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("timing_Synthesis task skipped")
+
+    @task
+    def formal_syn(**context):
+        """Execute formal_synthesis task"""
+        print("Starting formal_syn task")
+        if context['dag_run'].conf.get('formal_syn', False):
+            print("formal_Synthesis parameter is True, executing formal_syn")
+            flow = AIRFlow()
+            if flow.syn_to_formal():
+                raise AirflowFailException("syn_to_formal failed")
+            if flow.formal_syn():
+                raise AirflowFailException("formal_syn failed")
+        else:
+            print("formal_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("formal_Synthesis task skipped")
+
+    @task
+    def sim_syn(**context):
+        """Execute sim_synthesis task"""
+        print("Starting sim_syn task")
+        if context['dag_run'].conf.get('sim_syn', False):
+            print("sim_Synthesis parameter is True, executing sim_syn")
+            flow = AIRFlow()
+            if flow.syn_to_sim():
+                raise AirflowFailException("syn_to_sim failed")
+            if flow.sim_syn():
+                raise AirflowFailException("sim_syn failed")
+        else:
+            print("sim_Synthesis parameter is False, skipping")
+            raise AirflowSkipException("sim_Synthesis task skipped")
 
     @task
     def par(**context):
@@ -381,119 +1041,136 @@ def create_hammer_dag_gcd():
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing par")
             flow = AIRFlow()
-            flow.par()
+            if flow.syn_to_par():
+                raise AirflowFailException("syn_to_par failed")
+            if flow.par():
+                raise AirflowFailException("par failed")
         else:
             print("PAR parameter is False, skipping")
             raise AirflowSkipException("PAR task skipped")
 
-    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    def build_decider(**context):
-        """Decide whether to run build"""
-        if context['dag_run'].conf.get('build', True):
-            return 'build'
-        elif (context['dag_run'].conf.get('sim_rtl', False) or
-            context['dag_run'].conf.get('syn', False) or
-            context['dag_run'].conf.get('par', False)):
-            return "sim_or_syn_decide"
-        return 'exit_'
-
-    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    def syn_decider(**context):
-        """Decide whether to run synthesis"""
-        if context['dag_run'].conf.get('syn', False):
-            return 'syn'
-        elif (context['dag_run'].conf.get('par', False)):
-            return "par_decider"
-        else:
-            return "exit_"
-
-    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
-    def par_decider(**context):
-        """Decide whether to run par"""
-        if context['dag_run'].conf.get('par', False):
-            return 'par'
-        return 'exit_'
-
-
-    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    @task(trigger_rule=TriggerRule.ALL_DONE) # Runs even if 'syn' failed/crashed
-    def syn_debug(**context):
-        """run autoTA script"""
-        print("Starting syn debug")
-        if context['dag_run'].conf.get('syn', False):
+    @task
+    def formal_par(**context):
+        """Execute formal_PAR task"""
+        print("Starting formal_par task")
+        if context['dag_run'].conf.get('formal_par', False):
+            print("formal_PAR parameter is True, executing formal_par")
             flow = AIRFlow()
-            current_script_dir = os.path.dirname(os.path.abspath(__file__))
-            gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
-            command = ["python3", gemini_path, "--phase", "syn"]
-            print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
-
-            result = subprocess.run(command, cwd=flow.OBJ_DIR, check=True, capture_output=True, text=True)
-            
-            # 3. Print the terminal output to the Airflow logs
-            print("Terminal Output:")
-            print(result.stdout)
-            
-            if result.stderr:
-                print("Terminal Errors:")
-                print(result.stderr)
+            if flow.par_to_formal():
+                raise AirflowFailException("par_to_formal failed")
+            if flow.formal_par():
+                raise AirflowFailException("formal_par failed")
         else:
-            print("Synthesis parameter is False, skipping")
-            raise AirflowSkipException("Synthesis task skipped")
-
-    @task(trigger_rule=TriggerRule.ALL_DONE)  # Always runs after sim_rtl (pass or fail)
-    def sim_rtl_debug(**context):
-        """Run autoTA on sim-rtl logs — always runs to proactively flag syn/par risks"""
-        print("Starting sim_rtl debug")
-        if context['dag_run'].conf.get('sim_rtl', False):
+            print("formal_PAR parameter is False, skipping")
+            raise AirflowSkipException("formal_PAR task skipped")
+        
+    @task
+    def timing_par(**context):
+        """Execute timing_PAR task"""
+        print("Starting timing_par task")
+        if context['dag_run'].conf.get('timing_par', False):
+            print("timing_PAR parameter is True, executing timing_par")
             flow = AIRFlow()
-            current_script_dir = os.path.dirname(os.path.abspath(__file__))
-            gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
-            command = ["python3", gemini_path, "--phase", "sim_rtl"]
-            print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
-
-            result = subprocess.run(command, cwd=flow.OBJ_DIR, check=True, capture_output=True, text=True)
-
-            print("Terminal Output:")
-            print(result.stdout)
-
-            if result.stderr:
-                print("Terminal Errors:")
-                print(result.stderr)
+            if flow.par_to_timing():
+                raise AirflowFailException("par_to_timing failed")
+            if flow.timing_par():
+                raise AirflowFailException("timing_par failed")
         else:
-            print("sim_rtl parameter is False, skipping")
-            raise AirflowSkipException("sim_rtl task skipped")
+            print("timing_PAR parameter is False, skipping")
+            raise AirflowSkipException("timing_PAR task skipped")
+        
+    @task
+    def sim_par(**context):
+        """Execute sim_PAR task"""
+        print("Starting sim_par task")
+        if context['dag_run'].conf.get('sim_par', False):
+            print("sim_PAR parameter is True, executing sim_par")
+            flow = AIRFlow()
+            if flow.par_to_sim():
+                raise AirflowFailException("par_to_sim failed")
+            if flow.sim_par():
+                raise AirflowFailException("sim_par failed")
+        else:
+            print("sim_PAR parameter is False, skipping")
+            raise AirflowSkipException("sim_PAR task skipped")
+        
+    @task
+    def power_par(**context):
+        """Execute Power_PAR task"""
+        print("Starting Power_Par task")
+        if context['dag_run'].conf.get('power_par', False):
+            print("Power_PAR parameter is True, executing Power_Par")
+            flow = AIRFlow()
+            if flow.sim_par_to_power():
+                raise AirflowFailException("sim_par_to_power failed")
+            if flow.par_to_power():
+                raise AirflowFailException("par_to_power failed")
+            if flow.power_par():
+                raise AirflowFailException("power_par failed")
+        else:
+            print("Power_PAR parameter is False, skipping")
+            raise AirflowSkipException("Power_PAR task skipped")
+        
+    @task
+    def drc(**context):
+        """Execute DRC task"""
+        print("Starting DRC task")
+        if context['dag_run'].conf.get('drc', False):
+            print("DRC parameter is True, executing DRC")
+            flow = AIRFlow()
+            if flow.par_to_drc():
+                raise AirflowFailException("par_to_drc failed")
+            if flow.drc():
+                raise AirflowFailException("drc failed")
+        else:
+            print("DRC parameter is False, skipping")
+            raise AirflowSkipException("DRC task skipped")
+        
+    @task
+    def lvs(**context):
+        """Execute LVS task"""
+        print("Starting LVS task")
+        if context['dag_run'].conf.get('lvs', False):
+            print("LVS parameter is True, executing LVS")
+            flow = AIRFlow()
+            if flow.par_to_lvs():
+                raise AirflowFailException("par_to_lvs failed")
+            if flow.lvs():
+                raise AirflowFailException("lvs failed")
+        else:
+            print("LVS parameter is False, skipping")
+            raise AirflowSkipException("LVS task skipped")
 
-    @task(trigger_rule=TriggerRule.ALL_DONE)  # Runs after par completes, but only analyzes on failure
-    def par_debug(**context):
-        """Run autoTA on PAR logs — only performs analysis when par fails"""
-        print("Starting par debug")
-        if not context['dag_run'].conf.get('par', False):
-            print("PAR parameter is False, skipping")
-            raise AirflowSkipException("par task skipped")
+    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
+    # @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    # def build_decider(**context):
+    #     """Decide whether to run build"""
+    #     if context['dag_run'].conf.get('build', True):
+    #         return 'build'
+    #     elif (context['dag_run'].conf.get('sim_rtl', False) or
+    #         context['dag_run'].conf.get('syn', False) or
+    #         context['dag_run'].conf.get('par', False)):
+    #         return "sim_or_syn_decide"
+    #     return 'exit_'
 
-        # Check if par actually failed
-        par_ti = context['dag_run'].get_task_instance('par')
-        if par_ti and par_ti.state == 'success':
-            print("PAR passed — skipping debug analysis")
-            raise AirflowSkipException("PAR succeeded, no debug needed")
+    # #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
+    # @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
+    # def syn_decider(**context):
+    #     """Decide whether to run synthesis"""
+    #     if context['dag_run'].conf.get('syn', False):
+    #         return 'syn'
+    #     elif (context['dag_run'].conf.get('par', False)):
+    #         return "par_decider"
+    #     else:
+    #         return "exit_"
 
-        flow = AIRFlow()
-        current_script_dir = os.path.dirname(os.path.abspath(__file__))
-        gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
-        command = ["python3", gemini_path, "--phase", "par"]
-        print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
-
-        result = subprocess.run(command, cwd=flow.OBJ_DIR, check=True, capture_output=True, text=True)
-
-        print("Terminal Output:")
-        print(result.stdout)
-
-        if result.stderr:
-            print("Terminal Errors:")
-            print(result.stderr)
+    # #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
+    # @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    # def par_decider(**context):
+    #     """Decide whether to run par"""
+    #     if context['dag_run'].conf.get('par', False):
+    #         return 'par'
+    #     return 'exit_'
 
     @task(trigger_rule=TriggerRule.NONE_FAILED)
     def exit_():
@@ -504,44 +1181,70 @@ def create_hammer_dag_gcd():
     # Create task instances
     start = start()
     clean = clean()
-    build_decide = build_decider()
+    # build_decide = build_decider()
     build = build()
-    sim_or_syn_decide = sim_or_syn_decide()
+    # sim_or_syn_decide = sim_or_syn_decide()
     sim_rtl = sim_rtl()
-    sim_rtl_debug = sim_rtl_debug()
-    syn_decide = syn_decider()
+    power_rtl = power_rtl()
+    # syn_decide = syn_decider()
     syn = syn()
-    syn_debug = syn_debug()
-    par_decide = par_decider()
+    power_syn = power_syn()
+    timing_syn = timing_syn()
+    formal_syn = formal_syn()
+    sim_syn = sim_syn()
+    # par_decide = par_decider()
     par = par()
-    par_debug = par_debug()
+    power_par = power_par()
+    timing_par = timing_par()
+    formal_par = formal_par()
+    sim_par = sim_par()
+    drc = drc()
+    lvs = lvs()
     exit_ = exit_()
 
     # Set up dependencies to ensure deciders always run
-    start >> [clean, build_decide, exit_]
+    start >> [clean, build, exit_]
     clean >> exit_
-    build_decide >> [build, sim_or_syn_decide, exit_]
-    build >> sim_or_syn_decide
-    sim_or_syn_decide >> [sim_rtl, syn_decide, exit_]
-    sim_rtl >> sim_rtl_debug >> exit_ # debug is a follow-up leaf to sim_rtl
-    syn_decide >> [syn, par_decide, exit_]
-    syn >> syn_debug >> par_decide
-    par_decide >> [par, exit_]
-    par >> par_debug >> exit_  # debug inserted between par and exit_
+    # build_decide >> [build, sim_or_syn_decide, exit_]
+    build >> [sim_rtl, syn, exit_]
+    sim_rtl >> [power_rtl, exit_]
+    power_rtl >> exit_
+    # syn_decide >> [syn, par_decide, exit_]
+    syn >> [timing_syn, power_syn, formal_syn, sim_syn, par, exit_]
+    timing_syn >> exit_
+    sim_syn >> [power_syn, exit_]
+    formal_syn >> exit_
+    power_syn >> exit_
+    # par_decide >> [par, exit_]
+    par >> [timing_par, power_par, formal_par, sim_par, drc, lvs, exit_]
+    power_par >> exit_
+    formal_par >> exit_
+    sim_par >> [power_par, exit_]
+    timing_par >> exit_
+    lvs >> exit_
+    drc >> exit_
 
     return {
         'clean': clean,
-        'build_decide': build_decide,
+        # 'build_decide': build_decide,
         'build': build,
-        'sim_or_syn_decide': sim_or_syn_decide,
+        # 'sim_or_syn_decide': sim_or_syn_decide,
         'sim_rtl': sim_rtl,
-        'sim_rtl_debug': sim_rtl_debug,
-        'syn_decide': syn_decide,
+        'power_rtl': power_rtl,
+        # 'syn_decide': syn_decide,
         'syn': syn,
-        'syn_debug': syn_debug,
-        'par_decide': par_decide,
+        'power_syn': power_syn,
+        'timing_syn': timing_syn,
+        'formal_syn': formal_syn,
+        'sim_syn': sim_syn,
+        # 'par_decide': par_decide,
         'par': par,
-        'par_debug': par_debug
+        'power_par': power_par,
+        'sim_par': sim_par,
+        'timing_par': timing_par,
+        'formal_par': formal_par,
+        'lvs': lvs,
+        'drc': drc
     }
 
 # Create the DAG
@@ -885,11 +1588,17 @@ class AIRFlow_rocket:
             title='Build Design',
             description='Run the build step'
         ),
-        'sim_rtl': Param(
+        'sim-rtl': Param(
             default=False,
             type='boolean',
             title='RTL Simulation',
             description='Run RTL simulation'
+        ),
+        'power-rtl': Param(
+            default=False,
+            type='boolean',
+            title='RTL Power Simulation',
+            description='Run RTL Power simulation'
         ),
         'sram_generator': Param(
             default=False,
@@ -903,11 +1612,71 @@ class AIRFlow_rocket:
             title='Synthesis',
             description='Run logic synthesis'
         ),
+        'sim-syn': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Synthesis',
+            description='Run synthesis simulation'
+        ),
+        'timing-syn': Param(
+            default=False,
+            type='boolean',
+            title='Timing Synthesis',
+            description='Get timing from synthesis'
+        ),
+        'formal-syn': Param(
+            default=False,
+            type='boolean',
+            title='Formal Synthesis',
+            description='Get formal from synthesis'
+        ),
+        'power-syn': Param(
+            default=False,
+            type='boolean',
+            title='Power Synthesis',
+            description='Get power from synthesis'
+        ),
         'par': Param(
             default=False,
             type='boolean',
             title='Place and Route',
             description='Run place and route'
+        ),
+        'drc': Param(
+            default=False,
+            type='boolean',
+            title='Design Rule Check',
+            description='Run design rule check'
+        ),
+        'lvs': Param(
+            default=False,
+            type='boolean',
+            title='Layout Versus Schematic',
+            description='Run layout versus schematic'
+        ),
+        'sim-par': Param(
+            default=False,
+            type='boolean',
+            title='Simulation Place and Route',
+            description='Run place and route simulation'
+        ),
+        'timing-par': Param(
+            default=False,
+            type='boolean',
+            title='Timing Place and Route',
+            description='get timing from place and route'
+        ),
+        'formal-par': Param(
+            default=False,
+            type='boolean',
+            title='Formal Place and Route',
+            description='Get formal from place and route'
+        ),
+        'power-par': Param(
+            default=False,
+            type='boolean',
+            title='Power Place and Route',
+            description='Get power from place and route'
         )
     },
     render_template_as_native_obj=True
@@ -992,8 +1761,7 @@ def create_hammer_dag_rocket():
             raise AirflowSkipException("SRAM task skipped")
 
     #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    #@task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
     def sram_decider(**context):
         """Decide whether to run sram generator"""
         if context['dag_run'].conf.get('sram_generator', False):
@@ -1054,8 +1822,7 @@ def create_hammer_dag_rocket():
         return 'exit_'
 
     #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    #@task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
     def syn_decider(**context):
         """Decide whether to run synthesis"""
         if context['dag_run'].conf.get('syn', False):
@@ -1077,7 +1844,7 @@ def create_hammer_dag_rocket():
     def exit_():
         """Exit task"""
         print("Exiting")
-        #sys.exit(0)
+        sys.exit(0)
 
     # Create task instances
     start = start()

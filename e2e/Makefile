@@ -5,13 +5,13 @@ vlsi_dir=$(abspath .)
 # minimal flow configuration variables
 design              ?= pass
 pdk                 ?= sky130
-tools               ?= nop
+tools               ?= cm
 env                 ?= bwrc
 
 extra               ?= #"configs-design/$(design)/mock_hier.yml"  # extra configs
 args                ?=  # command-line args (including step flow control)
 
-
+HAMMER_DRIVER		?= ./example-driver
 OBJ_DIR             ?= $(vlsi_dir)/build-$(pdk)-$(tools)/$(design)
 
 # non-overlapping default configs
