@@ -22,11 +22,6 @@ source ~/.bashrc
 python3 gemini.py --show-key
 ```
 
-You should see:
-```
-✅ API Key: CONFIGURED  (AIzaSyDi...xxxx)
-```
-
 ## Usage
 
 ```bash
@@ -48,6 +43,29 @@ python3 gemini.py --help
 
 Run from your **design build directory** (e.g., `build-sky130-cm/gcd/`), or the DAG will set the working directory automatically.
 
+## What Gets Sent to the AI
+
+Every stage receives **all design config files** so the AI can predict downstream issues (e.g., syn_debug sees par.yml to forecast PAR problems).
+
+| Data | syn | sim_rtl | par |
+|------|-----|---------|-----|
+| Primary config | `syn.yml` | `sim-rtl.yml` | `par.yml` |
+| All other configs | ✅ every `.yml` in configs-design | ✅ | ✅ |
+| HDL source files | ✅ (raw, no comment stripping) | ✅ | ✅ |
+| Testbench files | — | ✅ (`*_tb.v`) | — |
+| Timing report | `.setup_view.rpt` | — | postRoute reports |
+| Log issues | Genus log | Sim log | Innovus log |
+
+## AI Output Format
+
+The AI outputs a structured analysis with:
+1. **SUMMARY** — What happened, what's broken
+2. **CURRENT ERRORS** — Each issue with file, line, evidence
+3. **DOWNSTREAM PREDICTIONS** — What will fail in future stages
+4. **PATCH** — A unified `git diff` that fixes all issues
+5. **CHANGE LOG** — One bullet per file explaining the change
+6. **ACTION** — PROCEED, PATCH_AND_RETRY, or ABORT
+
 ## Files
 
 | File | Purpose |
@@ -56,49 +74,27 @@ Run from your **design build directory** (e.g., `build-sky130-cm/gcd/`), or the 
 | `extract.py` | Log parser — extracts warnings/errors by category and severity |
 | `config.yml` | AI model settings and phase-specific prompts |
 
-## What Gets Sent to the AI
-
-Each phase sends different files to give the AI full context:
-
-| Data | syn | sim_rtl | par |
-|------|-----|---------|-----|
-| Primary config | `syn.yml` | `sim-rtl.yml` | `par.yml` |
-| Auxiliary configs | `common.yml`, `sky130.yml` | `common.yml` | `common.yml`, `syn.yml`, `sky130.yml` |
-| HDL source files | ✅ | ✅ | ✅ |
-| Testbench files | — | ✅ (`*_tb.v`) | — |
-| Timing report | `.setup_view.rpt` | — | postRoute reports |
-| Log issues | Genus log | Sim log | Innovus log |
-
-Files are sent **raw** (no comment stripping) so the AI can generate accurate diffs.
-
 ## Output & Logs
 
-### Console
-Markdown-formatted analysis rendered via Rich (if installed), otherwise plain text.
+| Location | What | Persists |
+|----------|------|----------|
+| `autoTA/logs/*.json` | Tamper-proof JSON audit log (sealed read-only) | Shared |
+| `<build-dir>/autota_logs/` | Legacy text logs | Per-design |
+| `<build-dir>/autota_patches/<timestamp>_<phase>/` | Patch archives (see below) | Per-design |
 
-### Session Logs (shared, tamper-protected)
-```
-autoTA/logs/autoTA_<user>_<phase>_<timestamp>.json
-```
-JSON archives sealed with read-only permissions. Contains the full AI response, extracted issues, source code, and timing report.
+### Patch Archives
 
-### Legacy Text Logs (design-local)
-```
-<build-dir>/autota_logs/autoTA_<logfile>
-```
-Human-readable text log in the design build directory.
+Created every run. Contains backups of all files before any patching:
 
-### Patch Archives (design-local)
 ```
-<build-dir>/autota_patches/YYYY-MM-DD_HHMMSS_<phase>/
-├── manifest.json      # timestamp, phase, git commit, list of backed-up files
-├── ai_analysis.md     # full AI response
+autota_patches/2026-03-04_132800_syn/
+├── manifest.json      # timestamp, phase, git commit, backed-up file paths
+├── ai_analysis.md     # full AI response (with the git diff)
 └── originals/         # backup copies of all source + config files
 ```
-Created every run. Before any AI-suggested patch is applied, the originals are preserved here. Each archive folder is named by timestamp and phase for easy lookup.
 
 **Finding what you need:**
-- **Latest analysis?** → Sort `autota_patches/` by name (newest is last)
-- **What files were involved?** → Read `manifest.json`
-- **What did the AI say?** → Read `ai_analysis.md`
-- **Need to rollback?** → Copy files from `originals/` back to their original paths (listed in `manifest.json`)
+- **Latest?** → Sort by folder name (newest last)
+- **What files?** → `manifest.json`
+- **What did the AI say?** → `ai_analysis.md`
+- **Rollback?** → Copy files from `originals/` back (paths in `manifest.json`)

@@ -2,7 +2,7 @@
 import sys
 import os
 import subprocess
-import re
+import shutil
 import gzip
 import json
 import time
@@ -41,48 +41,69 @@ def print_help() -> None:
     print("=" * 60 + "\n")
 
 
+API_KEY_FILE = os.path.join(SCRIPT_DIR, ".api_key")
+
+
 def set_api_key(api_key: str) -> None:
-    bashrc_path = get_bashrc_path()
-    if os.path.exists(bashrc_path):
-        with open(bashrc_path, "r") as f:
-            lines = f.readlines()
-    else:
-        lines = []
-
-    filtered = [l for l in lines
-                if "AUTOTA_API_KEY" not in l and l.strip() != "# AutoTA+ Gemini API Key"]
-    filtered.append("\n# AutoTA+ Gemini API Key\n")
-    filtered.append(f'export AUTOTA_API_KEY="{api_key}"\n')
-
-    with open(bashrc_path, "w") as f:
-        f.writelines(filtered)
+    # Write to local file (works in Airflow, shell, cron — anything)
+    with open(API_KEY_FILE, "w") as f:
+        f.write(api_key.strip())
+    os.chmod(API_KEY_FILE, 0o600)  # owner-only read/write
 
     print("\n" + "=" * 60)
-    print("✅ API key saved to ~/.bashrc")
-    print("=" * 60)
-    print("\nNEXT STEP: source ~/.bashrc")
+    print(f"✅ API key saved to {API_KEY_FILE}")
+    print("   No 'source' needed — ready to use immediately.")
     print("=" * 60 + "\n")
 
 
 def show_api_key() -> None:
     api_key = os.environ.get("AUTOTA_API_KEY")
+    if not api_key and os.path.exists(API_KEY_FILE):
+        with open(API_KEY_FILE) as f:
+            api_key = f.read().strip()
     print("\n" + "=" * 60)
     if api_key:
         masked = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else api_key[:4] + "..."
         print(f"✅ API Key: CONFIGURED  ({masked})")
     else:
         print("❌ API Key: NOT SET")
-        print(f"\nRun: {SCRIPT_NAME} --set-key YOUR_KEY && source ~/.bashrc")
+        print(f"\nRun: {SCRIPT_NAME} --set-key YOUR_KEY")
     print("=" * 60 + "\n")
 
 
 def get_api_key() -> str:
+    # 1. Environment variable (highest priority)
     api_key = os.environ.get("AUTOTA_API_KEY")
     if api_key:
         return api_key
+
+    # 2. Local key file (works in Airflow, cron, any process)
+    if os.path.exists(API_KEY_FILE):
+        try:
+            with open(API_KEY_FILE) as f:
+                val = f.read().strip()
+            if val:
+                return val
+        except Exception:
+            pass
+
+    # 3. Bashrc fallback (legacy)
+    bashrc = os.path.expanduser("~/.bashrc")
+    if os.path.exists(bashrc):
+        try:
+            with open(bashrc, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("export AUTOTA_API_KEY="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+        except Exception:
+            pass
+
     print("\n" + "=" * 60)
     print("❌ No API key configured.")
-    print(f"\nRun: {SCRIPT_NAME} --set-key YOUR_KEY && source ~/.bashrc")
+    print(f"\nRun: {SCRIPT_NAME} --set-key YOUR_KEY")
     print("Get a key from: https://aistudio.google.com/apikey")
     print("=" * 60 + "\n")
     sys.exit(1)
@@ -233,7 +254,23 @@ def load_lab_config():
                 print(f" Error reading {config_path}: {e}")
                 sys.exit(1)
 
-    print(f" Error: Could not find {config_name} relative to {CURRENT_LAB_DIR}")
+    print(f" Warning: Could not find {config_name} relative to {CURRENT_LAB_DIR}")
+
+    # Fallback: try common.yml if the phase-specific config doesn't exist yet
+    if config_name != "common.yml":
+        print(f" Trying fallback: common.yml")
+        for opt in search_options:
+            fallback = os.path.join(CURRENT_LAB_DIR, opt.replace(config_name, "common.yml"))
+            if os.path.exists(fallback):
+                print(f" Using fallback config: {os.path.normpath(fallback)}")
+                ACTUAL_CONFIG_PATH = os.path.abspath(fallback)
+                try:
+                    with open(fallback, "r") as f:
+                        return yaml.safe_load(f)
+                except Exception as e:
+                    print(f" Error reading {fallback}: {e}")
+                    break
+
     print(" Proceeding without a design config file.")
     return {}
 
@@ -552,11 +589,16 @@ def analyze_issues(synthesis_issues, hdl_code, timing_report_content,
     prompt_key = CURRENT_PHASE["prompt_key"]
     prompt_text = settings.get(prompt_key, settings.get("prompt", "Analyze these issues."))
 
-    try:
-        with open(ACTUAL_CONFIG_PATH, "r") as f:
-            config_raw = f.read()
-    except Exception as e:
-        config_raw = f"Error reading config: {e}"
+    # Read primary config (may not exist on first run)
+    config_raw = "No primary config file found for this phase."
+    config_label = "(no config)"
+    if ACTUAL_CONFIG_PATH and os.path.exists(ACTUAL_CONFIG_PATH):
+        config_label = os.path.basename(ACTUAL_CONFIG_PATH)
+        try:
+            with open(ACTUAL_CONFIG_PATH, "r") as f:
+                config_raw = f.read()
+        except Exception as e:
+            config_raw = f"Error reading config: {e}"
 
     # Build auxiliary configs section
     aux_section = ""
@@ -573,7 +615,7 @@ def analyze_issues(synthesis_issues, hdl_code, timing_report_content,
     full_prompt = (
         f"{prompt_text}\n"
         "---------------------------------------------------\n"
-        f"CONFIG ({os.path.basename(ACTUAL_CONFIG_PATH)}) CONTENT:\n"
+        f"CONFIG ({config_label}) CONTENT:\n"
         f"{config_raw}\n\n"
         f"{aux_section}"
         "LOG ISSUES:\n"
@@ -697,7 +739,6 @@ def archive_patch_session(analysis, phase, source_files_used):
     for filepath in source_files_used:
         abspath = os.path.abspath(filepath)
         if os.path.exists(abspath):
-            import shutil
             dest = os.path.join(originals_dir, os.path.basename(abspath))
             try:
                 shutil.copy2(abspath, dest)
