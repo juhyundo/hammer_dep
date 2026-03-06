@@ -550,11 +550,16 @@ def get_testbench_files():
 def get_file_content_smart(filename, max_chars: int = 30000):
     """Locate file and truncate if needed. No comment stripping — AI needs
     raw content so it can generate accurate diffs."""
+    # Handle filenames that already include subdirectories (e.g., "src/gcd.v")
+    basename = os.path.basename(filename)
     search_paths = [
-        os.path.join(CURRENT_LAB_DIR, filename),
-        os.path.join(CURRENT_LAB_DIR, "src", filename),
-        os.path.join(CURRENT_LAB_DIR, "..", "..", "src", filename),
-        os.path.join(CURRENT_LAB_DIR, "..", "..", "..", "src", filename)
+        os.path.join(CURRENT_LAB_DIR, filename),                         # build-dir/src/gcd.v
+        os.path.join(CURRENT_LAB_DIR, "..", "..", filename),             # e2e/src/gcd.v (2 up from build-dir/gcd/)
+        os.path.join(CURRENT_LAB_DIR, "..", "..", "..", filename),       # 3 up
+        os.path.join(CURRENT_LAB_DIR, basename),                         # build-dir/gcd.v
+        os.path.join(CURRENT_LAB_DIR, "src", basename),                  # build-dir/src/gcd.v
+        os.path.join(CURRENT_LAB_DIR, "..", "..", "src", basename),      # e2e/src/gcd.v
+        os.path.join(CURRENT_LAB_DIR, "..", "..", "..", "src", basename) # 3 up/src/gcd.v
     ]
 
     raw_content = None
@@ -859,14 +864,22 @@ def main():
         if content:
             hdl_code += f"\n\n//FILE: {filename}\n{content}"
             # Resolve actual path for archiving
+            basename = os.path.basename(filename)
             for search in [CURRENT_LAB_DIR,
+                           os.path.join(CURRENT_LAB_DIR, ".."),
+                           os.path.join(CURRENT_LAB_DIR, "..", ".."),
+                           os.path.join(CURRENT_LAB_DIR, "..", "..", ".."),
                            os.path.join(CURRENT_LAB_DIR, "src"),
                            os.path.join(CURRENT_LAB_DIR, "..", "..", "src"),
                            os.path.join(CURRENT_LAB_DIR, "..", "..", "..", "src")]:
-                candidate = os.path.join(search, filename)
-                if os.path.exists(candidate):
-                    all_source_paths.append(candidate)
-                    break
+                for name in [filename, basename]:
+                    candidate = os.path.join(search, name)
+                    if os.path.exists(candidate):
+                        all_source_paths.append(candidate)
+                        break
+                else:
+                    continue
+                break
 
     # Gather auxiliary configs and testbench files
     aux_configs = get_auxiliary_config_files()

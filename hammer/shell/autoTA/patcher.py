@@ -249,8 +249,10 @@ def apply_patch(diff_text: str, work_dir: str, archive_dir: str,
             continue
 
         # Back up original
-        if not os.path.exists(os.path.join(backup_dir, filename)):
-            shutil.copy2(resolved, os.path.join(backup_dir, filename))
+        backup_path = os.path.join(backup_dir, filename)
+        if not os.path.exists(backup_path):
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            shutil.copy2(resolved, backup_path)
 
         # Read file
         with open(resolved, 'r') as f:

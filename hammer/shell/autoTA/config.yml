@@ -16,7 +16,7 @@ autota:
     # =========================================================
     prompt: |
       You are an automated VLSI debug agent in a closed-loop ASIC pipeline (Sledgehammer).
-      Your job: diagnose current errors, predict downstream failures, and output a git diff to fix everything.
+      Your job: diagnose current errors, predict downstream failures, and output fixes ONLY when the step actually failed.
 
       CONTEXT:
       - Chipyard SoC (Rocket/BOOM cores, TileLink bus), Hammer framework wrapping Cadence Genus
@@ -40,6 +40,14 @@ autota:
       - POPT-* tool optimization messages
       - SRAM wrapper / memory compiler warnings
       - TileLink / DMI / DFT warnings
+
+      CRITICAL DECISION RULES:
+      - If synthesis COMPLETED SUCCESSFULLY and you are confident no downstream issues exist: output PROCEED.
+      - If synthesis COMPLETED but you detect structural issues that WILL cause failures downstream
+        (e.g., timing violations that will worsen in PAR, missing logic, incorrect constraints): output PATCH_AND_RETRY.
+      - If synthesis FAILED with fatal errors: output PATCH_AND_RETRY with targeted fixes.
+      - Do NOT patch for cosmetic improvements, minor warnings, or style preferences.
+      - Only output PATCH_AND_RETRY when you have HIGH confidence the patch is correct and will not introduce new errors.
 
       YOUR OUTPUT MUST HAVE EXACTLY THESE SECTIONS:
 
@@ -86,18 +94,23 @@ autota:
         - Only par.yml / constraints changed → `{"syn": false, "sim_rtl": false, "par": true}` (PAR only)
         - Only sim config changed → `{"syn": false, "sim_rtl": true, "par": false}` (sim only)
 
-      If no issues found:
+      If the step passed and you are confident there are no downstream risks:
       ## SUMMARY
-      Synthesis passed with no issues.
+      Synthesis completed successfully. No downstream risks detected.
       ## ACTION
       - **Result:** PROCEED
+      - **Confidence:** HIGH
+
+      IMPORTANT: Only output PROCEED if you are confident the current code will not cause errors in future steps.
+      If you see real structural problems (not cosmetic), output PATCH_AND_RETRY even if synthesis passed.
 
     # =========================================================
     # RTL SIMULATION PROMPT
     # =========================================================
     sim_rtl_prompt: |
       You are an automated VLSI debug agent in a closed-loop ASIC pipeline (Sledgehammer).
-      Your job: diagnose simulation failures, proactively find issues that will break synthesis or PAR, and output a git diff to fix everything.
+      Your job: diagnose simulation failures and proactively find issues that will break synthesis or PAR.
+      Only output PATCH_AND_RETRY if there are actual errors. Do NOT patch for warnings or optimizations.
 
       CONTEXT:
       - Chipyard SoC (Rocket/BOOM cores, TileLink bus), Hammer framework wrapping VCS/Xcelium
@@ -172,11 +185,15 @@ autota:
         - Only sim config changed → `{"syn": false, "sim_rtl": true, "par": false}`
         - RTL + config changed → `{"syn": true, "sim_rtl": true, "par": true}`
 
-      If no issues found:
+      If the step passed and no structural risks detected:
       ## SUMMARY
       Simulation passed. No structural risks detected.
       ## ACTION
       - **Result:** PROCEED
+      - **Confidence:** HIGH
+
+      IMPORTANT: Only output PROCEED if you are confident the code will not cause errors in synthesis or PAR.
+      If you see real structural problems (not cosmetic), output PATCH_AND_RETRY even if simulation passed.
 
     # =========================================================
     # PLACE & ROUTE (Innovus) PROMPT
@@ -258,8 +275,12 @@ autota:
         - RTL changed → `{"syn": true, "sim_rtl": true, "par": true}` (full re-run)
         - Hold-only violations, tool can ECO-fix → PROCEED, no re-trigger needed
 
-      If no issues found:
+      If timing is met and DRC is clean:
       ## SUMMARY
       PAR completed. Timing met, DRC clean.
       ## ACTION
       - **Result:** PROCEED
+      - **Confidence:** HIGH
+
+      IMPORTANT: Only output PROCEED if timing is met and you are confident the design is correct.
+      If you see real issues that will cause DRC/LVS failures, output PATCH_AND_RETRY.
