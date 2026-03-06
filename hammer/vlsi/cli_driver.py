@@ -593,6 +593,7 @@ class CLIDriver:
                 print(driver.obj_dir)
                 if driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
+                        driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
                         return None
                     else:
                         post_load_func_checked(driver)
@@ -602,6 +603,7 @@ class CLIDriver:
                             driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
                             list(extra_hooks or []))
                     if not success:
+                        driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("Synthesis tool did not succeed")
                         return None
                     post_run_func_checked(driver)
@@ -616,6 +618,7 @@ class CLIDriver:
             elif action_type == "par":
                 if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
+                        driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
                         return None
                     else:
                         post_load_func_checked(driver)
@@ -625,6 +628,7 @@ class CLIDriver:
                             driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
                             list(extra_hooks or []))
                     if not success:
+                        driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("Place-and-route tool did not succeed")
                         return None
                     post_run_func_checked(driver)
@@ -637,8 +641,9 @@ class CLIDriver:
                 else:
                     return 0
             elif action_type == "drc":
-                if driver.database.stage_change_check(stage = "drc"):
+                if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
+                        driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
                         return None
                     else:
                         post_load_func_checked(driver)
@@ -648,6 +653,7 @@ class CLIDriver:
                             driver.tech.get_tech_drc_hooks(driver.drc_tool.name) + \
                             list(extra_hooks or []))
                     if not success:
+                        driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("DRC tool did not succeed")
                         return None
                     post_run_func_checked(driver)
@@ -660,8 +666,9 @@ class CLIDriver:
                 else:
                     return 0
             elif action_type == "lvs":
-                if driver.database.stage_change_check(stage = "lvs"):
+                if driver.database.stage_change_check(stage = "lvs", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
+                        driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
                         return None
                     else:
                         post_load_func_checked(driver)
@@ -671,6 +678,7 @@ class CLIDriver:
                             driver.tech.get_tech_lvs_hooks(driver.lvs_tool.name) + \
                             list(extra_hooks or []))
                     if not success:
+                        driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("LVS tool did not succeed")
                         return None
                     post_run_func_checked(driver)
