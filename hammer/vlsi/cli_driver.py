@@ -593,10 +593,16 @@ class CLIDriver:
             # Stored as {stage_tag}.hooks_fingerprint_sha256 so stage_change_check
             # picks it up automatically (key starts with the stage's tag prefix).
             _STAGE_HOOK_META = {
-                "synthesis": ("synthesis", "get_tech_syn_hooks", "vlsi.core.synthesis_tool"),
-                "par":       ("par",       "get_tech_par_hooks", "vlsi.core.par_tool"),
-                "drc":       ("drc",       "get_tech_drc_hooks", "vlsi.core.drc_tool"),
-                "lvs":       ("lvs",       "get_tech_lvs_hooks", "vlsi.core.lvs_tool"),
+                "synthesis":      ("synthesis",      "get_tech_syn_hooks",             "vlsi.core.synthesis_tool"),
+                "par":            ("par",            "get_tech_par_hooks",             "vlsi.core.par_tool"),
+                "drc":            ("drc",            "get_tech_drc_hooks",             "vlsi.core.drc_tool"),
+                "lvs":            ("lvs",            "get_tech_lvs_hooks",             "vlsi.core.lvs_tool"),
+                "sram_generator": ("sram_generator", "get_tech_sram_generator_hooks",  "vlsi.core.sram_generator_tool"),
+                "sim":            ("sim",            "get_tech_sim_hooks",             "vlsi.core.sim_tool"),
+                "power":          ("power",          "get_tech_power_hooks",           "vlsi.core.power_tool"),
+                "formal":         ("formal",         "get_tech_formal_hooks",          "vlsi.core.formal_tool"),
+                "timing":         ("timing",         "get_tech_timing_hooks",          "vlsi.core.timing_tool"),
+                "pcb":            ("pcb",            "get_tech_pcb_hooks",             "vlsi.core.pcb_tool"),
             }
             if action_type in _STAGE_HOOK_META:
                 stage_tag, tech_method, tool_cfg_key = _STAGE_HOOK_META[action_type]

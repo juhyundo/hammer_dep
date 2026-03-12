@@ -3,20 +3,36 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import inspect
+import textwrap
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from hammer.vlsi.hooks import HammerToolHookAction
 
 
+def _ast_hash(func) -> str:
+    """
+    SHA256 of a function's AST.
+    This ignores comments, docstrings, and formatting.
+    """
+    src = textwrap.dedent(inspect.getsource(func))
+    tree = ast.parse(src)
+    # Strip column/line formatting. AST already captures logical indents.
+    for node in ast.walk(tree):
+        for attr in ("lineno", "col_offset", "end_lineno", "end_col_offset",
+                        "type_comment"):
+            node.__dict__.pop(attr, None)
+    return hashlib.sha256(ast.dump(tree).encode()).hexdigest()
+
+
 def fingerprint_hooks(hooks: List) -> str:
     """
-    SHA256 over source code + structural metadata of a list of HammerToolHookAction.
-
-    Hooks are sorted by (location, target_name) so list ordering doesn't matter.
+    SHA256 over the AST + location, target_name, step of a list of HammerToolHookAction.
+    Hooks are sorted so list ordering doesn't matter.
     """
     h = hashlib.sha256()
     for action in sorted(hooks, key=lambda a: (a.location.name, a.target_name)):
@@ -27,43 +43,24 @@ def fingerprint_hooks(hooks: List) -> str:
         if action.step is not None:
             h.update(action.step.name.encode())
             h.update(b"\0")
-            try:
-                src = inspect.getsource(action.step.func)
-                h.update(src.encode())
-            except (OSError, TypeError):
-                # Fallback for lambdas or C-extension callables
-                qname = getattr(action.step.func, "__qualname__", "") + \
-                        getattr(action.step.func, "__module__", "")
+            h.update(_ast_hash(action.step.func).encode())
         h.update(b"\xff")  # separator between actions
     return h.hexdigest()
 
 
 def fingerprint_tool_module(tool_name: str, stage: str) -> str:
     """
-    Hash the get_tool_hooks source of the tool plugin for a given stage.
-
-    stage is the Hammer stage namespace: "synthesis", "par", "drc", "lvs".
-    Falls back to hashing the whole plugin file, then to the bare name string.
+    Hash the AST of get_tool_hooks from the tool plugin for a given stage.
+    Falls back to hashing the whole plugin file's AST, then to the bare name string.
     """
     if not tool_name:
         return hashlib.sha256(f"{stage}.<unknown>".encode()).hexdigest()
-    try:
-        mod = importlib.import_module(f"hammer.{stage}.{tool_name}")
-        # Prefer hashing only get_tool_hooks to avoid false positives from
-        # unrelated changes elsewhere in the plugin file.
-        for obj in mod.__dict__.values():
-            if isinstance(obj, type) and hasattr(obj, "get_tool_hooks"):
-                try:
-                    src = inspect.getsource(obj.get_tool_hooks)
-                    return hashlib.sha256(src.encode()).hexdigest()
-                except OSError:
-                    pass
-        # Fallback: hash the entire source file
-        src_file = inspect.getfile(mod)
-        with open(src_file, "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()
-    except Exception:
-        return hashlib.sha256(f"{stage}.{tool_name}".encode()).hexdigest()
+    
+    mod = importlib.import_module(f"hammer.{stage}.{tool_name}")
+    # Prefer hashing only get_tool_hooks to avoid false positives from
+    for obj in mod.__dict__.values():
+        if isinstance(obj, type) and hasattr(obj, "get_tool_hooks"):
+            return _ast_hash(obj.get_tool_hooks)
 
 
 def fingerprint_stage_hooks(tech_hooks: List, user_hooks: List,
