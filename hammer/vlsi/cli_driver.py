@@ -590,8 +590,7 @@ class CLIDriver:
                 return None
 
             # Hook fingerprint — detect changes to tech/user/tool hooks per stage.
-            # Stored as {stage_tag}.hooks_fingerprint_sha256 so stage_change_check
-            # picks it up automatically (key starts with the stage's tag prefix).
+            # Stored as {stage_tag}.hooks_fingerprint_sha256 inside dictionary
             _STAGE_HOOK_META = {
                 "synthesis":      ("synthesis",      "get_tech_syn_hooks",             "vlsi.core.synthesis_tool"),
                 "par":            ("par",            "get_tech_par_hooks",             "vlsi.core.par_tool"),
@@ -616,8 +615,9 @@ class CLIDriver:
                         stage=stage_tag,
                     )
                     driver.database.set_setting(f"{stage_tag}.hooks_fingerprint_sha256", hook_fp)
-                except Exception as e:
-                    driver.log.warning(f"Failed to compute hook fingerprint for {stage_tag}: {e}")
+                except Exception:
+                    driver.log.exception(f"Failed to compute hook fingerprint for {stage_tag}")
+                    return None
 
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
