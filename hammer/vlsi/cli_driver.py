@@ -580,10 +580,11 @@ class CLIDriver:
             try:
                 if driver.database.has_setting("synthesis.inputs.input_files"):
                     rtl_inputs = list(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
-                    overall_sha256, _digests = rtl_check.digest_files(rtl_inputs)
+                    include_files = rtl_check.collect_include_files(rtl_inputs)
+                    overall_sha256, _digests = rtl_check.digest_files(rtl_inputs + include_files)
                     driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
             except FileNotFoundError as e:
-                driver.log.error(f"RTL fingerprint input file missing: {e.filename}")
+                driver.log.error(f"RTL file not found: {e.filename}")
                 return None
             except Exception as e:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")
