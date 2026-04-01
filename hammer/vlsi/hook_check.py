@@ -50,13 +50,14 @@ def fingerprint_hooks(hooks: List) -> str:
 
 def fingerprint_tool_module(tool_name: str, stage: str) -> str:
     """
-    Hash the AST of get_tool_hooks from the tool plugin for a given stage.
-    Falls back to hashing the whole plugin file's AST, then to the bare name string.
+    Hash the AST of get_tool_hooks from the tool plugin.
+    tool_name is the full module path (e.g. "hammer.synthesis.genus").
+    Raises if the module cannot be imported.
     """
     if not tool_name:
         return hashlib.sha256(f"{stage}.<unknown>".encode()).hexdigest()
     
-    mod = importlib.import_module(f"hammer.{stage}.{tool_name}")
+    mod = importlib.import_module(tool_name)
     # Prefer hashing only get_tool_hooks to avoid false positives from
     for obj in mod.__dict__.values():
         if isinstance(obj, type) and hasattr(obj, "get_tool_hooks"):

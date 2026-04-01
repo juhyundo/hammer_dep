@@ -574,13 +574,14 @@ class CLIDriver:
             with open(KEY_PATH, 'r') as f:
                 key_history = json.load(f)
 
+            # DESIGN FILES CHECK
             # Ignore comments/whitespace in RTL
             # Store the computed fingerprint into the master database so stage_change_check
             # can treat RTL changes as dependency changes.
             try:
                 if driver.database.has_setting("synthesis.inputs.input_files"):
                     rtl_inputs = list(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
-                    include_files = rtl_check.collect_include_files(rtl_inputs)
+                    include_files = rtl_check.collect_include_files(rtl_inputs) # .vh files
                     overall_sha256, _digests = rtl_check.digest_files(rtl_inputs + include_files)
                     driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
             except FileNotFoundError as e:
@@ -590,6 +591,7 @@ class CLIDriver:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")
                 return None
 
+            # HOOK FILES CHECK
             # Hook fingerprint — detect changes to tech/user/tool hooks per stage.
             # Stored as {stage_tag}.hooks_fingerprint_sha256 inside dictionary
             _STAGE_HOOK_META = {
@@ -616,8 +618,8 @@ class CLIDriver:
                         stage=stage_tag,
                     )
                     driver.database.set_setting(f"{stage_tag}.hooks_fingerprint_sha256", hook_fp)
-                except Exception:
-                    driver.log.exception(f"Failed to compute hook fingerprint for {stage_tag}")
+                except Exception as e:
+                    driver.log.error(f"Failed to compute hook fingerprint for {stage_tag}: {e}")
                     return None
 
             if action_type == "synthesis" or action_type == "syn":
