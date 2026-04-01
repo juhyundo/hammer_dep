@@ -79,6 +79,7 @@ class VCS(HammerSimTool, SynopsysTool):
         return v
 
     def get_verilog_models(self) -> List[str]:
+        print("TECH_DEBUG:", self.technology)
         verilog_sim_files = self.technology.read_libs([
             hammer_tech.filters.verilog_sim_filter
         ], hammer_tech.HammerTechnologyUtils.to_plain_item)

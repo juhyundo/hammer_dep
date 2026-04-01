@@ -11,6 +11,7 @@ import re
 import shutil
 from pathlib import Path
 from typing import List
+from typing import Callable, Iterable, List, Optional
 
 from hammer.tech import (
     Corner,
@@ -26,9 +27,10 @@ from hammer.tech import (
     Stackup,
     Supplies,
     TechConfig,
+    LibraryFilter,
 )
 from hammer.tech.specialcells import CellType, SpecialCell
-from hammer.utils import LEFUtils
+from hammer.utils import (LEFUtils, add_lists, reduce_list_str)
 from hammer.vlsi import (
     HammerDRCTool,
     HammerLVSTool,
@@ -320,8 +322,11 @@ class SKY130Tech(HammerTechnology):
                 os.path.join(io_library_base_path, "lib")
             )
 
+
         for library_base_path, cornerfiles in lib_corner_files.items():
+            # print("TECH DEBUG base path: ", library_base_path)
             for cornerfilename in cornerfiles:
+                # print("TECH DEBUG corner file: ", cornerfilename)
                 if "sky130" not in cornerfilename or "#" in cornerfilename:
                     # cadence doesn't use the lib name in their corner libs
                     # also skip random temp files sometimes included in sky130_scl
@@ -397,15 +402,16 @@ class SKY130Tech(HammerTechnology):
 
                 netlist_path = spice_path if os.path.exists(spice_path) else cdl_path
 
+                # print("TECH DEBUG library: ", library)
+
                 lib_entry = Library(
                     nldm_liberty_file=os.path.join(
                         library_base_path, "lib", cornerfilename
                     ),
                     verilog_sim=os.path.join(
-                        SKY130_SCL,
-                        "sky130_scl_9T",
+                        library_base_path,
                         "verilog",
-                        library + "_9T.v" if slib == "sky130_scl" else ".v",
+                        library + ("_9T.v" if slib == "sky130_scl" else ".v"),
                     ),
                     lef_file=os.path.join(library_base_path, "lef", library + ".lef"),
                     spice_file=netlist_path,
@@ -433,10 +439,9 @@ class SKY130Tech(HammerTechnology):
                                 library_base_path, "lib", cornerfilename
                             ),
                             verilog_sim=os.path.join(
-                                SKY130_SCL,
-                                "sky130_scl_9T",
+                                library_base_path,
                                 "verilog",
-                                library + "_9T.v" if slib == "sky130_scl" else ".v",
+                                library + ("_9T.v" if slib == "sky130_scl" else ".v"),
                             ),
                             lef_file=os.path.join(
                                 library_base_path, "lef", library + ".lef"
@@ -476,6 +481,34 @@ class SKY130Tech(HammerTechnology):
             extra_prefixes=None,
         )
 
+    def read_libs(self, library_types: Iterable[LibraryFilter], output_func: Callable[[str, LibraryFilter], List[str]],
+                  extra_pre_filters: Optional[List[Callable[[Library], bool]]] = None,
+                  must_exist: bool = True) -> List[str]:
+        """
+        Read the given libraries and return a list of strings according to some output format.
+
+        :param library_types: List of libraries to filter, specified as a list of LibraryFilter elements.
+        :param output_func: Function which processes the outputs, taking in the filtered lib and the library filter
+                            which generated it.
+        :param extra_pre_filters: List of additional filter functions to use to filter the list of libraries.
+        :param must_exist: Must each library item actually exist? Default: True (yes, they must exist)
+        :return: List of filtered libraries processed according output_func.
+        """
+
+        pre_filts = self.default_pre_filters()  # type: List[Callable[[Library], bool]]
+        if extra_pre_filters is not None:
+            assert isinstance(extra_pre_filters, List)
+            pre_filts += extra_pre_filters
+
+        return reduce_list_str(
+            add_lists,
+            map(
+                lambda lib: self.process_library_filter(pre_filts=pre_filts, filt=lib, output_func=output_func,
+                                                        must_exist=must_exist),
+                library_types
+            )
+        )
+
     def post_install_script(self) -> None:
         self.library_name = "sky130_fd_sc_hd"
         # check whether variables were overriden to point to a valid path
@@ -484,7 +517,7 @@ class SKY130Tech(HammerTechnology):
             self.setup_verilog()
         self.setup_techlef()
         self.setup_io_lefs()
-        self.setup_calibre_lvs_deck()
+        # self.setup_calibre_lvs_deck()
         self.setup_hvl_ls_lef()
         print("Loaded Sky130 Tech")
 

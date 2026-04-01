@@ -2,6 +2,11 @@
 #
 
 technology.sky130:
+  # sky130A: "/tools/commercial/skywater/local/sky130A"
+  # sram22_sky130_macros: "/tools/commercial/skywater/local/sram22_sky130_macros"
+  # openram_lib: "/tools/commercial/skywater/local/sky130_sram_macros"
+  # sky130_nda: "/tools/commercial/skywater/swtech130/skywater-src-nda-20221031"
+  # sky130_cds: "/tools/commercial/skywater/sky130_cds/sky130_prelim_release_091123"
   sky130A: "/path/to/sky130A" # This should be output files from the OpenPDKs compilation process.
   # This is $PDK_ROOT/share/pdk/sky130A from the README.
   # required
@@ -16,13 +21,6 @@ technology.sky130:
   
   sky130_scl: "/path/to/sky130_cdl" # This contains the Cadence standard cell library
   # this key is OPTIONAL, and is only required if you want to do Voltus IR drop analysis.
-
-  sram22_sky130_macros: "/path/to/sram22_sky130_macros"  # SRAM path
-  # /path/to/sram22_sky130_macros
-  # Sram22
-  
-  openram_lib: "/path/to/sky130_sram_macros" # RAM paths
-  # OpenRAM
   
   dffram_lib:  "/path/to/dffram/compiler/build" # DFFRAM currently not supported
   
