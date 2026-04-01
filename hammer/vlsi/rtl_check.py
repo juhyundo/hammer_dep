@@ -125,7 +125,7 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-_INCLUDE_RE = re.compile(r'`include\s+"([^"]+\.vh)"')
+_INCLUDE_RE = re.compile(r'(?m)^(?!\s*//).*`include\s+"([^"]+\.vh)"')
 
 
 def collect_include_files(src_paths: Sequence[str]) -> List[str]:
@@ -133,11 +133,12 @@ def collect_include_files(src_paths: Sequence[str]) -> List[str]:
     Scan .v/.sv source files for `include "*.vh" directives and return the
     resolved, deduplicated list of .vh paths.  Resolves relative to the
     including file's directory and recurses into discovered .vh files.
+    Skips `include lines beginning with // lines.
     """
-    found: Set[str] = set()
-    queue: List[str] = list(src_paths)
+    found: Set[str] = {os.path.realpath(p) for p in src_paths}
+    queue: List[str] = list(found)
     while queue:
-        path = os.path.realpath(queue.pop())
+        path = queue.pop()
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             data = f.read()
         base_dir = os.path.dirname(path)
@@ -147,7 +148,7 @@ def collect_include_files(src_paths: Sequence[str]) -> List[str]:
             if inc_path not in found:
                 found.add(inc_path)
                 queue.append(inc_path)
-    return sorted(found)
+    return sorted(found - {os.path.realpath(p) for p in src_paths})
 
 
 def digest_file(path: str) -> FileDigest:
