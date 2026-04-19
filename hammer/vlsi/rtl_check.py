@@ -203,14 +203,14 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-_INCLUDE_RE = re.compile(r'(?m)^(?!\s*//).*`include\s+"([^"]+\.vh)"')
+_INCLUDE_RE = re.compile(r'(?m)^\s*`include\s+"([^"]+\.(?:vh|v|sv))"')
 
 
 def collect_include_files(src_paths: Sequence[str]) -> List[str]:
     """
-    Scan .v/.sv source files for `include "*.vh" directives and return the
-    resolved, deduplicated list of .vh paths.  Resolves relative to the
-    including file's directory and recurses into discovered .vh files.
+    Scan .v/.sv source files for `include "*.vh/.v/.sv" directives and return
+    the resolved, deduplicated list of include paths.  Resolves relative to the
+    including file's directory and recurses into discovered include files.
     Skips `include lines beginning with // lines.
     """
     found: Set[str] = {os.path.realpath(p) for p in src_paths}
