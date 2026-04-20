@@ -638,6 +638,7 @@ class CLIDriver:
                         driver.log.error("Synthesis tool did not succeed")
                         return None
                     post_run_func_checked(driver)
+                    driver.database.commit_master_database()
                     dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output.json"), output)
                     dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output-full.json"),
                                             self.get_full_config(driver, output))
@@ -661,6 +662,7 @@ class CLIDriver:
                         driver.log.error("Place-and-route tool did not succeed")
                         return None
                     post_run_func_checked(driver)
+                    driver.database.commit_master_database()
                     dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output.json"), output)
                     dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output-full.json"),
                                             self.get_full_config(driver, output))
@@ -684,6 +686,7 @@ class CLIDriver:
                         driver.log.error("DRC tool did not succeed")
                         return None
                     post_run_func_checked(driver)
+                    driver.database.commit_master_database()
                     dump_config_to_json_file(os.path.join(driver.drc_tool.run_dir, "drc-output.json"), output)
                     dump_config_to_json_file(os.path.join(driver.drc_tool.run_dir, "drc-output-full.json"),
                                             self.get_full_config(driver, output))
@@ -707,6 +710,7 @@ class CLIDriver:
                         driver.log.error("LVS tool did not succeed")
                         return None
                     post_run_func_checked(driver)
+                    driver.database.commit_master_database()
                     dump_config_to_json_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output.json"), output)
                     dump_config_to_json_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output-full.json"),
                                             self.get_full_config(driver, output))
@@ -729,6 +733,7 @@ class CLIDriver:
                     driver.log.error("SRAM generator tool did not succeed")
                     return None
                 post_run_func_checked(driver)
+                driver.database.commit_master_database()
             elif action_type == "sim":
                 if not driver.load_sim_tool(get_or_else(self.sim_rundir, "")):
                     return None
@@ -743,6 +748,7 @@ class CLIDriver:
                     driver.log.error("Sim tool did not succeed")
                     return None
                 post_run_func_checked(driver)
+                driver.database.commit_master_database()
                 dump_config_to_json_file(os.path.join(driver.sim_tool.run_dir, "sim-output.json"), output)
                 dump_config_to_json_file(os.path.join(driver.sim_tool.run_dir, "sim-output-full.json"),
                                          self.get_full_config(driver, output))
@@ -763,6 +769,7 @@ class CLIDriver:
                     driver.log.error("Power tool did not succeed")
                     return None
                 post_run_func_checked(driver)
+                driver.database.commit_master_database()
                 dump_config_to_json_file(os.path.join(driver.power_tool.run_dir, "power-output.json"), output)
                 dump_config_to_json_file(os.path.join(driver.power_tool.run_dir, "power-output-full.json"),
                                          self.get_full_config(driver, output))
@@ -783,6 +790,7 @@ class CLIDriver:
                     driver.log.error("Formal tool did not succeed")
                     return None
                 post_run_func_checked(driver)
+                driver.database.commit_master_database()
                 dump_config_to_json_file(os.path.join(driver.formal_tool.run_dir, "formal-output.json"), output)
                 dump_config_to_json_file(os.path.join(driver.formal_tool.run_dir, "formal-output-full.json"),
                                          self.get_full_config(driver, output))
@@ -803,6 +811,7 @@ class CLIDriver:
                     driver.log.error("Timing tool did not succeed")
                     return None
                 post_run_func_checked(driver)
+                driver.database.commit_master_database()
                 dump_config_to_json_file(os.path.join(driver.timing_tool.run_dir, "timing-output.json"), output)
                 dump_config_to_json_file(os.path.join(driver.timing_tool.run_dir, "timing-output-full.json"),
                                          self.get_full_config(driver, output))
@@ -820,6 +829,7 @@ class CLIDriver:
                     driver.log.error("PCB deliverable tool did not succeed")
                     return None
                 post_run_func_checked(driver)
+                driver.database.commit_master_database()
                 dump_config_to_json_file(os.path.join(driver.pcb_tool.run_dir, "pcb-output.json"), output)
                 dump_config_to_json_file(os.path.join(driver.pcb_tool.run_dir, "pcb-output-full.json"),
                                          self.get_full_config(driver, output))

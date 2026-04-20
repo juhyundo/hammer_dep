@@ -842,6 +842,8 @@ class HammerDatabase:
 
         self.stageGraph = StageGraph()
 
+        self._pending_master_db: Optional[Tuple[Path, str]] = None
+
     @property
     def runtime(self) -> List[dict]:
         return [self._runtime]
@@ -1281,12 +1283,20 @@ class HammerDatabase:
                     master_db_contents[affectedStage + ".needsToRerun"] = False
             print(f"Database changed, stages affected are {affectedStages}")
             master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
-            master_path.write_text(master_db_contents_str)
-            print(f"Updated Database exported to {master_path}")
+            self._pending_master_db = (master_path, master_db_contents_str)
         else:
+            self._pending_master_db = None
             print(f"Database unchanged, can skip {stage}")
         return config_change_flag
-                
+
+    def commit_master_database(self) -> None:
+        """Write the pending master database update to disk. Call only after a successful stage run."""
+        if self._pending_master_db is not None:
+            master_path, contents = self._pending_master_db
+            master_path.write_text(contents)
+            print(f"Updated Database exported to {master_path}")
+            self._pending_master_db = None
+
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:
     """
