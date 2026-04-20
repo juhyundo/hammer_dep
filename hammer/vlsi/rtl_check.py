@@ -239,7 +239,7 @@ def digest_file(path: str) -> FileDigest:
 def digest_files(paths: Sequence[str]) -> Tuple[str, List[FileDigest]]:
     realpaths = sorted({os.path.realpath(p) for p in paths})
     digests = [digest_file(p) for p in realpaths]
-    manifest_lines = [f"{d.sha256}  {d.path}\n" for d in digests]
+    manifest_lines = [f"{d.sha256}\n" for d in digests]
     overall = sha256_hex("".join(manifest_lines).encode("utf-8"))
     return overall, digests
 
