@@ -30,7 +30,7 @@ lvs.netgen.netgen_bin: "/tools/commercial/skywater/local/chipyard-tutorial/.cond
 # Sky130 paths
 technology.sky130:
   sky130A: "/tools/commercial/skywater/local/sky130A"
-  sram22_sky130_macros: "/tools/commercial/skywater/local/sram22_sky130_macros"
+  sram22_sky130_macros: "/tools/commercial/skywater/local/sram22_sky130_macros_2026"
   openram_lib: "/tools/commercial/skywater/local/sky130_sram_macros"
   sky130_nda: "/tools/commercial/skywater/swtech130/skywater-src-nda-20221031"
   sky130_cds: "/tools/commercial/skywater/sky130_cds/PDK/sky130_release_0.1.0"

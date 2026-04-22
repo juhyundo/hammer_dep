@@ -219,7 +219,7 @@ class SKY130Tech(HammerTechnology):
                 LVSDeck(
                     tool_name="pegasus",
                     deck_name="pegasus_lvs",
-                    path="$SKY130_CDS/Sky130_LVS/sky130.lvs.pvl",
+                    path="/tools/commercial/skywater/sky130_cds/sky130_prelim_release_091123/pegasus/sky130_rev0001.lvs.pvl",
                 ),
             ]
             drc_decks = [
