@@ -35,9 +35,12 @@ from __future__ import annotations
 
 import configparser
 import getpass
+import gzip
 import hashlib
+import io
 import json
 import os
+import tarfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
@@ -54,12 +57,31 @@ __all__ = [
     "list_artifacts",
     "ensure_schema",
     "compute_sha256",
+    "compute_stage_key",
+    "store_master_database",
+    "load_master_database",
+    "store_stage_blob",
+    "load_stage_blob",
+    "list_stage_blobs",
+    "tar_directory",
+    "untar_to_directory",
+    "KNOWN_STAGE_TAGS",
 ]
 
 
 SCHEMA_NAME = "hammer_poc"
 TABLE_NAME = "pd_artifacts"
 FQ_TABLE = f"{SCHEMA_NAME}.{TABLE_NAME}"
+
+MASTER_TABLE = "master_databases"
+BLOB_TABLE = "pd_blobs"
+FQ_MASTER = f"{SCHEMA_NAME}.{MASTER_TABLE}"
+FQ_BLOB = f"{SCHEMA_NAME}.{BLOB_TABLE}"
+
+KNOWN_STAGE_TAGS = (
+    "synthesis", "par", "drc", "lvs",
+    "sram_generator", "sim", "power", "formal", "timing", "pcb",
+)
 
 
 def _find_airflow_cfg() -> Optional[Path]:
@@ -188,6 +210,22 @@ CREATE TABLE IF NOT EXISTS {FQ_TABLE} (
     data        JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS {FQ_MASTER} (
+    design     TEXT PRIMARY KEY,
+    db         JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
+    sha256     TEXT PRIMARY KEY,
+    stage      TEXT NOT NULL,
+    data       BYTEA NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_stage ON {FQ_BLOB} (stage);
 """
 
 
@@ -307,3 +345,167 @@ def list_artifacts(limit: int = 20) -> List[Tuple[str, str, Optional[str], Any]]
             return list(cur.fetchall())
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# SledgeHammer Studio: master_database + per-stage blob store.
+#
+# A stage's cache key is the SHA256 of the slice of master_database that
+# stage_change_check actually compares: every key whose prefix is the stage tag
+# (excluding outputs), plus every "global" key that is not owned by any stage.
+# Stage-internal flags like *.needsToRerun are excluded since they are run
+# bookkeeping, not cache inputs.
+# ---------------------------------------------------------------------------
+
+
+def _stage_relevant_keys(master_db: Dict[str, Any], stage_tag: str) -> Dict[str, Any]:
+    own_prefix = stage_tag + "."
+    output_prefix = stage_tag + ".outputs"
+    other_prefixes = tuple(
+        f"{tag}." for tag in KNOWN_STAGE_TAGS if tag != stage_tag
+    )
+    out: Dict[str, Any] = {}
+    for k, v in master_db.items():
+        if k.endswith(".needsToRerun"):
+            continue
+        if k.startswith(own_prefix):
+            if not k.startswith(output_prefix):
+                out[k] = v
+        elif not k.startswith(other_prefixes):
+            out[k] = v
+    return out
+
+
+def compute_stage_key(master_db: Dict[str, Any], stage_tag: str) -> str:
+    """SHA256 over the master_database slice that determines this stage's output."""
+    if stage_tag not in KNOWN_STAGE_TAGS:
+        raise ValueError(
+            f"Unknown stage tag {stage_tag!r}. Expected one of {KNOWN_STAGE_TAGS}."
+        )
+    return compute_sha256(_stage_relevant_keys(master_db, stage_tag))
+
+
+def store_master_database(design: str, master_db: Dict[str, Any]) -> None:
+    """Upsert the master_database for ``design``. Latest write wins."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {FQ_MASTER} (design, db, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (design) DO UPDATE
+                  SET db = EXCLUDED.db,
+                      updated_at = EXCLUDED.updated_at
+                """,
+                (design, Json(master_db)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_master_database(design: str) -> Optional[Dict[str, Any]]:
+    """Fetch the master_database for ``design``, or None if not present."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT db FROM {FQ_MASTER} WHERE design = %s",
+                (design,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return None if row is None else row[0]
+
+
+def store_stage_blob(stage_tag: str, sha256: str, data: bytes) -> None:
+    """Store a tarball under ``sha256``. Idempotent; same sha never re-inserts."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {FQ_BLOB} (sha256, stage, data, size_bytes)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (sha256) DO NOTHING
+                """,
+                (sha256, stage_tag, psycopg2.Binary(data), len(data)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_stage_blob(sha256: str) -> Optional[Tuple[str, bytes]]:
+    """Fetch a tarball by hash. Returns ``(stage, bytes)`` or None."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT stage, data FROM {FQ_BLOB} WHERE sha256 = %s",
+                (sha256,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    stage, data = row
+    return stage, bytes(data)
+
+
+def list_stage_blobs(
+    stage_tag: Optional[str] = None,
+    limit: int = 20,
+) -> List[Tuple[str, str, int, Any]]:
+    """List recent blobs. Returns ``(sha256, stage, size_bytes, created_at)``."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            if stage_tag is None:
+                cur.execute(
+                    f"""
+                    SELECT sha256, stage, size_bytes, created_at
+                    FROM {FQ_BLOB}
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT sha256, stage, size_bytes, created_at
+                    FROM {FQ_BLOB}
+                    WHERE stage = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (stage_tag, limit),
+                )
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def tar_directory(path: Path, arcname: Optional[str] = None) -> bytes:
+    """gzip-compressed tar of ``path``. ``arcname`` controls the root entry."""
+    path = Path(path)
+    if not path.is_dir():
+        raise FileNotFoundError(f"Not a directory: {path}")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(str(path), arcname=arcname or path.name, recursive=True)
+    return buf.getvalue()
+
+
+def untar_to_directory(data: bytes, dest: Path) -> None:
+    """Extract a gzip tar into ``dest``. ``dest`` is created if it doesn't exist."""
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        tar.extractall(path=str(dest))
