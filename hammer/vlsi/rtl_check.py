@@ -203,7 +203,7 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-_INCLUDE_RE = re.compile(r'(?m)^\s*`include\s+"([^"]+\.(?:vh|v|sv))"')
+_INCLUDE_RE = re.compile(r'(?m)^\s*`include\s+"([^"]+\.(?:vh|v|sv|svh))"')
 
 
 def collect_include_files(src_paths: Sequence[str]) -> List[str]:
