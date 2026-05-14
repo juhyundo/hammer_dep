@@ -28,6 +28,10 @@ chipyard/
 simple_auth_manager_passwords.json.generated
 standalone_admin_password.txt
 
+# Local SledgeHammer DAG drafts (not for the fork yet)
+dags/sledgehammer_dags.py
+dags/sledgehammer_demo_gcd_synpar.py
+
 # IDE
 .vscode/
 .idea/

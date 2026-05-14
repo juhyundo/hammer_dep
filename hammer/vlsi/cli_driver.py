@@ -564,10 +564,16 @@ class CLIDriver:
                 else:
                     post_load_func_checked(driver)
                 assert driver.syn_tool is not None, "load_synthesis_tool was unsuccessful"
-                success, output = driver.run_synthesis(
+                from hammer.vlsi.pd_cache import cache_or_run
+                success, output = cache_or_run(
+                    driver, "synthesis",
+                    rundir=driver.syn_tool.run_dir,
+                    output_filename="syn-output.json",
+                    run_fn=lambda: driver.run_synthesis(
                         driver.syn_tool.get_tool_hooks() + \
                         driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
-                        list(extra_hooks or []))
+                        list(extra_hooks or [])),
+                )
                 if not success:
                     driver.log.error("Synthesis tool did not succeed")
                     return None
@@ -584,10 +590,16 @@ class CLIDriver:
                 else:
                     post_load_func_checked(driver)
                 assert driver.par_tool is not None, "load_par_tool was unsuccessful"
-                success, output = driver.run_par(
+                from hammer.vlsi.pd_cache import cache_or_run
+                success, output = cache_or_run(
+                    driver, "par",
+                    rundir=driver.par_tool.run_dir,
+                    output_filename="par-output.json",
+                    run_fn=lambda: driver.run_par(
                         driver.par_tool.get_tool_hooks() + \
                         driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
-                        list(extra_hooks or []))
+                        list(extra_hooks or [])),
+                )
                 if not success:
                     driver.log.error("Place-and-route tool did not succeed")
                     return None

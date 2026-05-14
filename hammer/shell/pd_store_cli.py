@@ -142,6 +142,18 @@ def _cmd_stage_pull(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_grant(args: argparse.Namespace) -> int:
+    pd_store.grant_access(args.role)
+    print(f"Added '{args.role}' to {pd_store.SLEDGEHAMMER_GROUP}.")
+    return 0
+
+
+def _cmd_revoke(args: argparse.Namespace) -> int:
+    pd_store.revoke_access(args.role)
+    print(f"Removed '{args.role}' from {pd_store.SLEDGEHAMMER_GROUP}.")
+    return 0
+
+
 def _cmd_blob_list(args: argparse.Namespace) -> int:
     rows = pd_store.list_stage_blobs(stage_tag=args.stage, limit=args.limit)
     if not rows:
@@ -220,6 +232,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_blist.add_argument("--stage", default=None, choices=pd_store.KNOWN_STAGE_TAGS)
     p_blist.add_argument("-n", "--limit", type=int, default=20)
     p_blist.set_defaults(func=_cmd_blob_list)
+
+    p_grant = sub.add_parser("grant",
+                             help=f"Add a role to the {pd_store.SLEDGEHAMMER_GROUP} group.")
+    p_grant.add_argument("role", help="Postgres role name (e.g. 'colin').")
+    p_grant.set_defaults(func=_cmd_grant)
+
+    p_revoke = sub.add_parser("revoke",
+                              help=f"Remove a role from the {pd_store.SLEDGEHAMMER_GROUP} group.")
+    p_revoke.add_argument("role")
+    p_revoke.set_defaults(func=_cmd_revoke)
 
     return parser
 

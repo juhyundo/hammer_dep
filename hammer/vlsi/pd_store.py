@@ -58,6 +58,9 @@ __all__ = [
     "ensure_schema",
     "compute_sha256",
     "compute_stage_key",
+    "compute_rtl_fingerprint",
+    "grant_access",
+    "revoke_access",
     "store_master_database",
     "load_master_database",
     "store_stage_blob",
@@ -77,6 +80,13 @@ MASTER_TABLE = "master_databases"
 BLOB_TABLE = "pd_blobs"
 FQ_MASTER = f"{SCHEMA_NAME}.{MASTER_TABLE}"
 FQ_BLOB = f"{SCHEMA_NAME}.{BLOB_TABLE}"
+
+# Everyone with access to the SledgeHammer Studio tables is in this role.
+# Nobody gets direct table grants; access is purely group membership.
+# A DBA has to create the role once on the cluster:
+#   CREATE ROLE sledgehammer_users NOLOGIN;
+#   GRANT sledgehammer_users TO lawrencejrhee WITH ADMIN OPTION;
+SLEDGEHAMMER_GROUP = "sledgehammer_users"
 
 KNOWN_STAGE_TAGS = (
     "synthesis", "par", "drc", "lvs",
@@ -214,6 +224,7 @@ CREATE TABLE IF NOT EXISTS {FQ_TABLE} (
 CREATE TABLE IF NOT EXISTS {FQ_MASTER} (
     design     TEXT PRIMARY KEY,
     db         JSONB NOT NULL,
+    owner      TEXT NOT NULL DEFAULT current_user,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -222,10 +233,32 @@ CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
     stage      TEXT NOT NULL,
     data       BYTEA NOT NULL,
     size_bytes BIGINT NOT NULL,
+    owner      TEXT NOT NULL DEFAULT current_user,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Backfill the owner column for tables that already exist from earlier inits.
+ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
+
 CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_stage ON {FQ_BLOB} (stage);
+CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_owner ON {FQ_BLOB} (owner);
+CREATE INDEX IF NOT EXISTS idx_{MASTER_TABLE}_owner ON {FQ_MASTER} (owner);
+
+-- Nobody gets access by default. The group role is the only way in.
+REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA {SCHEMA_NAME} FROM PUBLIC;
+
+-- Hand read+write on the schema to the group role, if it exists yet.
+-- If a DBA hasn't created the role, this block just no-ops and we re-run init later.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{SLEDGEHAMMER_GROUP}') THEN
+        EXECUTE 'GRANT USAGE ON SCHEMA {SCHEMA_NAME} TO {SLEDGEHAMMER_GROUP}';
+        EXECUTE 'GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA {SCHEMA_NAME} TO {SLEDGEHAMMER_GROUP}';
+        EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA_NAME} GRANT SELECT, INSERT ON TABLES TO {SLEDGEHAMMER_GROUP}';
+    END IF;
+END $$;
 """
 
 
@@ -241,6 +274,34 @@ def ensure_schema() -> None:
     conn = _connect()
     try:
         _ensure_schema(conn)
+    finally:
+        conn.close()
+
+
+def grant_access(role: str) -> None:
+    """
+    Add a Postgres role to the sledgehammer_users group.
+
+    The user then inherits read and write on every SledgeHammer table. You
+    need ADMIN OPTION on the group role for this to work; the DBA hands that
+    over when they first create the role.
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"GRANT {SLEDGEHAMMER_GROUP} TO {role}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def revoke_access(role: str) -> None:
+    """Remove a Postgres role from the sledgehammer_users group."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"REVOKE {SLEDGEHAMMER_GROUP} FROM {role}")
+        conn.commit()
     finally:
         conn.close()
 
@@ -383,6 +444,22 @@ def compute_stage_key(master_db: Dict[str, Any], stage_tag: str) -> str:
             f"Unknown stage tag {stage_tag!r}. Expected one of {KNOWN_STAGE_TAGS}."
         )
     return compute_sha256(_stage_relevant_keys(master_db, stage_tag))
+
+
+def compute_rtl_fingerprint(file_paths: List[str]) -> str:
+    """Hash the contents of the given RTL files in sorted order. Missing files get a placeholder."""
+    h = hashlib.sha256()
+    for path in sorted(file_paths):
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+        except FileNotFoundError:
+            h.update(f"MISSING:{path}".encode("utf-8"))
+    return h.hexdigest()
 
 
 def store_master_database(design: str, master_db: Dict[str, Any]) -> None:
