@@ -1,0 +1,17 @@
+# Default settings for Innovus+ Synthesis.
+# Requires Innovus 25.1+ and INVS500 license.
+synthesis.innovus_plus:
+  # Location of the Innovus binary.
+  # Innovus+ synthesis runs through the standard Innovus binary with -stylus -synthesis.
+  innovus_bin: "${cadence.cadence_home}/DDI/DDI${synthesis.innovus_plus.version}/bin/innovus"
+  innovus_bin_meta: lazysubst
+  # Innovus version to use.
+  # Used to locate the binary — e.g. '251' in ${cadence.cadence_home}/DDI/DDI251/bin/innovus
+  version: "251"
+  # Physical flow effort.
+  # none:   Logical synthesis only (synthesize_design -generic + -map).
+  # medium: Physical synthesis (synthesize_design -physical) with auto floorplan.
+  # high:   Same as medium for now; reserved for future flows.
+  phys_flow_effort: "none"
+  # Generate the TCL script but do not run it.
+  generate_only: false

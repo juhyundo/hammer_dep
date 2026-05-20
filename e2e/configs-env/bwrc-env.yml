@@ -12,6 +12,7 @@ synopsys.MGLS_LICENSE_FILE: "MGLS_LICENSE_FILE=1717@bwrcflex-1.eecs.berkeley.edu
 
 # Commercial tool versions
 synthesis.genus.version: "231"
+synthesis.innovus_plus.version: "251"
 par.innovus.version: "231"
 power.joules.version: "231"
 sim.vcs.version: W-2024.09-1 #"S-2021.09-SP1-1" # need to bump down these versions because joules requires older FSDB version

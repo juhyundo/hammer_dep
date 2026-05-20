@@ -8,6 +8,7 @@ from itertools import chain
 
 import os
 import errno
+import re
 
 from hammer.utils import get_or_else, optional_map
 from hammer.vlsi import HammerTool, HammerPlaceAndRouteTool, HammerToolStep, HammerToolHookAction, \
@@ -23,6 +24,595 @@ from hammer.common.cadence import CadenceTool
 # Notes: camelCase commands are the old syntax (deprecated)
 # snake_case commands are the new/common UI syntax.
 # This plugin should only use snake_case commands.
+
+class InnovusTclToPythonConverter:
+    """Converts Innovus TCL scripts to Python following Innovus 25.1 Python API rules"""
+    
+    # Python reserved keywords that need _option_ prefix
+    RESERVED_KEYWORDS = {
+        'False', 'break', 'for', 'not', 'None', 'class', 'from', 'or', 
+        'True', 'continue', 'global', 'pass', '__peg_parser__', 'def', 'if', 'raise', 
+        'and', 'del', 'import', 'return', 'as', 'elif', 'in', 'try', 
+        'assert', 'else', 'is', 'while', 'async', 'except', 'lambda', 
+        'with', 'await', 'finally', 'nonlocal', 'yield'
+    }
+    
+    # Commands that should use tcl.eval() to avoid issues
+    FALLBACK_TO_TCL = {
+        'source',    # Source TCL files
+    }
+    
+    # Commands where output file is positional (not named)
+    POSITIONAL_OUTPUT_CMDS = {
+        'write_db': True,
+        'write_stream': True,
+        'write_sdf': True,
+        'write_def': True,
+        'write_netlist': True,
+        'write_parasitics': True
+    }
+    
+    def __init__(self):
+        self.output_lines = []
+
+    def _is_register_file_io_block(self, lines: List[str], start_idx: int) -> Tuple[bool, int]:
+        """
+        Detect register file I/O blocks - these must be wrapped entirely in tcl.eval()
+        
+        Pattern to match:
+            set VAR "./find_regs_*.json"
+            set VAR [open $VAR "w"]
+            puts $VAR ...
+            ... (complex TCL code including for-loops)
+            close $VAR
+        """
+        if start_idx >= len(lines):
+            return False, start_idx
+        
+        line = lines[start_idx].strip()
+        
+        # Must start with 'set ' (after stripping whitespace)
+        if not line.startswith('set '):
+            return False, start_idx
+        
+        # Must contain .json
+        if '.json' not in line:
+            return False, start_idx
+        
+        # Must be a find_regs file (cells, paths, or regs)
+        if 'find_regs' not in line:
+            return False, start_idx
+        
+        # Extract variable name
+        parts = line.split()
+        if len(parts) < 3:
+            return False, start_idx
+        
+        var_name = parts[1]
+        
+        # Search for matching close statement
+        # Increased range to 30 lines to handle larger blocks
+        end_idx = start_idx + 1
+        found_close = False
+        
+        while end_idx < len(lines) and (end_idx - start_idx) < 30:
+            current = lines[end_idx].strip()
+            
+            # Look for: close $VAR or close VAR
+            if current.startswith('close '):
+                # Check if variable name appears in close statement
+                if var_name in current or f'${var_name}' in current:
+                    found_close = True
+                    break
+            
+            end_idx += 1
+        
+        # DEBUG: Uncomment to trace detection
+        # if found_close:
+        #     print(f"DEBUG: Detected file I/O block: '{var_name}' from line {start_idx+1} to {end_idx+1}")
+        
+        return found_close, end_idx if found_close else start_idx
+
+
+    def _wrap_block_in_tcl_eval(self, lines: List[str], start_idx: int, end_idx: int) -> str:
+        """Wrap TCL block in tcl.eval() with proper backslash handling"""
+        block_lines = []
+        
+        for i in range(start_idx, end_idx + 1):
+            line = lines[i].rstrip()
+            if line:
+                block_lines.append(line)
+        
+        tcl_block = '\n'.join(block_lines)
+        
+        # Use raw string (r'''...''') to preserve backslashes!
+        return f"tcl.eval(r'''{tcl_block}''')"  # ← Note the 'r' prefix!
+
+        
+    def convert_tcl_to_python(self, tcl_content: str, include_header: bool = True) -> str:
+        """Convert TCL content to Python string"""
+        self.output_lines = []
+        
+        # Add header only when generating a top-level file
+        if include_header:
+            self.output_lines.append("# " + "=" * 78)
+            self.output_lines.append("# Auto-converted from TCL to Python for Innovus 25.1")
+            self.output_lines.append("# " + "=" * 78)
+            self.output_lines.append("")
+        
+        tcl_lines = tcl_content.split('\n')
+        
+        i = 0
+        while i < len(tcl_lines):
+            line = tcl_lines[i].rstrip()
+            
+            # Check if this is the start of a register file I/O block
+            is_file_io, end_idx = self._is_register_file_io_block(tcl_lines, i)
+            
+            if is_file_io:
+                # Wrap the entire block in tcl.eval()
+                self.output_lines.append("# Complex file I/O block - using tcl.eval()")
+                tcl_eval_line = self._wrap_block_in_tcl_eval(tcl_lines, i, end_idx)
+                self.output_lines.append(tcl_eval_line)
+                self.output_lines.append("")
+                i = end_idx + 1
+                continue
+            
+            # Handle multi-line commands
+            full_line = line
+            while i + 1 < len(tcl_lines) and (line.endswith('\\\\') or self._has_unclosed_braces(full_line)):
+                i += 1
+                line = tcl_lines[i].rstrip()
+                full_line += ' ' + line.lstrip()
+            
+            converted = self.convert_line(full_line)
+            if converted:
+                self.output_lines.append(converted)
+            
+            i += 1
+        
+        return '\n'.join(self.output_lines)
+    
+    def _has_unclosed_braces(self, line: str) -> bool:
+        """Check if line has unclosed braces"""
+        open_count = line.count('{')
+        close_count = line.count('}')
+        return open_count > close_count
+    
+    def convert_line(self, line: str) -> str:
+        """Convert a single TCL line to Python"""
+        line = line.strip()
+        
+        # Skip empty lines and pure comments
+        if not line or line.startswith('#'):
+            if line.startswith('#'):
+                return line
+            return ''
+        
+        # Handle 'puts' statements
+        if line.startswith('puts '):
+            return self._convert_puts(line)
+        
+        # Handle 'ln' shell command -> os.symlink()
+        if line.startswith('ln '):
+            return self._convert_ln(line)
+        
+        # Handle 'exit' -> sys.exit()
+        if line.strip() == 'exit':
+            return 'sys.exit()'
+        
+        # Handle 'close' command
+        if line.startswith('close '):
+            var_name = line.split()[1].strip('$')
+            return f"{var_name}.close()"
+        
+        # Handle 'open' command
+        if 'open ' in line and ('[open' in line or line.startswith('set ')):
+            return self._convert_file_open(line)
+        
+        # source -> source() Python call
+        cmd_name = self._extract_command_name(line)
+        if cmd_name == 'source':
+            return self._convert_source(line)
+        
+        # Handle set_db commands
+        if line.startswith('set_db '):
+            return self._convert_set_db(line)
+        
+        # Handle get_db -> db() conversions
+        if 'get_db' in line:
+            return self._convert_get_db_line(line)
+        
+        # Handle regular commands
+        if self._is_command(line):
+            return self._convert_command(line)
+        
+        # Handle TCL control structures - these are emitted by tech plugin hooks
+        # and should have been converted already; emit as comment to flag for review
+        if line.startswith('if {') or line.startswith('for {') or line.startswith('while {'):
+            return f"# WARNING: unconverted TCL control structure: {line}"
+        
+        # Handle variable assignments
+        if line.startswith('set '):
+            return self._convert_variable_assignment(line)
+        
+        # Default fallback: treat as a direct Python function call
+        # (all Innovus TCL commands have Python equivalents with the same name)
+        return self._convert_command(line)
+    
+    def _convert_puts(self, line: str) -> str:
+        """Convert TCL puts to Python print"""
+        if line.startswith('puts "'):
+            content = line[6:-1]
+            content = content.replace('"', '\\"')
+            return f'print("{content}")'
+        
+        match = re.match(r'puts\s+(.+)', line)
+        if match:
+            var_expr = match.group(1).strip()
+            
+            # Handle file handle: puts $file_handle "content"
+            if ' "' in var_expr or " '" in var_expr:
+                parts = var_expr.split(maxsplit=1)
+                file_var = parts[0].strip('$')
+                content = parts[1].strip('"\'')
+                content = content.replace('"', '\\"')
+                return f'{file_var}.write("{content}\\n")'
+            
+            if var_expr.startswith('$'):
+                var_name = var_expr[1:]
+                return f'print({var_name})'
+            
+            return f'print({var_expr})'
+        
+        return f"print({line[5:]})"
+    
+    def _convert_ln(self, line: str) -> str:
+        """Convert 'ln ...' shell command to os.system()"""
+        return f"os.system('{line}')"
+
+    def _convert_file_open(self, line: str) -> str:
+        """Convert TCL file open to Python open()"""
+        match = re.match(r'set\s+(\w+)\s+\[open\s+"([^"]+)"\s+"([^"]+)"\]', line)
+        if match:
+            var_name = match.group(1)
+            filename = match.group(2)
+            mode = match.group(3)
+            return f'{var_name} = open("{filename}", "{mode}")'
+        
+        match = re.match(r'set\s+(\w+)\s+\[open\s+\$(\w+)\s+"([^"]+)"\]', line)
+        if match:
+            var_name = match.group(1)
+            filename_var = match.group(2)
+            mode = match.group(3)
+            return f'{var_name} = open({filename_var}, "{mode}")'
+        
+        # Unrecognized open pattern - best effort: call as command
+        return self._convert_command(line)
+    
+    def _convert_source(self, line: str) -> str:
+        """Convert TCL source command to Python source() call."""
+        # source -echo -verbose /path/to/file.tcl
+        parts = line.split()
+        path = parts[-1]  # path is always last
+        has_echo = '-echo' in parts
+        has_verbose = '-verbose' in parts
+        if has_echo and has_verbose:
+            return f"source({path!r}, echo=True, verbose=True)"
+        elif has_echo:
+            return f"source({path!r}, echo=True)"
+        elif has_verbose:
+            return f"source({path!r}, verbose=True)"
+        else:
+            return f"source({path!r})"
+
+    def _convert_ln(self, line: str) -> str:
+        """Convert TCL/shell ln command to os.system()."""
+        return f"os.system({line!r})"
+
+    def _extract_command_name(self, line: str) -> str:
+        """Extract the command name from a line"""
+        parts = line.split()
+        if parts:
+            return parts[0]
+        return ''
+    
+    def _is_command(self, line: str) -> bool:
+        """Check if line is a Innovus command"""
+        tcl_keywords = {'if', 'for', 'while', 'foreach', 'proc', 'set'}
+        cmd = self._extract_command_name(line)
+        return cmd and cmd not in tcl_keywords
+    
+    def _convert_set_db(self, line: str) -> str:
+        """Convert set_db commands to Python db() attribute access"""
+        match = re.match(r'set_db\s+(\S+)\s+(.+)', line)
+        if match:
+            attr_name = match.group(1)
+            value = match.group(2).strip()
+            py_value = self._convert_value(value)
+            return f"db().{attr_name} = {py_value}"
+        
+        return f"# FIXME: Could not convert: {line}"
+    
+    def _convert_get_db_line(self, line: str) -> str:
+        """Convert lines containing get_db to use db() API"""
+        # Pattern: set var [get_db [get_db obj_type -if expr] .attr]
+        # e.g. set refs [get_db [get_db lib_cells -if .is_sequential==true] .base_name]
+        nested_match = re.match(
+            r'set\s+(\w+)\s+\[get_db\s+\[get_db\s+(\w+)\s+-if\s+\.(\w+)==(\w+)\]\s+\.(\w+)\]', line)
+        if nested_match:
+            var_name    = nested_match.group(1)
+            obj_type    = nested_match.group(2)
+            attr_name   = nested_match.group(3)
+            attr_val    = nested_match.group(4)
+            result_attr = nested_match.group(5)
+            # Convert TCL true/false to Python
+            py_val = 'True' if attr_val.lower() == 'true' else ('False' if attr_val.lower() == 'false' else attr_val)
+            return f"{var_name} = db().{obj_type}().filter(lambda x: x.{attr_name} == {py_val}).{result_attr}"
+
+        # Pattern: set var [get_db objects -if .attr==val]
+        if_match = re.match(r'set\s+(\w+)\s+\[get_db\s+(\w+)\s+-if\s+\.(\w+)==(\w+)\]', line)
+        if if_match:
+            var_name  = if_match.group(1)
+            obj_type  = if_match.group(2)
+            attr_name = if_match.group(3)
+            attr_val  = if_match.group(4)
+            py_val = 'True' if attr_val.lower() == 'true' else ('False' if attr_val.lower() == 'false' else attr_val)
+            return f"{var_name} = db().{obj_type}().filter(lambda x: x.{attr_name} == {py_val})"
+
+        # Pattern: set var [get_db objects pattern]
+        match = re.match(r'set\s+(\w+)\s+\[get_db\s+(\w+)\s+([^\]]+)\]', line)
+        if match:
+            var_name = match.group(1)
+            obj_type = match.group(2)
+            pattern = match.group(3).strip()
+            
+            if '-if' in pattern:
+                # Complex -if filter: use db().filter() with lambda
+                # e.g. get_db lib_cells -if .is_sequential==true
+                if_match = re.search(r'-if\s+["\']?\.(\w+)==(\w+)["\']?', pattern)
+                if if_match:
+                    attr, val = if_match.group(1), if_match.group(2)
+                    pyval = 'True' if val.lower() == 'true' else ('False' if val.lower() == 'false' else repr(val))
+                    return f"{var_name} = db().{obj_type}().filter(lambda x: x.{attr} == {pyval})"
+                # Fall through to direct db() call with pattern
+                pat = pattern.split('-if')[0].strip().strip('"\'{}')
+                return f"{var_name} = db().{obj_type}('{pat}').filter(lambda x: True)  # TODO: check filter"
+            
+            if pattern.startswith('{') and pattern.endswith('}'):
+                pattern = pattern[1:-1]
+            
+            pattern = pattern.strip('"\'')
+            return f"{var_name} = db().{obj_type}('{pattern}')"
+        
+        if '[get_db' in line:
+            # Inline get_db in a command - convert to _convert_command which handles it
+            return self._convert_command(line)
+        
+        return line
+    
+    def _convert_command(self, line: str) -> str:
+        """Convert a TCL command to Python function call"""
+        parts = self._tokenize_command(line)
+        if not parts:
+            return f"# FIXME: Empty command"
+        
+        cmd_name = parts[0]
+        positional_args = []
+        named_args = {}
+        
+        i = 1
+        while i < len(parts):
+            part = parts[i]
+            
+            if part.startswith('-'):
+                flag_name = part[1:]
+                
+                # Numeric flags like -5.8, -181 are illegal as keyword args;
+                # pass them as positional string arguments e.g. '-5.8'
+                if flag_name.replace('.', '', 1).lstrip('-').isdigit() or \
+                   (flag_name and flag_name[0].isdigit()):
+                    positional_args.append(f"'{part}'")
+                    i += 1
+                    continue
+                
+                if i + 1 >= len(parts) or parts[i + 1].startswith('-'):
+                    if flag_name in self.RESERVED_KEYWORDS:
+                        flag_name = f'_option_{flag_name}'
+                    named_args[flag_name] = True
+                    i += 1
+                else:
+                    flag_value = parts[i + 1]
+                    
+                    if flag_name in self.RESERVED_KEYWORDS:
+                        flag_name = f'_option_{flag_name}'
+                    
+                    named_args[flag_name] = self._convert_value(flag_value)
+                    i += 2
+            else:
+                positional_args.append(self._convert_value(part))
+                i += 1
+        
+        # Special handling for commands with positional output files
+        if cmd_name in self.POSITIONAL_OUTPUT_CMDS:
+            if 'output' in named_args:
+                output_val = named_args.pop('output')
+                positional_args.insert(0, output_val)
+        
+        # Build Python function call
+        py_args = []
+        py_args.extend(positional_args)
+        
+        for key, val in named_args.items():
+            if isinstance(val, bool) and val:
+                py_args.append(f"{key}=True")
+            elif isinstance(val, bool) and not val:
+                py_args.append(f"{key}=False")
+            else:
+                py_args.append(f"{key}={val}")
+        
+        args_str = ', '.join(py_args)
+        return f"{cmd_name}({args_str})"
+    
+    def _tokenize_command(self, line: str) -> List[str]:
+        """Tokenize a TCL command into parts, respecting braces and quotes"""
+        tokens = []
+        current_token = ''
+        in_braces = 0
+        in_quotes = False
+        escape_next = False
+        
+        for char in line:
+            if escape_next:
+                current_token += char
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+            
+            if char == '"' and in_braces == 0:
+                in_quotes = not in_quotes
+                current_token += char
+                continue
+            
+            if char == '{' and not in_quotes:
+                in_braces += 1
+                current_token += char
+                continue
+            
+            if char == '}' and not in_quotes:
+                in_braces -= 1
+                current_token += char
+                if in_braces == 0 and current_token:
+                    tokens.append(current_token)
+                    current_token = ''
+                continue
+            
+            if char in ' \t' and in_braces == 0 and not in_quotes:
+                if current_token:
+                    tokens.append(current_token)
+                    current_token = ''
+                continue
+            
+            current_token += char
+        
+        if current_token:
+            tokens.append(current_token)
+        
+        return tokens
+    
+    def _convert_value(self, value: str) -> str:
+        """Convert a TCL value to Python representation"""
+        value = value.strip()
+        
+        # PYTHON: prefix means pass through as raw Python expression (may be brace-wrapped)
+        stripped = value.strip('{}')
+        if stripped.startswith('PYTHON:'):
+            return stripped[7:]
+        
+        # Handle braced lists
+        if value.startswith('{') and value.endswith('}'):
+            inner = value[1:-1].strip()
+            items = self._tokenize_list(inner)
+            
+            if len(items) == 1:
+                return self._convert_value(items[0])
+            
+            converted_items = [self._convert_value(item) for item in items]
+            return f"[{', '.join(converted_items)}]"
+        
+        # Handle quoted strings
+        if value.startswith('"') and value.endswith('"'):
+            inner = value[1:-1]
+            inner = inner.replace("'", "\\'")
+            return f"'{inner}'"
+        
+        # Handle numbers
+        if value.replace('.', '').replace('-', '').replace('+', '').isdigit():
+            return value
+        
+        # Handle booleans
+        if value.lower() == 'true':
+            return 'True'
+        if value.lower() == 'false':
+            return 'False'
+        
+        # Handle TCL variables
+        if value.startswith('$'):
+            return f"'{value}'"
+        
+        # Default: treat as string
+        return f"'{value}'"
+    
+    def _tokenize_list(self, content: str) -> List[str]:
+        """Tokenize a TCL list, preserving complete items even with spaces"""
+        tokens = []
+        current_token = ''
+        in_braces = 0
+        in_quotes = False
+        escape_next = False
+        
+        for char in content:
+            if escape_next:
+                current_token += char
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                current_token += char
+                continue
+            
+            if char == '"' and in_braces == 0:
+                in_quotes = not in_quotes
+                current_token += char
+                continue
+            
+            if char == '{' and not in_quotes:
+                in_braces += 1
+                current_token += char
+                continue
+            
+            if char == '}' and not in_quotes:
+                in_braces -= 1
+                current_token += char
+                continue
+            
+            if char in ' \t\n' and in_braces == 0 and not in_quotes:
+                if current_token:
+                    tokens.append(current_token)
+                    current_token = ''
+                continue
+            
+            current_token += char
+        
+        if current_token:
+            tokens.append(current_token)
+        
+        return tokens
+    
+    def _convert_variable_assignment(self, line: str) -> str:
+        """Convert TCL variable assignment to Python"""
+        match = re.match(r'set\s+(\w+)\s+(.+)', line)
+        if match:
+            var_name = match.group(1)
+            value = match.group(2).strip()
+            
+            if '[' in value:
+                # TCL command substitution - convert the inner command
+                inner = re.search(r'\[(.+)\]', value)
+                if inner:
+                    inner_cmd = inner.group(1).strip()
+                    converted_inner = self._convert_command(inner_cmd) if self._is_command(inner_cmd) else inner_cmd
+                    return f"{var_name} = {converted_inner}"
+                return f"{var_name} = {value}  # TODO: check TCL substitution"
+            
+            py_value = self._convert_value(value)
+            return f"{var_name} = {py_value}"
+        
+        return f"# FIXME: Could not convert variable: {line}"
 
 class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
@@ -184,40 +774,44 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
     def do_pre_steps(self, first_step: HammerToolStep) -> bool:
         assert super().do_pre_steps(first_step)
-        # Restore from the last checkpoint if we're not starting over.
         if first_step != self.first_step:
-            self.verbose_append("read_db pre_{step}".format(step=first_step.name))
+            if self.use_python:
+                self.py_append(f"read_db('pre_{first_step.name}')")
+            else:
+                self.verbose_append("read_db pre_{step}".format(step=first_step.name))
         return True
 
     def do_between_steps(self, prev: HammerToolStep, next: HammerToolStep) -> bool:
         assert super().do_between_steps(prev, next)
-        # Write a checkpoint to disk.
-        self.verbose_append("write_db pre_{step}".format(step=next.name))
-        # Symlink the database to latest for open_chip script later.
-        self.verbose_append("ln -sfn pre_{step} latest".format(step=next.name))
+        if self.use_python:
+            self.py_append(f"write_db('pre_{next.name}')")
+            self.py_append(f"os.system('ln -sfn pre_{next.name} latest')")
+        else:
+            self.verbose_append("write_db pre_{step}".format(step=next.name))
+            self.verbose_append("ln -sfn pre_{step} latest".format(step=next.name))
         self._step_transitions = self._step_transitions + [(prev.name, next.name)]
         return True
 
     def do_post_steps(self) -> bool:
         assert super().do_post_steps()
-        # Create symlinks for post_<step> to pre_<step+1> to improve usability.
         try:
             for prev, next in self._step_transitions:
                 os.symlink(
-                    os.path.join(self.run_dir, "pre_{next}".format(next=next)), # src
-                    os.path.join(self.run_dir, "post_{prev}".format(prev=prev)) # dst
+                    os.path.join(self.run_dir, "pre_{next}".format(next=next)),
+                    os.path.join(self.run_dir, "post_{prev}".format(prev=prev))
                 )
         except OSError as e:
             if e.errno != errno.EEXIST:
                 self.logger.warning("Failed to create post_* symlinks: " + str(e))
 
-        # Create db post_<last step>
-        # TODO: this doesn't work if you're only running the very last step
         if len(self._step_transitions) > 0:
             last = "post_{step}".format(step=self._step_transitions[-1][1])
-            self.verbose_append("write_db {last}".format(last=last))
-            # Symlink the database to latest for open_chip script later.
-            self.verbose_append("ln -sfn {last} latest".format(last=last))
+            if self.use_python:
+                self.py_append(f"write_db('{last}')")
+                self.py_append(f"os.system('ln -sfn {last} latest')")
+            else:
+                self.verbose_append("write_db {last}".format(last=last))
+                self.verbose_append("ln -sfn {last} latest".format(last=last))
 
         return self.run_innovus()
 
@@ -272,14 +866,55 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
     def tool_config_prefix(self) -> str:
         return "par.innovus"
 
-    def init_design(self) -> bool:
-        """Initialize the design."""
-        verbose_append = self.verbose_append
+    # -------------------------------------------------------------------------
+    # Python-native script generation for Innovus 25.1+
+    # -------------------------------------------------------------------------
 
+    @property
+    def use_python(self) -> bool:
+        """True when targeting Innovus 25.1+ Python API."""
+        return self.version() >= self.version_number("251")
+
+    def py_append(self, python_line: str) -> None:
+        """Append a raw Python line directly to the output (25.1+ only)."""
+        self.output.append(python_line)
+
+    def append(self, cmd: str, clean: bool = False) -> None:
+        """Append a command. In Python mode, converts TCL to Python (for external hooks/tech plugins)."""
+        if self.use_python:
+            converter = InnovusTclToPythonConverter()
+            for line in cmd.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                converted = converter.convert_line(line)
+                if converted:
+                    self.output.append(converted)
+        else:
+            super().append(cmd, clean=clean)  # type: ignore
+
+    def verbose_append(self, cmd: str, clean: bool = False) -> None:
+        """Append a command. In Python mode, converts TCL to Python."""
+        if self.use_python:
+            converter = InnovusTclToPythonConverter()
+            for line in cmd.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                converted = converter.convert_line(line)
+                if converted:
+                    self.output.append(converted)
+        else:
+            super().verbose_append(cmd, clean=clean)  # type: ignore
+
+    def init_design(self) -> bool:
         # Perform common path pessimism removal in setup and hold mode
-        verbose_append("set_db timing_analysis_cppr both")
-        # Use OCV mode for timing analysis by default
-        verbose_append("set_db timing_analysis_type ocv")
+        if self.use_python:
+            self.py_append("db().timing_analysis_cppr = 'both'")
+            self.py_append("db().timing_analysis_type = 'ocv'")
+        else:
+            self.verbose_append("set_db timing_analysis_cppr both")
+            self.verbose_append("set_db timing_analysis_type ocv")
 
         # Read LEF layouts.
         lef_files = self.technology.read_libs([
@@ -288,87 +923,139 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         if self.hierarchical_mode.is_nonleaf_hierarchical():
             ilm_lefs = list(map(lambda ilm: ilm.lef, self.get_input_ilms()))
             lef_files.extend(ilm_lefs)
-        verbose_append("read_physical -lef {{ {files} }}".format(
-            files=" ".join(lef_files)
-        ))
+        if self.use_python:
+            lef_str = ', '.join(repr(f) for f in lef_files)
+            self.py_append(f"read_physical(lef=[{lef_str}])")
+        else:
+            self.verbose_append("read_physical -lef {{ {files} }}".format(files=" ".join(lef_files)))
 
         # Read timing libraries.
         mmmc_path = os.path.join(self.run_dir, "mmmc.tcl")
         self.write_contents_to_path(self.generate_mmmc_script(), mmmc_path)
-        verbose_append("read_mmmc {mmmc_path}".format(mmmc_path=mmmc_path))
+        if self.use_python:
+            self.py_append(f"read_mmmc({mmmc_path!r})")
+        else:
+            self.verbose_append("read_mmmc {mmmc_path}".format(mmmc_path=mmmc_path))
 
         # Read netlist.
-        # Innovus only supports structural Verilog for the netlist; the Verilog can be optionally compressed.
         if not self.check_input_files([".v", ".v.gz"]):
             return False
-
-        # We are switching working directories and we still need to find paths.
         abspath_input_files = list(map(lambda name: os.path.join(os.getcwd(), name), self.input_files))
-        verbose_append("read_netlist {{ {files} }} -top {top}".format(
-            files=" ".join(abspath_input_files),
-            top=self.top_module
-        ))
+        if self.use_python:
+            if len(abspath_input_files) == 1:
+                self.py_append(f"read_netlist({abspath_input_files[0]!r}, top={self.top_module!r})")
+            else:
+                files_str = ' '.join(abspath_input_files)
+                self.py_append(f"read_netlist({files_str!r}, top={self.top_module!r})")
+        else:
+            self.verbose_append("read_netlist {{ {files} }} -top {top}".format(
+                files=" ".join(abspath_input_files), top=self.top_module))
 
         if self.hierarchical_mode.is_nonleaf_hierarchical():
-            # Read ILMs.
             for ilm in self.get_input_ilms():
-                # Assumes that the ILM was created by Innovus (or at least the file/folder structure).
-                verbose_append("read_ilm -cell {module} -directory {dir}".format(dir=ilm.dir, module=ilm.module))
+                if self.use_python:
+                    self.py_append(f"read_ilm(cell={ilm.module!r}, directory={ilm.dir!r})")
+                else:
+                    self.verbose_append("read_ilm -cell {module} -directory {dir}".format(dir=ilm.dir, module=ilm.module))
 
         # Emit init_power_nets and init_ground_nets in case CPF/UPF is not used
-        # commit_power_intent does not override power nets defined in "init_power_nets"
         spec_mode = self.get_setting("vlsi.inputs.power_spec_mode")  # type: str
         if spec_mode == "empty":
             power_supplies = self.get_independent_power_nets()  # type: List[Supply]
             power_nets = " ".join(map(lambda s: s.name, power_supplies))
             ground_supplies = self.get_independent_ground_nets()  # type: List[Supply]
             ground_nets = " ".join(map(lambda s: s.name, ground_supplies))
-            verbose_append("set_db init_power_nets {{{n}}}".format(n=power_nets))
-            verbose_append("set_db init_ground_nets {{{n}}}".format(n=ground_nets))
+            if self.use_python:
+                self.py_append(f"db().init_power_nets = {power_nets!r}")
+                self.py_append(f"db().init_ground_nets = {ground_nets!r}")
+            else:
+                self.verbose_append("set_db init_power_nets {{{n}}}".format(n=power_nets))
+                self.verbose_append("set_db init_ground_nets {{{n}}}".format(n=ground_nets))
 
-        # Run init_design to validate data and start the Cadence place-and-route workflow.
-        verbose_append("init_design")
+        if self.use_python:
+            self.py_append("init_design()")
+        else:
+            self.verbose_append("init_design")
 
         # Set the top and bottom global/detail routing layers.
-        # This must happen after the tech LEF is loaded
         layers = self.get_setting("vlsi.technology.routing_layers")
         if layers is not None:
             if self.version() >= self.version_number("201"):
-                verbose_append(f"set_db design_bottom_routing_layer {layers[0]}")
-                verbose_append(f"set_db design_top_routing_layer {layers[1]}")
+                if self.use_python:
+                    self.py_append(f"db().design_bottom_routing_layer = {layers[0]!r}")
+                    self.py_append(f"db().design_top_routing_layer = {layers[1]!r}")
+                else:
+                    self.verbose_append(f"set_db design_bottom_routing_layer {layers[0]}")
+                    self.verbose_append(f"set_db design_top_routing_layer {layers[1]}")
             else:
-                verbose_append(f"set_db route_early_global_bottom_layer {layers[0]}")
-                verbose_append(f"set_db route_early_global_top_layer {layers[1]}")
-                verbose_append(f"set_db route_design_bottom_layer {layers[0]}")
-                verbose_append(f"set_db route_design_top_layer {layers[1]}")
+                if self.use_python:
+                    self.py_append(f"db().route_early_global_bottom_layer = {layers[0]!r}")
+                    self.py_append(f"db().route_early_global_top_layer = {layers[1]!r}")
+                    self.py_append(f"db().route_design_bottom_layer = {layers[0]!r}")
+                    self.py_append(f"db().route_design_top_layer = {layers[1]!r}")
+                else:
+                    self.verbose_append(f"set_db route_early_global_bottom_layer {layers[0]}")
+                    self.verbose_append(f"set_db route_early_global_top_layer {layers[1]}")
+                    self.verbose_append(f"set_db route_design_bottom_layer {layers[0]}")
+                    self.verbose_append(f"set_db route_design_top_layer {layers[1]}")
 
         # Set design effort.
-        verbose_append(f"set_db design_flow_effort {self.get_setting('par.innovus.design_flow_effort')}")
-        verbose_append(f"set_db design_power_effort {self.get_setting('par.innovus.design_power_effort')}")
+        flow_effort = self.get_setting('par.innovus.design_flow_effort')
+        power_effort = self.get_setting('par.innovus.design_power_effort')
+        if self.use_python:
+            self.py_append(f"db().design_flow_effort = {flow_effort!r}")
+            self.py_append(f"db().design_power_effort = {power_effort!r}")
+        else:
+            self.verbose_append(f"set_db design_flow_effort {flow_effort}")
+            self.verbose_append(f"set_db design_power_effort {power_effort}")
 
         return True
 
-    def floorplan_design(self) -> bool:
-        floorplan_tcl = os.path.join(self.run_dir, "floorplan.tcl")
-        self.write_contents_to_path("\n".join(self.create_floorplan_tcl()), floorplan_tcl)
-        self.verbose_append("source -echo -verbose {}".format(floorplan_tcl))
+    def _generate_dont_use_commands_python(self) -> None:
+        """Python-native equivalent of generate_dont_use_commands() for Innovus 25.1+."""
+        for cell in self.get_dont_use_list():
+            if not cell.startswith("*/"):
+                cell = "*/" + cell
+            # Strip the "*/" prefix for the pattern match against base_name
+            pattern = cell[2:] if cell.startswith("*/") else cell
+            self.py_append(f"# set_dont_use {cell}")
+            self.py_append(f"_cells = db().lib_cells('{cell}')")
+            self.py_append(f"if _cells:")
+            self.py_append(f"    set_dont_use(_cells)")
+            self.py_append(f"else:")
+            self.py_append(f"    print('WARNING: cell {cell} was not found for set_dont_use')")
+            self.py_append("")
 
-        # Set "don't use" cells.
-        # This must happen after floorplan_design because it must run in flattened-mode
-        # (after ILMs are placed)
-        if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("flatten_ilm")
+    def _child_modules_python(self) -> None:
+        """Python-native equivalent of child_modules_tcl() for Innovus 25.1+."""
+        import json as _json
+        child_modules_path = os.path.join(self.run_dir, "find_child_modules.json")
 
-        # Setup power settings from cpf/upf
-        for l in self.generate_power_spec_commands():
-            self.verbose_append(l)
+        if self.get_setting("vlsi.inputs.hierarchical.config_source") != "manual":
+            self.logger.warning('''
+            Hierarchical write_regs requires having vlsi.inputs.hierarchical.manual_modules specified.
+            You may have problems with register forcing in gate-level sim.
+            ''')
+            self.py_append(f"# Write empty child modules")
+            self.py_append(f"with open({repr(child_modules_path)}, 'w') as _f:")
+            self.py_append(f"    _f.write('{{}}')")
+        else:
+            child_modules = list(next(
+                d for i, d in enumerate(self.get_setting("vlsi.inputs.hierarchical.manual_modules"))
+                if self.top_module in d
+            ).values())[0]
+            self.py_append(f"# Write child module instance paths")
+            self.py_append(f"_child_modules = {{}}")
+            for cell in child_modules:
+                self.py_append(f"_inst_paths = get_db(get_db('modules', _if='.name=={cell}'), '.hinsts.name')")
+                self.py_append(f"_child_modules['{cell}'] = _inst_paths if isinstance(_inst_paths, list) else _inst_paths.split()")
+            self.py_append(f"with open({repr(child_modules_path)}, 'w') as _f:")
+            self.py_append(f"    import json; json.dump(_child_modules, _f, indent=2)")
+            self.py_append("")
 
-        for l in self.generate_dont_use_commands():
-            self.append(l)
-        if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("unflatten_ilm")
 
-        return True
+
+
 
     def place_bumps(self) -> bool:
         bumps = self.get_bumps()
@@ -384,38 +1071,48 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
                     fp_height = const.height
             if fp_width == 0 or fp_height == 0:
                 raise ValueError("Floorplan does not specify a TopLevel constraint or it has no dimensions")
-            # Center bump array in the middle of floorplan
             bump_offset_x = (Decimal(str(fp_width)) - bump_array_width) / 2 + bumps.global_x_offset
-            bump_offset_y = (Decimal(str(fp_height)) - bump_array_height) / 2+ bumps.global_y_offset
+            bump_offset_y = (Decimal(str(fp_height)) - bump_array_height) / 2 + bumps.global_y_offset
             power_ground_nets = list(map(lambda x: x.name, self.get_independent_power_nets() + self.get_independent_ground_nets()))
-            # TODO: Fix this once the stackup supports vias ucb-bar/hammer#354
             block_layer = self.get_setting("vlsi.technology.bump_block_cut_layer")  # type: str
             for bump in bumps.assignments:
-                self.append("create_bump -allow_overlap_control keep_all -cell {cell} -location_type cell_center -name_format \"Bump_{c}.{r}\" -orient r0 -location \"{x} {y}\"".format(
-                    cell = bump.custom_cell if bump.custom_cell is not None else bumps.cell,
-                    c = bump.x,
-                    r = bump.y,
-                    x = bump_offset_x + Decimal(str(bump.x - 1)) * Decimal(str(bumps.pitch_x)),
-                    y = bump_offset_y + Decimal(str(bump.y - 1)) * Decimal(str(bumps.pitch_y))))
+                bx = float(bump_offset_x + Decimal(str(bump.x - 1)) * Decimal(str(bumps.pitch_x)))
+                by = float(bump_offset_y + Decimal(str(bump.y - 1)) * Decimal(str(bumps.pitch_y)))
+                cell = bump.custom_cell if bump.custom_cell is not None else bumps.cell
+                name_fmt = f"Bump_{bump.x}.{bump.y}"
+                if self.use_python:
+                    self.py_append(f"create_bump(allow_overlap_control='keep_all', cell={cell!r}, location_type='cell_center', name_format={name_fmt!r}, orient='r0', location=[{bx}, {by}])")
+                else:
+                    self.append(f'create_bump -allow_overlap_control keep_all -cell {cell} -location_type cell_center -name_format "Bump_{bump.x}.{bump.y}" -orient r0 -location "{bx} {by}"')
                 if not bump.no_connect:
                     if bump.name in power_ground_nets:
-                        self.append("select_bumps -bumps \"Bump_{x}.{y}\"".format(x=bump.x, y=bump.y))
-                        self.append("assign_pg_bumps -selected -nets {n}".format(n=bump.name))
-                        self.append("deselect_bumps")
+                        if self.use_python:
+                            self.py_append(f"select_bumps(bumps={name_fmt!r})")
+                            self.py_append(f"assign_pg_bumps(selected=True, nets={bump.name!r})")
+                            self.py_append("deselect_bumps()")
+                        else:
+                            self.append(f'select_bumps -bumps "Bump_{bump.x}.{bump.y}"')
+                            self.append(f"assign_pg_bumps -selected -nets {bump.name}")
+                            self.append("deselect_bumps")
                     else:
-                        self.append("assign_signal_to_bump -bumps \"Bump_{x}.{y}\" -net {n}".format(x=bump.x, y=bump.y, n=bump.name))
-                self.append("create_route_blockage -name Bump_{x}_{y}_blockage {layer_options} \"{llx} {lly} {urx} {ury}\"".format(
-                    x = bump.x,
-                    y = bump.y,
-                    layer_options="-layers {{{l}}} -rects".format(l=block_layer) if(self.version() >= self.version_number("181")) else "-cut_layers {{{l}}} -area".format(l=block_layer),
-                    llx = "[get_db bump:Bump_{x}.{y} .bbox.ll.x]".format(x=bump.x, y=bump.y),
-                    lly = "[get_db bump:Bump_{x}.{y} .bbox.ll.y]".format(x=bump.x, y=bump.y),
-                    urx = "[get_db bump:Bump_{x}.{y} .bbox.ur.x]".format(x=bump.x, y=bump.y),
-                    ury = "[get_db bump:Bump_{x}.{y} .bbox.ur.y]".format(x=bump.x, y=bump.y)))
+                        if self.use_python:
+                            self.py_append(f"assign_signal_to_bump(bumps={name_fmt!r}, net={bump.name!r})")
+                        else:
+                            self.append(f'assign_signal_to_bump -bumps "Bump_{bump.x}.{bump.y}" -net {bump.name}')
+                if self.use_python:
+                    bname = f"Bump_{bump.x}.{bump.y}"
+                    blk_name = f"Bump_{bump.x}_{bump.y}_blockage"
+                    self.py_append(f"_bbox = db().bumps('{bname}').bbox")
+                    self.py_append(f"create_route_blockage(name='{blk_name}', layers=[{block_layer!r}], rects=[[_bbox.ll.x, _bbox.ll.y, _bbox.ur.x, _bbox.ur.y]])")
+                else:
+                    layer_options = f"-layers {{{block_layer}}} -rects" if self.version() >= self.version_number("181") else f"-cut_layers {{{block_layer}}} -area"
+                    self.append(f'create_route_blockage -name Bump_{bump.x}_{bump.y}_blockage {layer_options} "[get_db bump:Bump_{bump.x}.{bump.y} .bbox.ll.x] [get_db bump:Bump_{bump.x}.{bump.y} .bbox.ll.y] [get_db bump:Bump_{bump.x}.{bump.y} .bbox.ur.x] [get_db bump:Bump_{bump.x}.{bump.y} .bbox.ur.y]"')
 
-            # Use early global bump router
             if self.version() >= self.version_number("231") and self.get_setting("par.innovus.early_route_bumps"):
-                self.append("set_db route_early_global_route_bump_nets true")
+                if self.use_python:
+                    self.py_append("db().route_early_global_route_bump_nets = True")
+                else:
+                    self.append("set_db route_early_global_route_bump_nets true")
         return True
 
     def place_tap_cells(self) -> bool:
@@ -430,8 +1127,12 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         try:
             interval = self.get_setting("vlsi.technology.tap_cell_interval")
             offset = self.get_setting("vlsi.technology.tap_cell_offset")
-            self.append("set_db add_well_taps_cell {TAP_CELL}".format(TAP_CELL=tap_cell))
-            self.append("add_well_taps -cell_interval {INTERVAL} -in_row_offset {OFFSET}".format(INTERVAL=interval, OFFSET=offset))
+            if self.use_python:
+                self.py_append(f"db().add_well_taps_cell = {tap_cell!r}")
+                self.py_append(f"add_well_taps(cell_interval={interval}, in_row_offset={offset})")
+            else:
+                self.append("set_db add_well_taps_cell {TAP_CELL}".format(TAP_CELL=tap_cell))
+                self.append("add_well_taps -cell_interval {INTERVAL} -in_row_offset {OFFSET}".format(INTERVAL=interval, OFFSET=offset))
         except KeyError:
             pass
         return True
@@ -456,24 +1157,33 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         fp_ury = const.height - const.margins.top
 
         pin_assignments = self.get_pin_assignments()
-        self.verbose_append("set_db assign_pins_edit_in_batch true")
+        if self.use_python:
+            self.py_append("db().assign_pins_edit_in_batch = True")
+            self.py_append(f"db().assign_pins_promoted_macro_bottom_layer = {self.get_stackup().get_metal_by_index(1).name!r}")
+            self.py_append(f"db().assign_pins_promoted_macro_top_layer = {self.get_stackup().get_metal_by_index(-1).name!r}")
+            self.py_append("_all_ppins = []")
+        else:
+            self.verbose_append("set_db assign_pins_edit_in_batch true")
+            self.append(f"set_db assign_pins_promoted_macro_bottom_layer {self.get_stackup().get_metal_by_index(1).name}")
+            self.append(f"set_db assign_pins_promoted_macro_top_layer {self.get_stackup().get_metal_by_index(-1).name}")
+            self.append('set all_ppins ""')
 
         promoted_pins = []  # type: List[str]
-        # Set the top/bottom layers for promoting macro pins
-        self.append(f"set_db assign_pins_promoted_macro_bottom_layer {self.get_stackup().get_metal_by_index(1).name}")
-        self.append(f"set_db assign_pins_promoted_macro_top_layer {self.get_stackup().get_metal_by_index(-1).name}")
-        self.append('set all_ppins ""')
         for pin in pin_assignments:
             if pin.preplaced:
-                # Find the pin object that should be promoted. Only one of the two (driver_pins or load_pins) should be non-empty.
-                self.append(f'set ppins [get_db [get_nets {pin.pins}] .driver_pins]')
-                self.append(f'if {{$ppins eq ""}} {{set ppins [get_db [get_nets {pin.pins}] .load_pins]}}')
-                self.append("lappend all_ppins $ppins")
-                # First promote the pin
-                self.append("set_promoted_macro_pin -insts [get_db $ppins .inst.name] -pins [get_db $ppins .base_name]")
-                # Then set them to don't touch and skip routing
-                self.append("set_dont_touch [get_db $ppins .net]")
-                self.append("set_db [get_db $ppins .net] .skip_routing true")
+                if self.use_python:
+                    self.py_append(f"_ppins = db().nets('{pin.pins}').driver_pins or db().nets('{pin.pins}').load_pins")
+                    self.py_append("_all_ppins.extend(_ppins)")
+                    self.py_append(f"set_promoted_macro_pin(insts=[p.inst.name for p in _ppins], pins=[p.base_name for p in _ppins])")
+                    self.py_append(f"set_dont_touch([p.net for p in _ppins])")
+                    self.py_append(f"[setattr(p.net, 'skip_routing', True) for p in _ppins]")
+                else:
+                    self.append(f'set ppins [get_db [get_nets {pin.pins}] .driver_pins]')
+                    self.append(f'if {{$ppins eq ""}} {{set ppins [get_db [get_nets {pin.pins}] .load_pins]}}')
+                    self.append("lappend all_ppins $ppins")
+                    self.append("set_promoted_macro_pin -insts [get_db $ppins .inst.name] -pins [get_db $ppins .base_name]")
+                    self.append("set_dont_touch [get_db $ppins .net]")
+                    self.append("set_db [get_db $ppins .net] .skip_routing true")
             else:
                 # TODO: Do we need pin blockages for our layers?
                 # Seems like we will only need special pin blockages if the vias are larger than the straps
@@ -535,78 +1245,160 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
                     depth_arg
                 ]
 
-                self.verbose_append(" ".join(cmd))
+                if self.use_python:
+                    py_kwargs = {}
+                    py_kwargs['fixed_pin'] = 'True'
+                    py_kwargs['pin'] = repr(pin.pins)
+                    py_kwargs['hinst'] = repr(self.top_module)
+                    if cadence_side:
+                        py_kwargs['side'] = repr(cadence_side)
+                    if pin.layers:
+                        py_kwargs['layer'] = repr(pin.layers) if len(pin.layers) > 1 else repr(pin.layers[0])
+                    if pin.location is not None:
+                        py_kwargs['assign'] = f"[{pin.location[0]}, {pin.location[1]}]"
+                    else:
+                        sx = float(fp_urx if pin.side != "left" else fp_llx)
+                        sy = float(fp_ury if pin.side != "bottom" else fp_lly)
+                        ex = float(fp_llx if pin.side != "right" else fp_urx)
+                        ey = float(fp_lly if pin.side != "top" else fp_ury)
+                        start_key = "start" if pin.side in ("bottom", "right") else "end"
+                        end_key = "end" if pin.side in ("bottom", "right") else "start"
+                        py_kwargs[start_key] = f"[{sx}, {sy}]"
+                        py_kwargs[end_key] = f"[{ex}, {ey}]"
+                        if pin.layers and len(pin.layers) > 1:
+                            py_kwargs['pattern'] = "'fill_optimised'"
+                        else:
+                            py_kwargs['spread_type'] = "'range'"
+                    if pin.width is not None:
+                        py_kwargs['pin_width'] = pin.width
+                    if pin.depth is not None:
+                        py_kwargs['pin_depth'] = pin.depth
+                    kw_str = ', '.join(f"{k}={v}" for k, v in py_kwargs.items())
+                    self.py_append(f"edit_pin({kw_str})")
+                else:
+                    self.verbose_append(" ".join(cmd))
 
-        # In case the * wildcard is used after preplaced pins, this will put back the promoted pins correctly.
-        self.verbose_append("if {[llength $all_ppins] ne 0} {assign_io_pins -move_fixed_pin -pins [get_db $all_ppins .net.name]}")
-
-        self.verbose_append("set_db assign_pins_edit_in_batch false")
+        if self.use_python:
+            self.py_append("if _all_ppins: assign_io_pins(move_fixed_pin=True, pins=[p.net.name for p in _all_ppins])")
+            self.py_append("db().assign_pins_edit_in_batch = False")
+        else:
+            self.verbose_append("if {[llength $all_ppins] ne 0} {assign_io_pins -move_fixed_pin -pins [get_db $all_ppins .net.name]}")
+            self.verbose_append("set_db assign_pins_edit_in_batch false")
         return True
 
     def power_straps(self) -> bool:
         """Place the power straps for the design."""
         power_straps_tcl = os.path.join(self.run_dir, "power_straps.tcl")
         self.write_contents_to_path("\n".join(self.create_power_straps_tcl()), power_straps_tcl)
-        self.verbose_append("source -echo -verbose {}".format(power_straps_tcl))
+        if self.use_python:
+            self.py_append(f"source('{power_straps_tcl}', echo=True, verbose=True)")
+        else:
+            self.verbose_append("source -echo -verbose {}".format(power_straps_tcl))
         return True
 
     def place_opt_design(self) -> bool:
         """Place the design and do pre-routing optimization."""
-        # First, check that no ports are left unplaced. Exit with error code for user to fix.
-        self.append('''
+        if self.use_python:
+            self.py_append("_unplaced = db().ports().filter(lambda x: x.place_status == 'unplaced')")
+            self.py_append("if _unplaced:")
+            self.py_append("    raise RuntimeError(f'Some pins remain unplaced: {[p.name for p in _unplaced]}')")
+        else:
+            self.append('''
             set unplaced_pins [get_db ports -if {.place_status == unplaced}]
             if {$unplaced_pins ne ""} {
                 print_message -error "Some pins remain unplaced, which will cause invalid placement and routing. These are the unplaced pins: $unplaced_pins"
                 exit 2
             }
             ''', clean=True)
+
         if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append('''
+            if self.use_python:
+                self.py_append("flatten_ilm()")
+                self.py_append(f"update_constraint_mode(name={self.constraint_mode!r}, ilm_sdc_files={self.post_synth_sdc!r})")
+            else:
+                self.verbose_append('''
             flatten_ilm
             update_constraint_mode -name {name} -ilm_sdc_files {sdc}
             '''.format(name=self.constraint_mode, sdc=self.post_synth_sdc), clean=True)
 
-        # Use place_opt_design V2 (POD-Turbo). Option must be explicitly set only in 22.1.
         if self.version() >= self.version_number("221") and self.version() < self.version_number("231"):
-            self.verbose_append("set_db opt_enable_podv2_clock_opt_flow true")
+            if self.use_python:
+                self.py_append("db().opt_enable_podv2_clock_opt_flow = True")
+            else:
+                self.verbose_append("set_db opt_enable_podv2_clock_opt_flow true")
 
-        self.verbose_append("place_opt_design")
+        if self.use_python:
+            self.py_append("place_opt_design()")
+        else:
+            self.verbose_append("place_opt_design")
         return True
 
     def clock_tree(self) -> bool:
         """Setup and route a clock tree for clock nets."""
         if len(self.get_clock_ports()) > 0 or len(self.get_setting("vlsi.inputs.custom_sdc_files")) > 0:
-            # Fix fanout load violations
-            self.verbose_append("set_db opt_fix_fanout_load true")
-            # Ignore clock tree when there are no clocks
-            # If special cells are specified, explicitly set them instead of letting tool infer from libs
+            if self.use_python:
+                self.py_append("db().opt_fix_fanout_load = True")
+            else:
+                self.verbose_append("set_db opt_fix_fanout_load true")
+
             buffer_cells = self.technology.get_special_cell_by_type(CellType.CTSBuffer)
             if len(buffer_cells) > 0:
-                self.append(f"set_db cts_buffer_cells {{{' '.join(buffer_cells[0].name)}}}")
+                if self.use_python:
+                    self.py_append(f"db().cts_buffer_cells = {buffer_cells[0].name!r}")
+                else:
+                    self.append(f"set_db cts_buffer_cells {{{' '.join(buffer_cells[0].name)}}}")
             inverter_cells = self.technology.get_special_cell_by_type(CellType.CTSInverter)
             if len(inverter_cells) > 0:
-                self.append(f"set_db cts_inverter_cells {{{' '.join(inverter_cells[0].name)}}}")
+                if self.use_python:
+                    self.py_append(f"db().cts_inverter_cells = {inverter_cells[0].name!r}")
+                else:
+                    self.append(f"set_db cts_inverter_cells {{{' '.join(inverter_cells[0].name)}}}")
             gate_cells = self.technology.get_special_cell_by_type(CellType.CTSGate)
             if len(gate_cells) > 0:
-                self.append(f"set_db cts_clock_gating_cells {{{' '.join(gate_cells[0].name)}}}")
+                if self.use_python:
+                    self.py_append(f"db().cts_clock_gating_cells = {gate_cells[0].name!r}")
+                else:
+                    self.append(f"set_db cts_clock_gating_cells {{{' '.join(gate_cells[0].name)}}}")
             logic_cells = self.technology.get_special_cell_by_type(CellType.CTSLogic)
             if len(logic_cells) > 0:
-                self.append(f"set_db cts_logic_cells {{{' '.join(logic_cells[0].name)}}}")
-            self.verbose_append("create_clock_tree_spec")
-            if self.version() >= self.version_number("221"):
-                # Required for place_opt_design v2 (POD-Turbo)
-                if bool(self.get_setting("par.innovus.use_cco")):
-                    self.verbose_append("clock_opt_design -hold -timing_debug_report")
+                if self.use_python:
+                    self.py_append(f"db().cts_logic_cells = {logic_cells[0].name!r}")
                 else:
-                    self.verbose_append("clock_opt_design -cts -timing_debug_report")
+                    self.append(f"set_db cts_logic_cells {{{' '.join(logic_cells[0].name)}}}")
+
+            if self.use_python:
+                self.py_append("create_clock_tree_spec()")
+            else:
+                self.verbose_append("create_clock_tree_spec")
+
+            if self.version() >= self.version_number("221"):
+                if bool(self.get_setting("par.innovus.use_cco")):
+                    if self.use_python:
+                        self.py_append("clock_opt_design(hold=True, timing_debug_report=True)")
+                    else:
+                        self.verbose_append("clock_opt_design -hold -timing_debug_report")
+                else:
+                    if self.use_python:
+                        self.py_append("clock_opt_design(cts=True, timing_debug_report=True)")
+                    else:
+                        self.verbose_append("clock_opt_design -cts -timing_debug_report")
             else:
                 if bool(self.get_setting("par.innovus.use_cco")):
-                    # -hold is a secret flag for ccopt_design (undocumented anywhere)
-                    self.verbose_append("ccopt_design -hold -timing_debug_report")
+                    if self.use_python:
+                        self.py_append("ccopt_design(hold=True, timing_debug_report=True)")
+                    else:
+                        self.verbose_append("ccopt_design -hold -timing_debug_report")
                 else:
-                    self.verbose_append("clock_design")
+                    if self.use_python:
+                        self.py_append("clock_design()")
+                    else:
+                        self.verbose_append("clock_design")
+
         if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("unflatten_ilm")
+            if self.use_python:
+                self.py_append("unflatten_ilm()")
+            else:
+                self.verbose_append("unflatten_ilm")
         return True
 
     def add_fillers(self) -> bool:
@@ -630,87 +1422,118 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
                     self.logger.warning("No decap capacitances specified but decap constraints with target: 'capacitance' exist. Add decap capacitances to the tech plugin!")
                 else:
                     for (cell, cap) in zip(decap_cells, decap_caps):
-                        self.append("add_decap_cell_candidates {CELL} {CAP}".format(CELL=cell, CAP=cap))
+                        if self.use_python:
+                            self.py_append(f"add_decap_cell_candidates({cell!r}, {cap})")
+                        else:
+                            self.append("add_decap_cell_candidates {CELL} {CAP}".format(CELL=cell, CAP=cap))
                     for const in decap_consts:
                         assert isinstance(const.capacitance, CapacitanceValue)
-                        area_str = ""
+                        cap_val = const.capacitance.value_in_units(cap_unit)
                         if all(c is not None for c in (const.x, const.y, const.width, const.height)):
                             assert isinstance(const.x, Decimal)
                             assert isinstance(const.y, Decimal)
                             assert isinstance(const.width, Decimal)
                             assert isinstance(const.height, Decimal)
-                            area_str = " ".join(("-area", str(const.x), str(const.y), str(const.x+const.width), str(const.y+const.height)))
-                        self.verbose_append("add_decaps -effort high -total_cap {CAP} {AREA}".format(
-                            CAP=const.capacitance.value_in_units(cap_unit), AREA=area_str))
+                            if self.use_python:
+                                self.py_append(f"add_decaps(effort='high', total_cap={cap_val}, area=[{const.x}, {const.y}, {const.x+const.width}, {const.y+const.height}])")
+                            else:
+                                area_str = " ".join(("-area", str(const.x), str(const.y), str(const.x+const.width), str(const.y+const.height)))
+                                self.verbose_append(f"add_decaps -effort high -total_cap {cap_val} {area_str}")
+                        else:
+                            if self.use_python:
+                                self.py_append(f"add_decaps(effort='high', total_cap={cap_val})")
+                            else:
+                                self.verbose_append(f"add_decaps -effort high -total_cap {cap_val}")
 
         if len(stdfillers) == 0:
             self.logger.warning(
                 "The technology plugin 'special cells: stdfiller' field does not exist. It should specify a list of (non IO) filler cells. No filler will be added. You can override this with an add_fillers hook if you do not specify filler cells in the technology plugin.")
         else:
-            # Decap cells as fillers
             if len(decaps) > 0:
                 fill_cells = list(map(lambda c: str(c), decaps[0].name))
-                self.append("set_db add_fillers_cells \"{FILLER}\"".format(FILLER=" ".join(fill_cells)))
-                # Targeted decap constraints
+                if self.use_python:
+                    self.py_append(f"db().add_fillers_cells = {' '.join(fill_cells)!r}")
+                else:
+                    self.append("set_db add_fillers_cells \"{FILLER}\"".format(FILLER=" ".join(fill_cells)))
                 decap_consts = list(filter(lambda x: x.target=="density", self.get_decap_constraints()))
                 for const in decap_consts:
-                    area_str = ""
                     if all(c is not None for c in (const.x, const.y, const.width, const.height)):
                         assert isinstance(const.x, Decimal)
                         assert isinstance(const.y, Decimal)
                         assert isinstance(const.width, Decimal)
                         assert isinstance(const.height, Decimal)
-                        area_str = " ".join(("-area", str(const.x), str(const.y), str(const.x+const.width), str(const.y+const.height)))
-                    self.verbose_append("add_fillers -density {DENSITY} {AREA}".format(
-                        DENSITY=str(const.density), AREA=area_str))
-                # Or, fill everywhere if no decap constraints given
+                        if self.use_python:
+                            self.py_append(f"add_fillers(density={const.density}, area=[{const.x}, {const.y}, {const.x+const.width}, {const.y+const.height}])")
+                        else:
+                            area_str = " ".join(("-area", str(const.x), str(const.y), str(const.x+const.width), str(const.y+const.height)))
+                            self.verbose_append(f"add_fillers -density {const.density} {area_str}")
                 if len(self.get_decap_constraints()) == 0:
-                    self.verbose_append("add_fillers")
+                    if self.use_python:
+                        self.py_append("add_fillers()")
+                    else:
+                        self.verbose_append("add_fillers")
 
-            # Then the rest is stdfillers
             fill_cells = list(map(lambda c: str(c), stdfillers[0].name))
-            self.append("set_db add_fillers_cells \"{FILLER}\"".format(FILLER=" ".join(fill_cells)))
-            self.verbose_append("add_fillers")
+            if self.use_python:
+                self.py_append(f"db().add_fillers_cells = {' '.join(fill_cells)!r}")
+                self.py_append("add_fillers()")
+            else:
+                self.append("set_db add_fillers_cells \"{FILLER}\"".format(FILLER=" ".join(fill_cells)))
+                self.verbose_append("add_fillers")
         return True
 
 
     def route_design(self) -> bool:
         """Route the design."""
         if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("flatten_ilm")
+            if self.use_python:
+                self.py_append("flatten_ilm()")
+            else:
+                self.verbose_append("flatten_ilm")
 
-        # Allow express design effort to complete running.
-        # By default, route_design will abort in express mode with
-        # "WARNING (NRIG-142) Express flow by default will not run routing".
-        self.verbose_append("set_db design_express_route true")
-
-        self.verbose_append("route_design")
+        if self.use_python:
+            self.py_append("db().design_express_route = True")
+            self.py_append("route_design()")
+        else:
+            self.verbose_append("set_db design_express_route true")
+            self.verbose_append("route_design")
         return True
 
     def opt_settings(self) -> str:
+        """Returns TCL opt settings string (used for TCL mode). For Python mode use emit_opt_settings_python()."""
         cmds = []
-        # Enable auto hold recovery if slack degrades
         cmds.append("set_db opt_post_route_hold_recovery auto")
-        # Fix SI-induced slew violations (glitch fixing enabled by default)
         cmds.append("set_db opt_post_route_fix_si_transitions true")
-        # Report reasons for not fixing hold
         cmds.append("set_db opt_verbose true")
-        # Report reasons for not fixing DRVs
         cmds.append("set_db opt_detail_drv_failure_reason true")
-        if self.version() >= self.version_number("221"):  # critical region resynthesis
-            # Report failure reasons
+        if self.version() >= self.version_number("221"):
             cmds.append("set_db opt_sequential_genus_restructure_report_failure_reason true")
         return "\n".join(cmds)
+
+    def _emit_opt_settings_python(self) -> None:
+        """Emit Python-native opt settings."""
+        self.py_append("db().opt_post_route_hold_recovery = 'auto'")
+        self.py_append("db().opt_post_route_fix_si_transitions = True")
+        self.py_append("db().opt_verbose = True")
+        self.py_append("db().opt_detail_drv_failure_reason = True")
+        if self.version() >= self.version_number("221"):
+            self.py_append("db().opt_sequential_genus_restructure_report_failure_reason = True")
 
     def opt_design(self) -> bool:
         """
         Post-route optimization and fix setup & hold time violations.
         -expanded_views creates timing reports for each MMMC view.
         """
-        self.append(self.opt_settings())
-        self.verbose_append("opt_design -post_route -setup -hold -expanded_views -timing_debug_report")
-        if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("unflatten_ilm")
+        if self.use_python:
+            self._emit_opt_settings_python()
+            self.py_append("opt_design(post_route=True, setup=True, hold=True, expanded_views=True, timing_debug_report=True)")
+            if self.hierarchical_mode.is_nonleaf_hierarchical():
+                self.py_append("unflatten_ilm()")
+        else:
+            self.append(self.opt_settings())
+            self.verbose_append("opt_design -post_route -setup -hold -expanded_views -timing_debug_report")
+            if self.hierarchical_mode.is_nonleaf_hierarchical():
+                self.verbose_append("unflatten_ilm")
         return True
 
     def route_opt_design(self) -> bool:
@@ -720,19 +1543,46 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         Fixes setup, hold, and DRV violations.
         """
         if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("flatten_ilm")
+            if self.use_python:
+                self.py_append("flatten_ilm()")
+            else:
+                self.verbose_append("flatten_ilm")
 
-        # Allow express design effort to complete running.
-        # By default, route_design will abort in express mode with
-        # "WARNING (NRIG-142) Express flow by default will not run routing".
-        self.verbose_append("set_db design_express_route true")
+        if self.use_python:
+            self.py_append("db().design_express_route = True")
+            self._emit_opt_settings_python()
+        else:
+            self.verbose_append("set_db design_express_route true")
+            self.append(self.opt_settings())
 
-        self.append(self.opt_settings())
+        # For Innovus 25.1+ without QRC tech files, use separate route + opt flow
+        if self.version() >= self.version_number("251"):
+            qrc_tech = self.get_qrc_tech() if hasattr(self, 'get_qrc_tech') else ''
+            if qrc_tech == '':
+                if self.use_python:
+                    self.py_append("db().extract_rc_engine = 'pre_route'")
+                    self.py_append("route_design()")
+                    self.py_append("db().extract_rc_engine = 'post_route'")
+                    self.py_append("opt_design(post_route=True, timing_debug_report=True)")
+                    if self.hierarchical_mode.is_nonleaf_hierarchical():
+                        self.py_append("unflatten_ilm()")
+                else:
+                    self.verbose_append("set_db extract_rc_engine pre_route")
+                    self.verbose_append("route_design")
+                    self.verbose_append("set_db extract_rc_engine post_route")
+                    self.verbose_append("opt_design -post_route -timing_debug_report")
+                    if self.hierarchical_mode.is_nonleaf_hierarchical():
+                        self.verbose_append("unflatten_ilm")
+                return True
 
-        self.verbose_append("route_opt_design -timing_debug_report")
-
-        if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("unflatten_ilm")
+        if self.use_python:
+            self.py_append("route_opt_design(timing_debug_report=True)")
+            if self.hierarchical_mode.is_nonleaf_hierarchical():
+                self.py_append("unflatten_ilm()")
+        else:
+            self.verbose_append("route_opt_design -timing_debug_report")
+            if self.hierarchical_mode.is_nonleaf_hierarchical():
+                self.verbose_append("unflatten_ilm")
         return True
 
     def opt_signoff(self) -> bool:
@@ -743,28 +1593,35 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         Note: runs Tempus in batch mode.
         """
         if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("flatten_ilm")
+            if self.use_python:
+                self.py_append("flatten_ilm()")
+            else:
+                self.verbose_append("flatten_ilm")
 
-        # Options
-        # Set clock fixing cell list
         cell_types = [CellType.CTSBuffer, CellType.CTSInverter, CellType.CTSGate, CellType.CTSLogic]
         cells_by_type = chain(*map(lambda c: self.technology.get_special_cell_by_type(c), cell_types))
         flat_cells = chain(*map(lambda cells: cells.name, cells_by_type))
         regexp = "|".join(flat_cells)
-        self.verbose_append(f"set_db opt_signoff_clock_cell_list [lsearch -regexp -all -inline [get_db lib_cells .base_name] {regexp}]")
-        # Fix DRVs
-        self.verbose_append("set_db opt_signoff_fix_data_drv true")
-        self.verbose_append("set_db opt_signoff_fix_clock_drv true")
+        max_threads = self.get_setting('vlsi.core.max_threads')
 
-        # Signoff timing requires remote host setting
-        self.verbose_append(f"set_multi_cpu_usage -remote_host 1 -cpu_per_remote_host {self.get_setting('vlsi.core.max_threads')}")
-        self.verbose_append("time_design_signoff")
-
-        # Run
-        self.verbose_append("opt_signoff -all")
-
-        if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("unflatten_ilm")
+        if self.use_python:
+            self.py_append(f"db().opt_signoff_clock_cell_list = db().lib_cells().filter(lambda x: __import__('re').search({regexp!r}, x.base_name)).base_name")
+            self.py_append("db().opt_signoff_fix_data_drv = True")
+            self.py_append("db().opt_signoff_fix_clock_drv = True")
+            self.py_append(f"set_multi_cpu_usage(remote_host=1, cpu_per_remote_host={max_threads})")
+            self.py_append("time_design_signoff()")
+            self.py_append("opt_signoff(_all=True)")
+            if self.hierarchical_mode.is_nonleaf_hierarchical():
+                self.py_append("unflatten_ilm()")
+        else:
+            self.verbose_append(f"set_db opt_signoff_clock_cell_list [lsearch -regexp -all -inline [get_db lib_cells .base_name] {regexp}]")
+            self.verbose_append("set_db opt_signoff_fix_data_drv true")
+            self.verbose_append("set_db opt_signoff_fix_clock_drv true")
+            self.verbose_append(f"set_multi_cpu_usage -remote_host 1 -cpu_per_remote_host {max_threads}")
+            self.verbose_append("time_design_signoff")
+            self.verbose_append("opt_signoff -all")
+            if self.hierarchical_mode.is_nonleaf_hierarchical():
+                self.verbose_append("unflatten_ilm")
         return True
 
     def assemble_design(self) -> bool:
@@ -772,34 +1629,26 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         return True
 
     def write_netlist(self) -> bool:
-        # Don't use virtual connects (using colon, e.g. VSS:) because they mess up LVS
-        self.verbose_append("set_db write_stream_virtual_connection false")
-
-        # Connect power nets that are tied together
-        for pwr_gnd_net in (self.get_all_power_nets() + self.get_all_ground_nets()):
-            if pwr_gnd_net.tie is not None:
-                self.verbose_append("connect_global_net {tie} -type net -net_base_name {net}".format(tie=pwr_gnd_net.tie, net=pwr_gnd_net.name))
-
-        # Output a flattened Verilog netlist for the design and include physical cells (-phys) like decaps and fill
-        self.verbose_append("write_netlist {netlist} -top_module_first -top_module {top} -exclude_leaf_cells -phys -flat -exclude_insts_of_cells {{ {pcells} }} ".format(
-            netlist=self.output_netlist_filename,
-            top=self.top_module,
-            pcells=" ".join(self.get_physical_only_cells())
-        ))
-
-        # Output a non-flattened Verilog netlist with physical instances
-        self.verbose_append("write_netlist {netlist} -top_module_first -top_module {top} -exclude_leaf_cells -phys -exclude_insts_of_cells {{ {pcells} }} ".format(
-            netlist=self.output_physical_netlist_filename,
-            top=self.top_module,
-            pcells=" ".join(self.get_physical_only_cells())
-        ))
-
-        self.verbose_append("write_netlist {netlist} -top_module_first -top_module {top} -exclude_leaf_cells -exclude_insts_of_cells {{ {pcells} }} ".format(
-            netlist=self.output_sim_netlist_filename,
-            top=self.top_module,
-            pcells=" ".join(self.get_physical_only_cells())
-        ))
-
+        pcells = self.get_physical_only_cells()
+        if self.use_python:
+            self.py_append("db().write_stream_virtual_connection = False")
+            for pwr_gnd_net in (self.get_all_power_nets() + self.get_all_ground_nets()):
+                if pwr_gnd_net.tie is not None:
+                    self.py_append(f"connect_global_net({pwr_gnd_net.tie!r}, type='net', net_base_name={pwr_gnd_net.name!r})")
+            self.py_append(f"write_netlist({self.output_netlist_filename!r}, top_module_first=True, top_module={self.top_module!r}, exclude_leaf_cells=True, phys=True, flat=True, exclude_insts_of_cells={pcells!r})")
+            self.py_append(f"write_netlist({self.output_physical_netlist_filename!r}, top_module_first=True, top_module={self.top_module!r}, exclude_leaf_cells=True, phys=True, exclude_insts_of_cells={pcells!r})")
+            self.py_append(f"write_netlist({self.output_sim_netlist_filename!r}, top_module_first=True, top_module={self.top_module!r}, exclude_leaf_cells=True, exclude_insts_of_cells={pcells!r})")
+        else:
+            self.verbose_append("set_db write_stream_virtual_connection false")
+            for pwr_gnd_net in (self.get_all_power_nets() + self.get_all_ground_nets()):
+                if pwr_gnd_net.tie is not None:
+                    self.verbose_append("connect_global_net {tie} -type net -net_base_name {net}".format(tie=pwr_gnd_net.tie, net=pwr_gnd_net.name))
+            self.verbose_append("write_netlist {netlist} -top_module_first -top_module {top} -exclude_leaf_cells -phys -flat -exclude_insts_of_cells {{ {pcells} }} ".format(
+                netlist=self.output_netlist_filename, top=self.top_module, pcells=" ".join(pcells)))
+            self.verbose_append("write_netlist {netlist} -top_module_first -top_module {top} -exclude_leaf_cells -phys -exclude_insts_of_cells {{ {pcells} }} ".format(
+                netlist=self.output_physical_netlist_filename, top=self.top_module, pcells=" ".join(pcells)))
+            self.verbose_append("write_netlist {netlist} -top_module_first -top_module {top} -exclude_leaf_cells -exclude_insts_of_cells {{ {pcells} }} ".format(
+                netlist=self.output_sim_netlist_filename, top=self.top_module, pcells=" ".join(pcells)))
         return True
 
     def write_gds(self) -> bool:
@@ -855,54 +1704,78 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
                 return False
         # "auto", i.e. not "manual", means not specifying anything extra.
 
-        self.verbose_append(
-            "write_stream -mode ALL -format stream {map_file} {merge_options} {unit} {gds}".format(
-            map_file=map_file,
-            merge_options=merge_options,
-            gds=self.output_gds_filename,
-            unit=unit
-        ))
+        if self.use_python:
+            kwargs = f"mode='ALL', format='stream'"
+            gds_map = self.get_gds_map_file()
+            if gds_map:
+                kwargs += f", map_file={gds_map!r}"
+            if unit:
+                gds_precision = self.get_setting("par.inputs.gds_precision")
+                kwargs += f", unit={gds_precision}"
+            if self.get_setting("par.inputs.gds_merge"):
+                kwargs += f", uniquify_cell_names=True, merge={gds_files!r}"
+            else:
+                kwargs += ", output_macros=True"
+            self.py_append(f"write_stream({self.output_gds_filename!r}, {kwargs})")
+        else:
+            self.verbose_append(
+                "write_stream -mode ALL -format stream {map_file} {merge_options} {unit} {gds}".format(
+                map_file=map_file,
+                merge_options=merge_options,
+                gds=self.output_gds_filename,
+                unit=unit
+            ))
         return True
 
     def write_def(self) -> bool:
-        self.verbose_append("write_def {def_file} -floorplan -netlist -routing".format(def_file=self.output_def_path))
-
+        if self.use_python:
+            self.py_append(f"write_def({self.output_def_path!r}, floorplan=True, netlist=True, routing=True)")
+        else:
+            self.verbose_append("write_def {def_file} -floorplan -netlist -routing".format(def_file=self.output_def_path))
         return True
 
     def write_sdf(self) -> bool:
         if self.hierarchical_mode.is_nonleaf_hierarchical():
-            self.verbose_append("flatten_ilm")
+            if self.use_python:
+                self.py_append("flatten_ilm()")
+            else:
+                self.verbose_append("flatten_ilm")
 
-        # Output the Standard Delay Format File for use in timing annotated gate level simulations
         corners = self.get_mmmc_corners()
+        sdf_path = self.output_sdf_path
         if corners:
-            # Derive flags for min::type::max
             max_view = next((c for c in corners if c.type is MMMCCornerType.Setup), None)
-            max_view_flag = ""
-            if max_view is not None:
-                max_view_flag = f"-max_view {max_view.name}.setup_view"
             min_view = next((c for c in corners if c.type is MMMCCornerType.Hold), None)
-            min_view_flag = ""
-            if min_view is not None:
-                min_view_flag = f"-min_view {min_view.name}.hold_view"
             typ_view = next((c for c in corners if c.type is MMMCCornerType.Extra), None)
-            typ_view_flag = ""
-            if typ_view is not None:
-                typ_view_flag = f"-typical_view {typ_view.name}.extra_view"
-            self.verbose_append(f"write_sdf {max_view_flag} {min_view_flag} {typ_view_flag} {self.run_dir}/{self.top_module}.par.sdf")
+            if self.use_python:
+                kwargs = repr(sdf_path)
+                if max_view: kwargs += f", max_view='{max_view.name}.setup_view'"
+                if min_view: kwargs += f", min_view='{min_view.name}.hold_view'"
+                if typ_view: kwargs += f", typical_view='{typ_view.name}.extra_view'"
+                self.py_append(f"write_sdf({kwargs})")
+            else:
+                max_flag = f"-max_view {max_view.name}.setup_view" if max_view else ""
+                min_flag = f"-min_view {min_view.name}.hold_view" if min_view else ""
+                typ_flag = f"-typical_view {typ_view.name}.extra_view" if typ_view else ""
+                self.verbose_append(f"write_sdf {max_flag} {min_flag} {typ_flag} {sdf_path}")
         else:
-            self.verbose_append(f"write_sdf {self.run_dir}/{self.top_module}.par.sdf".format(run_dir=self.run_dir, top=self.top_module))
-
+            if self.use_python:
+                self.py_append(f"write_sdf({sdf_path!r})")
+            else:
+                self.verbose_append(f"write_sdf {sdf_path}")
         return True
 
     def write_spefs(self) -> bool:
-        # Output a SPEF file that contains the parasitic extraction results
-        self.verbose_append("set_db extract_rc_coupled true")
-        self.verbose_append("extract_rc")
+        if self.use_python:
+            self.py_append("db().extract_rc_coupled = True")
+            self.py_append("extract_rc()")
+        else:
+            self.verbose_append("set_db extract_rc_coupled true")
+            self.verbose_append("extract_rc")
+
         corners = self.get_mmmc_corners()
         if corners:
             for corner in corners:
-                # Setting up views for all defined corner types: setup, hold, extra
                 if corner.type is MMMCCornerType.Setup:
                     corner_type_name = "setup"
                 elif corner.type is MMMCCornerType.Hold:
@@ -911,12 +1784,18 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
                     corner_type_name = "extra"
                 else:
                     raise ValueError("Unsupported MMMCCornerType")
-
-                self.verbose_append("write_parasitics -spef_file {run_dir}/{top}.{cname}.par.spef -rc_corner {cname}.{ctype}_rc".format(run_dir=self.run_dir, top=self.top_module, cname=corner.name, ctype=corner_type_name))
-
+                spef_path = os.path.join(self.run_dir, f"{self.top_module}.{corner.name}.par.spef")
+                rc_corner = f"{corner.name}.{corner_type_name}_rc"
+                if self.use_python:
+                    self.py_append(f"write_parasitics(spef_file={spef_path!r}, rc_corner={rc_corner!r})")
+                else:
+                    self.verbose_append(f"write_parasitics -spef_file {spef_path} -rc_corner {rc_corner}")
         else:
-            self.verbose_append("write_parasitics -spef_file {run_dir}/{top}.par.spef".format(run_dir=self.run_dir, top=self.top_module))
-
+            spef_path = os.path.join(self.run_dir, f"{self.top_module}.par.spef")
+            if self.use_python:
+                self.py_append(f"write_parasitics(spef_file={spef_path!r})")
+            else:
+                self.verbose_append(f"write_parasitics -spef_file {spef_path}")
         return True
 
 
@@ -941,18 +1820,54 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         """write regs info to be read in for simulation register forcing"""
         if self.hierarchical_mode.is_nonleaf_hierarchical():
             self.append('flatten_ilm')
-            self.append(self.child_modules_tcl())
-        self.append(self.write_regs_tcl())
+            if self.use_python:
+                self._child_modules_python()
+            else:
+                self.append(self.child_modules_tcl())
+
+        if self.use_python:
+            self._write_regs_python()
+        else:
+            self.append(self.write_regs_tcl())
+
         if self.hierarchical_mode.is_nonleaf_hierarchical():
             self.append('unflatten_ilm')
         self.ran_write_regs = True
         return True
 
+    def _write_regs_python(self) -> None:
+        """Python-native equivalent of write_regs_tcl() for Innovus 25.1+."""
+        cells_path = self.all_cells_path
+        regs_path  = self.all_regs_path
+
+        # Write sequential cell names to find_regs_cells.json
+        self.py_append("# Write sequential cell names")
+        self.py_append("import json as _json")
+        self.py_append("_refs = db().lib_cells().filter(lambda x: x.is_sequential).base_name")
+        self.py_append(
+            f"with open({repr(cells_path)}, 'w') as _f:\n"
+            f"    _json.dump(list(_refs), _f, indent=4)"
+        )
+        self.py_append("")
+
+        # Write register output pin paths to find_regs_paths.json
+        self.py_append("# Write register output pin paths")
+        self.py_append("_reg_insts = all_registers(edge_triggered=True, output_pins=True).to_db_list()")
+        self.py_append("_regs = [x.name for x in _reg_insts if x.direction == 'out']")
+        self.py_append(
+            f"with open({repr(regs_path)}, 'w') as _f:\n"
+            f"    _json.dump(_regs, _f, indent=4)"
+        )
+        self.py_append("")
+
+
+
     def write_design(self) -> bool:
         # Save the Innovus design.
-        self.verbose_append("write_db {lib_name} -def -verilog".format(
-            lib_name=self.output_innovus_lib_name
-        ))
+        if self.use_python:
+            self.py_append(f"write_db({self.output_innovus_lib_name!r}, _option_def=True, verilog=True)")
+        else:
+            self.verbose_append("write_db {lib_name} -def -verilog".format(lib_name=self.output_innovus_lib_name))
 
         # Write netlist
         self.write_netlist()
@@ -1009,68 +1924,113 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
     def write_ilm(self) -> bool:
         """Run time_design and write out the ILM."""
-        self.verbose_append("time_design -post_route")
-        self.verbose_append("time_design -post_route -hold")
-        self.verbose_append("check_process_antenna")
+        if self.use_python:
+            self.py_append("time_design(post_route=True)")
+            self.py_append("time_design(post_route=True, hold=True)")
+            self.py_append("check_process_antenna()")
+        else:
+            self.verbose_append("time_design -post_route")
+            self.verbose_append("time_design -post_route -hold")
+            self.verbose_append("check_process_antenna")
 
-        # Currently, this assumes auto-power-straps by_tracks, and uses the pg pin layer
-        # to determine the top layer in the generated LEF
         assert self.get_setting("par.generate_power_straps_method") == "by_tracks", "Hierarchical write_ilm currently requires auto power_straps by_tracks"
         top_layer = self.get_setting("par.generate_power_straps_options.by_tracks.pin_layers")
         assert len(top_layer) == 1, "Hierarchical write_ilm requires 1 pin layer specified"
-        self.verbose_append("write_lef_abstract -5.8 -top_layer {top_layer} -stripe_pins -pg_pin_layers {{{top_layer}}} {top}ILM.lef".format(
-            top=self.top_module,
-            top_layer=top_layer[0]
-        ))
-        self.verbose_append("write_ilm -model_type all -to_dir {ilm_dir_name} -type_flex_ilm ilm".format(
-            ilm_dir_name=self.ilm_dir_name))
-        # Need to append -hierarchical after get_pins in SDCs for parent timing analysis
+        tl = top_layer[0]
+        ilm_lef = f"{self.top_module}ILM.lef"
+        if self.use_python:
+            self.py_append(f"write_lef_abstract('5.8', top_layer={tl!r}, stripe_pins=True, pg_pin_layers=[{tl!r}], output={ilm_lef!r})")
+            self.py_append(f"write_ilm(model_type='all', to_dir={self.ilm_dir_name!r}, type_flex_ilm='ilm')")
+        else:
+            self.verbose_append(f"write_lef_abstract -5.8 -top_layer {tl} -stripe_pins -pg_pin_layers {{{tl}}} {ilm_lef}")
+            self.verbose_append(f"write_ilm -model_type all -to_dir {self.ilm_dir_name} -type_flex_ilm ilm")
+
         for sdc_out in self.output_ilm_sdcs:
-            self.append('gzip -d -c {ilm_dir_name}/mmmc/ilm_data/{top}/{sdc_in}.gz | sed "s/get_pins/get_pins -hierarchical/g" > {sdc_out}'.format(
-                ilm_dir_name=self.ilm_dir_name, top=self.top_module, sdc_in=os.path.basename(sdc_out), sdc_out=sdc_out))
+            sdc_in = os.path.basename(sdc_out)
+            shell_cmd = f'gzip -d -c {self.ilm_dir_name}/mmmc/ilm_data/{self.top_module}/{sdc_in}.gz | sed "s/get_pins/get_pins -hierarchical/g" > {sdc_out}'
+            if self.use_python:
+                self.py_append(f"import subprocess; subprocess.run({shell_cmd!r}, shell=True, check=True)")
+            else:
+                self.append(shell_cmd)
         self.ran_write_ilm = True
         return True
 
     def run_innovus(self) -> bool:
         # Quit Innovus.
-        self.verbose_append("exit")
+        if self.use_python:
+            self.py_append("exit()")
+        else:
+            self.verbose_append("exit")
 
-        # Create par script.
+        # Always write par.tcl for reference / older versions
         par_tcl_filename = os.path.join(self.run_dir, "par.tcl")
-        self.write_contents_to_path("\n".join(self.output), par_tcl_filename)
+
+        if self.use_python:
+            # Output was built natively as Python — write par.py directly
+            par_py_filename = os.path.join(self.run_dir, "par.py")
+            header = [
+                "# " + "=" * 78,
+                "# Generated natively for Innovus 25.1 Python API by HAMMER",
+                "# " + "=" * 78,
+                "",
+            ]
+            self.write_contents_to_path("\n".join(header + self.output), par_py_filename)
+            self.logger.info(f"Generated par.py natively for Innovus {self.version()}")
+        else:
+            self.write_contents_to_path("\n".join(self.output), par_tcl_filename)
 
         # Make sure that generated-scripts exists.
         os.makedirs(self.generated_scripts_dir, exist_ok=True)
 
         # Create open_chip script pointing to latest (symlinked to post_<last ran step>).
-        self.output.clear()
-        assert super().do_pre_steps(self.first_step)
-        self.append("read_db latest")
+        # open_chip.tcl is always plain TCL — never route through self.output/self.append
+        # as it will get Python-converted when use_python=True.
+        open_chip_tcl_lines = [
+            "set_db design_process_node {}".format(self.get_setting("vlsi.core.node")),
+            "set_multi_cpu_usage -local_cpu {}".format(self.get_setting("vlsi.core.max_threads")),
+            "read_db latest",
+        ]
         if self.ran_write_design:
             # Because implementation is done, enable report_timing -early/late and SDF writing
             # without recalculating timing graph for each analysis view
-            self.append("set_db timing_enable_simultaneous_setup_hold_mode true")
-
-        self.write_contents_to_path("\n".join(self.output), self.open_chip_tcl)
+            open_chip_tcl_lines.append("set_db timing_enable_simultaneous_setup_hold_mode true")
+        self.write_contents_to_path("\n".join(open_chip_tcl_lines), self.open_chip_tcl)
 
         with open(self.open_chip_script, "w") as f:
-            f.write("""#!/bin/bash
+            if self.use_python:  # 25.1+
+                f.write("""#!/bin/bash
+        cd {run_dir}
+        source enter
+        export LD_LIBRARY_PATH=/tools/cadence/DDI/DDI251/INNOVUS251/tools.lnx86/cdsgcc/gcc/12.3/install/lib64:$LD_LIBRARY_PATH
+        export QT_XCB_GL_INTEGRATION=none
+        $INNOVUS_BIN -common_ui -win -files {open_chip_tcl}
+                """.format(run_dir=self.run_dir, open_chip_tcl=self.open_chip_tcl))
+            else:
+                f.write("""#!/bin/bash
         cd {run_dir}
         source enter
         $INNOVUS_BIN -common_ui -win -files {open_chip_tcl}
                 """.format(run_dir=self.run_dir, open_chip_tcl=self.open_chip_tcl))
         os.chmod(self.open_chip_script, 0o755)
 
-        # Build args.
-        args = [
-            self.get_setting("par.innovus.innovus_bin"),
-            "-nowin",  # Prevent the GUI popping up.
-            "-common_ui",
-            "-files", par_tcl_filename
-        ]
+        # Build args based on version
+        if self.use_python:
+            args = [
+                self.get_setting("par.innovus.innovus_bin"),
+                "-nowin",
+                "-common_ui",
+                "-python",
+                "-files", par_py_filename
+            ]
+        else:
+            args = [
+                self.get_setting("par.innovus.innovus_bin"),
+                "-nowin",
+                "-common_ui",
+                "-files", par_tcl_filename
+            ]
 
         # Temporarily disable colours/tag to make run output more readable.
-        # TODO: think of a more elegant way to do this?
         HammerVLSILogging.enable_colour = False
         HammerVLSILogging.enable_tag = False
         self.run_executable(args, cwd=self.run_dir)  # TODO: check for errors and deal with them
@@ -1080,6 +2040,7 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         # TODO: check that par run was successful
 
         return True
+
 
     def create_floorplan_tcl(self) -> List[str]:
         """
@@ -1112,6 +2073,231 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
             # Write blank floorplan
             output.append("# Blank floorplan specified from HAMMER")
         return output
+
+    @staticmethod
+    def generate_chip_size_constraint_py(width: Decimal, height: Decimal, left: Decimal, bottom: Decimal,
+                                         right: Decimal, top: Decimal, site: str) -> str:
+        """Python-native version of generate_chip_size_constraint."""
+        return (
+            f"create_floorplan(core_margins_by='die', flip='f', "
+            f"die_size_by_io_height='max', site={site!r}, "
+            f"die_size=[{width}, {height}, {left}, {bottom}, {right}, {top}])"
+        )
+
+    def generate_floorplan_py(self) -> List[str]:
+        """
+        Generate floorplan.py content — Python-native equivalent of generate_floorplan_tcl.
+        """
+        output = []  # type: List[str]
+
+        chip_size_line = self.generate_chip_size_constraint_py(
+            site=self.technology.get_placement_site().name,
+            width=Decimal("1000"), height=Decimal("1000"),
+            left=Decimal("100"), bottom=Decimal("100"),
+            right=Decimal("100"), top=Decimal("100")
+        )
+
+        floorplan_constraints = self.get_placement_constraints()
+        global_top_layer = self.get_setting("par.blockage_spacing_top_layer")  # type: Optional[str]
+
+        for constraint in floorplan_constraints:
+            new_path = "/".join(constraint.path.split("/")[1:])
+
+            if new_path == "":
+                assert constraint.type == PlacementConstraintType.TopLevel
+                margins = constraint.margins
+                assert margins is not None
+                chip_size_line = self.generate_chip_size_constraint_py(
+                    site=self.technology.get_placement_site().name,
+                    width=constraint.width, height=constraint.height,
+                    left=margins.left, bottom=margins.bottom,
+                    right=margins.right, top=margins.top
+                )
+            else:
+                orientation = constraint.orientation if constraint.orientation is not None else "r0"
+                if constraint.create_physical:
+                    output.append(
+                        f"create_inst(cell={constraint.master!r}, inst={new_path!r}, "
+                        f"location=[{constraint.x}, {constraint.y}], orient={orientation!r}, "
+                        f"physical=True, status='fixed')"
+                    )
+                if constraint.type == PlacementConstraintType.Dummy:
+                    pass
+                elif constraint.type == PlacementConstraintType.SoftPlacement:
+                    output.append(
+                        f"create_boundary_constraint(type='guide', hinst={new_path!r}, "
+                        f"rects=[[{constraint.x}, {constraint.y}, "
+                        f"{constraint.x + constraint.width}, {constraint.y + constraint.height}]])"
+                    )
+                elif constraint.type == PlacementConstraintType.HardPlacement:
+                    output.append(
+                        f"create_boundary_constraint(type='region', hinst={new_path!r}, "
+                        f"rects=[[{constraint.x}, {constraint.y}, "
+                        f"{constraint.x + constraint.width}, {constraint.y + constraint.height}]])"
+                    )
+                elif constraint.type in [PlacementConstraintType.Overlap,
+                                         PlacementConstraintType.HardMacro,
+                                         PlacementConstraintType.Hierarchical]:
+                    fixed_arg = ", fixed=True" if constraint.create_physical else ""
+                    output.append(
+                        f"place_inst({new_path!r}, {constraint.x}, {constraint.y}, "
+                        f"{orientation!r}{fixed_arg})"
+                    )
+                    if constraint.type in [PlacementConstraintType.HardMacro,
+                                           PlacementConstraintType.Hierarchical]:
+                        spacing = self.get_setting("par.blockage_spacing")
+                        if constraint.top_layer is not None:
+                            current_top_layer = constraint.top_layer  # type: Optional[str]
+                        elif global_top_layer is not None:
+                            current_top_layer = global_top_layer
+                        else:
+                            current_top_layer = None
+                        if current_top_layer is not None:
+                            bot_layer = self.get_stackup().get_metal_by_index(1).name
+                            cover_layers = list(map(lambda m: m.name,
+                                                    self.get_stackup().get_metals_below_layer(current_top_layer)))
+                            output.append(
+                                f"create_route_halo(bottom_layer={bot_layer!r}, space={spacing}, "
+                                f"top_layer={current_top_layer!r}, inst={new_path!r})"
+                            )
+                            if self.get_setting("par.power_to_route_blockage_ratio") < 1:
+                                self.logger.warning("The power strap blockage region is smaller than the routing halo region for hard macros.")
+                            place_push_out = round(spacing * self.get_setting("par.power_to_route_blockage_ratio"), 1)
+                            output.append(
+                                f"create_place_halo(insts={new_path!r}, "
+                                f"halo_deltas=[{place_push_out}, {place_push_out}, "
+                                f"{place_push_out}, {place_push_out}], snap_to_site=True)"
+                            )
+                            output.append(
+                                f"_pg_blockage_shape = db().get(db().hinsts({new_path!r}) or "
+                                f"db().insts({new_path!r})).place_halo_polygon"
+                            )
+                            output.append(
+                                f"create_route_blockage(pg_nets=True, layers={cover_layers!r}, "
+                                f"polygon=_pg_blockage_shape)"
+                            )
+                elif constraint.type == PlacementConstraintType.Obstruction:
+                    obs_types = get_or_else(constraint.obs_types, [])
+                    assert '/' not in new_path
+                    urx = constraint.x + constraint.width
+                    ury = constraint.y + constraint.height
+                    area_flag = 'rects' if self.version() >= self.version_number("181") else 'area'
+                    if ObstructionType.Place in obs_types:
+                        output.append(
+                            f"create_place_blockage(name={new_path + '_place'!r}, "
+                            f"area=[{constraint.x}, {constraint.y}, {urx}, {ury}])"
+                        )
+                    if ObstructionType.Route in obs_types:
+                        layers_arg = (f"layers={get_or_else(constraint.layers, [])!r}"
+                                      if constraint.layers is not None else "all_route=True")
+                        output.append(
+                            f"create_route_blockage(name={new_path + '_route'!r}, "
+                            f"except_pg_nets=True, {layers_arg}, spacing=0, "
+                            f"{area_flag}=[{constraint.x}, {constraint.y}, {urx}, {ury}])"
+                        )
+                    if ObstructionType.Power in obs_types:
+                        layers_arg = (f"layers={get_or_else(constraint.layers, [])!r}"
+                                      if constraint.layers is not None else "all_route=True")
+                        output.append(
+                            f"create_route_blockage(name={new_path + '_power'!r}, "
+                            f"pg_nets=True, {layers_arg}, "
+                            f"{area_flag}=[{constraint.x}, {constraint.y}, {urx}, {ury}])"
+                        )
+                else:
+                    assert False, "Should not reach here"
+
+        return [chip_size_line] + output
+
+    def _build_floorplan_py(self) -> List[str]:
+        """Build floorplan.py content based on floorplan_mode setting."""
+        floorplan_mode = str(self.get_setting("par.innovus.floorplan_mode"))
+        lines = ["# Auto-generated floorplan.py for Innovus 25.1", ""]
+
+        if floorplan_mode == "manual":
+            # Manual TCL content — convert each line through the converter
+            floorplan_script_contents = str(self.get_setting("par.innovus.floorplan_script_contents"))
+            lines.append("# Floorplan manually specified from HAMMER")
+            converter = InnovusTclToPythonConverter()
+            for tcl_line in floorplan_script_contents.split("\n"):
+                converted = converter.convert_line(tcl_line)
+                if converted:
+                    lines.append(converted)
+        elif floorplan_mode == "generate":
+            lines.append("# Generated floorplan from HAMMER constraints")
+            lines.extend(self.generate_floorplan_py())
+        elif floorplan_mode == "auto":
+            lines.append("# Using auto-generated floorplan")
+            lines.append("plan_design()")
+            spacing = self.get_setting("par.blockage_spacing")
+            bot_layer = self.get_stackup().get_metal_by_index(1).name
+            top_layer = self.get_setting("par.blockage_spacing_top_layer")
+            if top_layer is not None:
+                lines.append(
+                    f"create_place_halo(all_blocks=True, "
+                    f"halo_deltas=[{spacing}, {spacing}, {spacing}, {spacing}], snap_to_site=True)"
+                )
+                lines.append(
+                    f"create_route_halo(all_blocks=True, bottom_layer={bot_layer!r}, "
+                    f"space={spacing}, top_layer={top_layer!r})"
+                )
+        else:
+            if floorplan_mode != "blank":
+                self.logger.error(f"Invalid floorplan_mode {floorplan_mode}. Using blank floorplan.")
+            lines.append("# Blank floorplan specified from HAMMER")
+
+        return lines
+
+    def floorplan_design(self) -> bool:
+        floorplan_tcl = os.path.join(self.run_dir, "floorplan.tcl")
+        self.write_contents_to_path("\n".join(self.create_floorplan_tcl()), floorplan_tcl)
+
+        if self.use_python:
+            floorplan_py = os.path.join(self.run_dir, "floorplan.py")
+            self.write_contents_to_path("\n".join(self._build_floorplan_py()), floorplan_py)
+            self.py_append(f"exec(open('{floorplan_py}').read())")
+        else:
+            self.verbose_append(f"source -echo -verbose {floorplan_tcl}")
+
+        # Set "don't use" cells — must happen after floorplan_design (flattened mode)
+        if self.hierarchical_mode.is_nonleaf_hierarchical():
+            if self.use_python:
+                self.py_append("flatten_ilm()")
+            else:
+                self.verbose_append("flatten_ilm")
+
+        for l in self.generate_power_spec_commands():
+            if self.use_python:
+                cmd = l.strip()
+                if cmd.startswith("read_power_intent"):
+                    import re as _re
+                    m = _re.search(r'-(cpf|1801)\s+(\S+)', cmd)
+                    if m:
+                        fmt, path = m.group(1), m.group(2)
+                        self.py_append(f"read_power_intent({fmt}={path!r})")
+                    else:
+                        path = cmd.split()[-1]
+                        self.py_append(f"read_power_intent({path!r})")
+                elif cmd == "commit_power_intent":
+                    self.py_append("commit_power_intent()")
+                elif cmd:
+                    parts = cmd.split()
+                    self.py_append(f"{parts[0]}()")
+            else:
+                self.verbose_append(l)
+
+        if self.use_python:
+            self._generate_dont_use_commands_python()
+        else:
+            for l in self.generate_dont_use_commands():
+                self.append(l)
+
+        if self.hierarchical_mode.is_nonleaf_hierarchical():
+            if self.use_python:
+                self.py_append("unflatten_ilm()")
+            else:
+                self.verbose_append("unflatten_ilm")
+
+        return True
 
     @staticmethod
     def generate_chip_size_constraint(width: Decimal, height: Decimal, left: Decimal, bottom: Decimal, right: Decimal,
@@ -1319,6 +2505,145 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         results.append("add_stripes " + " ".join(options) + "\n")
         return results
 
+    def specify_std_cell_power_straps_py(self, blockage_spacing: Decimal, bbox: Optional[List[Decimal]], nets: List[str]) -> List[str]:
+        """Python-native version of specify_std_cell_power_straps. Returns Python source lines."""
+        layer_name = self.get_setting("technology.core.std_cell_rail_layer")
+        self._power_straps_check_index(layer_name)
+        tapcells = self.technology.get_special_cell_by_type(CellType.TapCell)[0].name
+        results = [
+            f"# Power strap definition for layer {layer_name} (rails):",
+            f"db().add_stripes_stacked_via_bottom_layer = {layer_name!r}",
+            f"db().add_stripes_stacked_via_top_layer = {layer_name!r}",
+            f"db().add_stripes_spacing_from_block = {float(blockage_spacing)}",
+        ]
+        kwargs = {
+            'pin_layer': layer_name,
+            'layer': layer_name,
+            'over_pins': 1,
+            'master': " ".join(tapcells),
+            'block_ring_bottom_layer_limit': layer_name,
+            'block_ring_top_layer_limit': layer_name,
+            'pad_core_ring_bottom_layer_limit': layer_name,
+            'pad_core_ring_top_layer_limit': layer_name,
+            'direction': 'horizontal',
+            'width': 'pin_width',
+            'nets': nets,
+        }
+        if bbox is not None:
+            kwargs['area'] = list(map(float, bbox))
+        else:
+            kwargs['area'] = '_CORE_BBOX'  # sentinel replaced below
+        args_str = ', '.join(
+            f"{k}={v!r}" if v != '_CORE_BBOX'
+            else f"{k}=[_core_bbox.ll.x, _core_bbox.ll.y, _core_bbox.ur.x, _core_bbox.ur.y]"
+            for k, v in kwargs.items()
+        )
+        results.append(f"add_stripes({args_str})")
+        return results
+
+    def specify_power_straps_py(self, layer_name: str, bottom_via_layer_name: str, blockage_spacing: Decimal, pitch: Decimal, width: Decimal, spacing: Decimal, offset: Decimal, bbox: Optional[List[Decimal]], nets: List[str], add_pins: bool, antenna_trim_shape: str) -> List[str]:
+        """Python-native version of specify_power_straps. Returns Python source lines."""
+        self._power_straps_check_index(layer_name)
+        layer = self.get_stackup().get_metal(layer_name)
+        results = [
+            f"# Power strap definition for layer {layer_name}:",
+            f"db().add_stripes_stacked_via_top_layer = {layer_name!r}",
+            f"db().add_stripes_stacked_via_bottom_layer = {bottom_via_layer_name!r}",
+            f"db().add_stripes_trim_antenna_back_to_shape = '{{{antenna_trim_shape}}}'",
+            f"db().add_stripes_spacing_from_block = {float(blockage_spacing)}",
+        ]
+        kwargs = {
+            'create_pins': 1 if add_pins else 0,
+            'block_ring_bottom_layer_limit': layer_name,
+            'block_ring_top_layer_limit': bottom_via_layer_name,
+            'direction': str(layer.direction),
+            'layer': layer_name,
+            'nets': nets,
+            'pad_core_ring_bottom_layer_limit': bottom_via_layer_name,
+            'set_to_set_distance': float(pitch),
+            'spacing': float(spacing),
+            'switch_layer_over_obs': 0,
+            'width': float(width),
+        }
+        if bbox is not None:
+            index = 1 if layer.direction == RoutingDirection.Horizontal else 0
+            kwargs['area'] = list(map(float, bbox))
+            kwargs['start'] = float(offset + bbox[index])
+        else:
+            # Use sentinel strings replaced below
+            kwargs['area'] = '_CORE_BBOX'
+            attr = 'll.y' if layer.direction == RoutingDirection.Horizontal else 'll.x'
+            kwargs['start'] = f'_CORE_START_{attr}_{float(offset)}'
+        args_str = ', '.join(
+            f"{k}={v!r}" if not isinstance(v, str) or not v.startswith('_CORE_')
+            else (
+                f"{k}=[_core_bbox.ll.x, _core_bbox.ll.y, _core_bbox.ur.x, _core_bbox.ur.y]"
+                if v == '_CORE_BBOX'
+                else f"{k}=_core_bbox.{v.split('_CORE_START_')[1].rsplit('_', 1)[0]} + {v.rsplit('_', 1)[1]}"
+            )
+            for k, v in kwargs.items()
+        )
+        results.append(f"add_stripes({args_str})")
+        return results
+
+    def _build_power_straps_py(self) -> List[str]:
+        """
+        Generate power_straps.py content by re-running the by_tracks logic
+        but collecting Python lines instead of TCL lines.
+        """
+        # Temporarily monkey-patch specify_power_straps and specify_std_cell_power_straps
+        # to collect Python lines, then restore them.
+        py_lines = ["import os", ""]
+        original_specify = self.__class__.specify_power_straps
+        original_specify_std = self.__class__.specify_std_cell_power_straps
+        original_check = self._power_straps_last_index
+
+        collected = []  # type: List[str]
+
+        def py_specify(self_inner, layer_name, bottom_via_layer_name, blockage_spacing,
+                       pitch, width, spacing, offset, bbox, nets, add_pins, antenna_trim_shape):
+            lines = self_inner.specify_power_straps_py(
+                layer_name, bottom_via_layer_name, blockage_spacing,
+                pitch, width, spacing, offset, bbox, nets, add_pins, antenna_trim_shape)
+            collected.extend(lines)
+            collected.append("")
+            return []  # base class extend()s results with our return value
+
+        def py_specify_std(self_inner, blockage_spacing, bbox, nets):
+            lines = self_inner.specify_std_cell_power_straps_py(blockage_spacing, bbox, nets)
+            collected.extend(lines)
+            collected.append("")
+            return []
+
+        try:
+            self.__class__.specify_power_straps = py_specify
+            self.__class__.specify_std_cell_power_straps = py_specify_std
+            self._power_straps_last_index = -1
+            self.create_power_straps_tcl()  # drives the base class logic, collecting into `collected`
+        finally:
+            self.__class__.specify_power_straps = original_specify
+            self.__class__.specify_std_cell_power_straps = original_specify_std
+            self._power_straps_last_index = original_check
+
+        # Prepend _core_bbox if any line references it
+        if any('_core_bbox' in l for l in collected):
+            py_lines.append("_core_bbox = db().designs()[0].core_bbox")
+            py_lines.append("")
+        py_lines.extend(collected)
+        return py_lines
+
+    def power_straps(self) -> bool:
+        """Place the power straps for the design."""
+        if self.use_python:
+            power_straps_py = os.path.join(self.run_dir, "power_straps.py")
+            self.write_contents_to_path("\n".join(self._build_power_straps_py()), power_straps_py)
+            self.py_append(f"exec(open('{power_straps_py}').read())")
+        else:
+            power_straps_tcl = os.path.join(self.run_dir, "power_straps.tcl")
+            self.write_contents_to_path("\n".join(self.create_power_straps_tcl()), power_straps_tcl)
+            self.verbose_append(f"source -echo -verbose {power_straps_tcl}")
+        return True
+
     def specify_power_straps(self, layer_name: str, bottom_via_layer_name: str, blockage_spacing: Decimal, pitch: Decimal, width: Decimal, spacing: Decimal, offset: Decimal, bbox: Optional[List[Decimal]], nets: List[str], add_pins: bool, antenna_trim_shape: str) -> List[str]:
         """
         Generate a list of TCL commands that will create power straps on a given layer.
@@ -1373,7 +2698,6 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
                 "-area", "{ %s }" % " ".join(map(str, bbox)),
                 "-start", str(offset + bbox[index])
             ])
-
         else:
             # Just put straps in the core area
             options.extend([
@@ -1387,14 +2711,18 @@ def innovus_global_settings(ht: HammerTool) -> bool:
     """Settings that need to be reapplied at every tool invocation"""
     assert isinstance(ht, HammerPlaceAndRouteTool)
     assert isinstance(ht, CadenceTool)
+    assert isinstance(ht, Innovus)
     ht.create_enter_script()
 
-    # Python sucks here for verbosity
-    verbose_append = ht.verbose_append
+    node = ht.get_setting("vlsi.core.node")
+    max_threads = ht.get_setting("vlsi.core.max_threads")
 
-    # Generic settings
-    verbose_append("set_db design_process_node {}".format(ht.get_setting("vlsi.core.node")))
-    verbose_append("set_multi_cpu_usage -local_cpu {}".format(ht.get_setting("vlsi.core.max_threads")))
+    if ht.use_python:
+        ht.py_append(f"db().design_process_node = {node!r}")
+        ht.py_append(f"set_multi_cpu_usage(local_cpu={max_threads})")
+    else:
+        ht.verbose_append("set_db design_process_node {}".format(node))
+        ht.verbose_append("set_multi_cpu_usage -local_cpu {}".format(max_threads))
 
     return True
 
