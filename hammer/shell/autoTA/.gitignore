@@ -1,0 +1,15 @@
+# API key (secret)
+.api_key
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Conda/Miniforge environment (if bundled locally)
+conda/
+miniforge/
+
+logs/
+autota_logs/
+autota_patches/

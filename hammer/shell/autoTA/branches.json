@@ -1,0 +1,112 @@
+{
+  "branches": [
+    {
+      "branch_id": "20260305_190850_syn",
+      "timestamp": "2026-03-05T19:08:50",
+      "phase_origin": "syn_debug",
+      "confidence": "HIGH",
+      "trigger_params": {
+        "syn": true,
+        "sim_rtl": true,
+        "par": true,
+        "sim_syn": false,
+        "sim_par": false,
+        "power_rtl": false,
+        "power_syn": false,
+        "power_par": false,
+        "drc": false,
+        "lvs": false,
+        "timing_syn": false,
+        "timing_par": false,
+        "formal_syn": false,
+        "formal_par": false,
+        "build": true,
+        "clean": false
+      },
+      "parent_run_id": "manual__2026-03-06T03:07:56.967039+00:00",
+      "status": "triggered",
+      "archive_dir": "/bwrcq/C/isabellehsu/chipyard-sledgehammer-airflow3/chipyard/vlsi/hammer/e2e/build-sky130-cm/gcd/autota_patches/20260305_190850_syn"
+    },
+    {
+      "branch_id": "20260305_192003_par",
+      "timestamp": "2026-03-05T19:20:04",
+      "phase_origin": "par_debug",
+      "confidence": "HIGH",
+      "trigger_params": {
+        "syn": false,
+        "sim_rtl": false,
+        "par": true,
+        "sim_syn": false,
+        "sim_par": false,
+        "power_rtl": false,
+        "power_syn": false,
+        "power_par": false,
+        "drc": false,
+        "lvs": false,
+        "timing_syn": false,
+        "timing_par": false,
+        "formal_syn": false,
+        "formal_par": false,
+        "build": false,
+        "clean": false
+      },
+      "parent_run_id": "manual__2026-03-06T03:07:56.967039+00:00",
+      "status": "triggered",
+      "archive_dir": "/bwrcq/C/isabellehsu/chipyard-sledgehammer-airflow3/chipyard/vlsi/hammer/e2e/build-sky130-cm/gcd/autota_patches/20260305_192003_par"
+    },
+    {
+      "branch_id": "20260305_192118_syn",
+      "timestamp": "2026-03-05T19:21:18",
+      "phase_origin": "syn_debug",
+      "confidence": "HIGH",
+      "trigger_params": {
+        "syn": true,
+        "sim_rtl": true,
+        "par": true,
+        "sim_syn": false,
+        "sim_par": false,
+        "power_rtl": false,
+        "power_syn": false,
+        "power_par": false,
+        "drc": false,
+        "lvs": false,
+        "timing_syn": false,
+        "timing_par": false,
+        "formal_syn": false,
+        "formal_par": false,
+        "build": true,
+        "clean": false
+      },
+      "parent_run_id": "manual__2026-03-06T03:20:37.093649+00:00",
+      "status": "triggered",
+      "archive_dir": "/bwrcq/C/isabellehsu/chipyard-sledgehammer-airflow3/chipyard/vlsi/hammer/e2e/build-sky130-cm/gcd/autota_patches/20260305_192118_syn"
+    },
+    {
+      "branch_id": "20260305_192158_par",
+      "timestamp": "2026-03-05T19:21:58",
+      "phase_origin": "par_debug",
+      "confidence": "HIGH",
+      "trigger_params": {
+        "syn": false,
+        "sim_rtl": false,
+        "par": true,
+        "sim_syn": false,
+        "sim_par": false,
+        "power_rtl": false,
+        "power_syn": false,
+        "power_par": false,
+        "drc": false,
+        "lvs": false,
+        "timing_syn": false,
+        "timing_par": false,
+        "formal_syn": false,
+        "formal_par": false,
+        "build": false,
+        "clean": false
+      },
+      "parent_run_id": "manual__2026-03-06T03:20:37.093649+00:00",
+      "status": "triggered",
+      "archive_dir": "/bwrcq/C/isabellehsu/chipyard-sledgehammer-airflow3/chipyard/vlsi/hammer/e2e/build-sky130-cm/gcd/autota_patches/20260305_192158_par"
+    }
+  ]
+}

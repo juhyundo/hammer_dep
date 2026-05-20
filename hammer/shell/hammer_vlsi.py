@@ -869,6 +869,12 @@ class AIRFlow:
             type='boolean',
             title='Power Place and Route',
             description='Get power from place and route'
+        ),
+        'debug': Param(
+            default=False,
+            type='boolean',
+            title='AutoTA Debug',
+            description='Run AI-powered autoTA debug analysis after each stage'
         )
     },
     render_template_as_native_obj=True
@@ -1148,36 +1154,141 @@ def create_hammer_dag_gcd():
             print("LVS parameter is False, skipping")
             raise AirflowSkipException("LVS task skipped")
 
-    #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    # @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    # def build_decider(**context):
-    #     """Decide whether to run build"""
-    #     if context['dag_run'].conf.get('build', True):
-    #         return 'build'
-    #     elif (context['dag_run'].conf.get('sim_rtl', False) or
-    #         context['dag_run'].conf.get('syn', False) or
-    #         context['dag_run'].conf.get('par', False)):
-    #         return "sim_or_syn_decide"
-    #     return 'exit_'
+    # ==========================================
+    # AutoTA Debug Tasks
+    # ==========================================
 
-    # #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    # @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
-    # def syn_decider(**context):
-    #     """Decide whether to run synthesis"""
-    #     if context['dag_run'].conf.get('syn', False):
-    #         return 'syn'
-    #     elif (context['dag_run'].conf.get('par', False)):
-    #         return "par_decider"
-    #     else:
-    #         return "exit_"
+    @task(trigger_rule=TriggerRule.ALL_DONE)
+    def syn_debug(**context):
+        """Run autoTA on synthesis logs, apply patches if needed"""
+        print("Starting syn debug")
+        if not context['dag_run'].conf.get('debug', False):
+            print("Debug parameter is False, skipping")
+            raise AirflowSkipException("Debug not enabled")
+        if context['dag_run'].conf.get('syn', False):
+            flow = AIRFlow()
+            current_script_dir = os.path.dirname(os.path.abspath(__file__))
+            gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
+            command = [sys.executable, gemini_path, "--phase", "syn"]
+            print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
+            result = subprocess.run(command, cwd=flow.OBJ_DIR, check=False, capture_output=True, text=True)
+            print("Terminal Output:"); print(result.stdout)
+            if result.stderr: print("Terminal Errors:"); print(result.stderr)
+            if result.returncode == 0:
+                sys.path.insert(0, os.path.join(current_script_dir, "autoTA"))
+                from patcher import parse_ai_output, apply_patch
+                parsed = parse_ai_output(result.stdout)
+                print(f"  Decision:   {parsed['action']} (Confidence: {parsed['confidence']})")
+                if parsed['changelog']: print(f"  Changes:    {parsed['changelog']}")
+                if parsed['action'] == 'PATCH_AND_RETRY' and parsed['patches']:
+                    archive_dir = os.path.join(flow.OBJ_DIR, "autota_patches", context['run_id'][:30] + "_syn")
+                    os.makedirs(archive_dir, exist_ok=True)
+                    patch_result = apply_patch(parsed['diff'], flow.OBJ_DIR, archive_dir, parsed['patches'])
+                    print(f"  Patch: {patch_result['reason']}")
+                    if patch_result['applied']:
+                        # Write status file for Meta-DAG gate
+                        status = {"patched": True, "phase": "syn", "trigger": parsed.get('trigger', {})}
+                        status_path = os.path.join(flow.OBJ_DIR, "autota_patches", "patch_status.json")
+                        with open(status_path, 'w') as f:
+                            json.dump(status, f)
+                        print(f"  Status file written: {status_path}")
+            print(f"\n=== Session Logs ===")
+            print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
+            print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
+            print(f"  Patch archive:   {flow.OBJ_DIR}/autota_patches/")
+        else:
+            print("Synthesis parameter is False, skipping")
+            raise AirflowSkipException("Synthesis task skipped")
 
-    # #@task.branch(trigger_rule=TriggerRule.NONE_FAILED)
-    # @task.branch(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
-    # def par_decider(**context):
-    #     """Decide whether to run par"""
-    #     if context['dag_run'].conf.get('par', False):
-    #         return 'par'
-    #     return 'exit_'
+    @task(trigger_rule=TriggerRule.ALL_DONE)
+    def sim_rtl_debug(**context):
+        """Run autoTA on sim-rtl logs, apply patches if needed"""
+        print("Starting sim_rtl debug")
+        if not context['dag_run'].conf.get('debug', False):
+            print("Debug parameter is False, skipping")
+            raise AirflowSkipException("Debug not enabled")
+        if context['dag_run'].conf.get('sim_rtl', False):
+            flow = AIRFlow()
+            current_script_dir = os.path.dirname(os.path.abspath(__file__))
+            gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
+            command = [sys.executable, gemini_path, "--phase", "sim_rtl"]
+            print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
+            result = subprocess.run(command, cwd=flow.OBJ_DIR, check=False, capture_output=True, text=True)
+            print("Terminal Output:"); print(result.stdout)
+            if result.stderr: print("Terminal Errors:"); print(result.stderr)
+            if result.returncode == 0:
+                sys.path.insert(0, os.path.join(current_script_dir, "autoTA"))
+                from patcher import parse_ai_output, apply_patch
+                parsed = parse_ai_output(result.stdout)
+                print(f"  Decision:   {parsed['action']} (Confidence: {parsed['confidence']})")
+                if parsed['changelog']: print(f"  Changes:    {parsed['changelog']}")
+                if parsed['action'] == 'PATCH_AND_RETRY' and parsed['patches']:
+                    archive_dir = os.path.join(flow.OBJ_DIR, "autota_patches", context['run_id'][:30] + "_sim")
+                    os.makedirs(archive_dir, exist_ok=True)
+                    patch_result = apply_patch(parsed['diff'], flow.OBJ_DIR, archive_dir, parsed['patches'])
+                    print(f"  Patch: {patch_result['reason']}")
+                    if patch_result['applied']:
+                        status = {"patched": True, "phase": "sim_rtl", "trigger": parsed.get('trigger', {})}
+                        status_path = os.path.join(flow.OBJ_DIR, "autota_patches", "patch_status.json")
+                        with open(status_path, 'w') as f:
+                            json.dump(status, f)
+                        print(f"  Status file written: {status_path}")
+            print(f"\n=== Session Logs ===")
+            print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
+            print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
+            print(f"  Patch archive:   {flow.OBJ_DIR}/autota_patches/")
+        else:
+            print("sim_rtl parameter is False, skipping")
+            raise AirflowSkipException("sim_rtl task skipped")
+
+    @task(trigger_rule=TriggerRule.ALL_DONE)
+    def par_debug(**context):
+        """Run autoTA on PAR logs, apply patches if needed"""
+        print("Starting par debug")
+        if not context['dag_run'].conf.get('debug', False):
+            print("Debug parameter is False, skipping")
+            raise AirflowSkipException("Debug not enabled")
+        if not context['dag_run'].conf.get('par', False):
+            print("PAR parameter is False, skipping")
+            raise AirflowSkipException("par task skipped")
+        try:
+            ti = context['ti']
+            upstream_tis = ti.get_dagrun().get_task_instances()
+            par_ti = next((t for t in upstream_tis if t.task_id == 'par'), None)
+            if par_ti and par_ti.state == 'success':
+                print("PAR passed - skipping debug analysis")
+                raise AirflowSkipException("PAR succeeded, no debug needed")
+        except (AttributeError, StopIteration):
+            print("Could not check PAR state, running analysis anyway")
+        flow = AIRFlow()
+        current_script_dir = os.path.dirname(os.path.abspath(__file__))
+        gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
+        command = [sys.executable, gemini_path, "--phase", "par"]
+        print(f"Running command: {' '.join(command)} from directory {flow.OBJ_DIR}")
+        result = subprocess.run(command, cwd=flow.OBJ_DIR, check=False, capture_output=True, text=True)
+        print("Terminal Output:"); print(result.stdout)
+        if result.stderr: print("Terminal Errors:"); print(result.stderr)
+        if result.returncode == 0:
+            sys.path.insert(0, os.path.join(current_script_dir, "autoTA"))
+            from patcher import parse_ai_output, apply_patch
+            parsed = parse_ai_output(result.stdout)
+            print(f"  Decision:   {parsed['action']} (Confidence: {parsed['confidence']})")
+            if parsed['changelog']: print(f"  Changes:    {parsed['changelog']}")
+            if parsed['action'] == 'PATCH_AND_RETRY' and parsed['patches']:
+                archive_dir = os.path.join(flow.OBJ_DIR, "autota_patches", context['run_id'][:30] + "_par")
+                os.makedirs(archive_dir, exist_ok=True)
+                patch_result = apply_patch(parsed['diff'], flow.OBJ_DIR, archive_dir, parsed['patches'])
+                print(f"  Patch: {patch_result['reason']}")
+                if patch_result['applied']:
+                    status = {"patched": True, "phase": "par", "trigger": parsed.get('trigger', {})}
+                    status_path = os.path.join(flow.OBJ_DIR, "autota_patches", "patch_status.json")
+                    with open(status_path, 'w') as f:
+                        json.dump(status, f)
+                    print(f"  Status file written: {status_path}")
+        print(f"\n=== Session Logs ===")
+        print(f"  JSON audit log:  {current_script_dir}/autoTA/logs/")
+        print(f"  Text log:        {flow.OBJ_DIR}/autota_logs/")
+        print(f"  Patch archive:   {flow.OBJ_DIR}/autota_patches/")
 
     @task(trigger_rule=TriggerRule.NONE_FAILED)
     def exit_():
@@ -1188,19 +1299,18 @@ def create_hammer_dag_gcd():
     # Create task instances
     start = start()
     clean = clean()
-    # build_decide = build_decider()
     build = build()
-    # sim_or_syn_decide = sim_or_syn_decide()
     sim_rtl = sim_rtl()
+    sim_rtl_debug = sim_rtl_debug()
     power_rtl = power_rtl()
-    # syn_decide = syn_decider()
     syn = syn()
+    syn_debug = syn_debug()
     power_syn = power_syn()
     timing_syn = timing_syn()
     formal_syn = formal_syn()
     sim_syn = sim_syn()
-    # par_decide = par_decider()
     par = par()
+    par_debug = par_debug()
     power_par = power_par()
     timing_par = timing_par()
     formal_par = formal_par()
@@ -1209,21 +1319,21 @@ def create_hammer_dag_gcd():
     lvs = lvs()
     exit_ = exit_()
 
-    # Set up dependencies to ensure deciders always run
+    # Set up dependencies
     start >> [clean, build, exit_]
     clean >> exit_
-    # build_decide >> [build, sim_or_syn_decide, exit_]
     build >> [sim_rtl, syn, exit_]
-    sim_rtl >> [power_rtl, exit_]
+    sim_rtl >> [sim_rtl_debug, power_rtl, exit_]
+    sim_rtl_debug >> exit_
     power_rtl >> exit_
-    # syn_decide >> [syn, par_decide, exit_]
-    syn >> [timing_syn, power_syn, formal_syn, sim_syn, par, exit_]
+    syn >> [syn_debug, timing_syn, power_syn, formal_syn, sim_syn, par, exit_]
+    syn_debug >> exit_
     timing_syn >> exit_
     sim_syn >> [power_syn, exit_]
     formal_syn >> exit_
     power_syn >> exit_
-    # par_decide >> [par, exit_]
-    par >> [timing_par, power_par, formal_par, sim_par, drc, lvs, exit_]
+    par >> [par_debug, timing_par, power_par, formal_par, sim_par, drc, lvs, exit_]
+    par_debug >> exit_
     power_par >> exit_
     formal_par >> exit_
     sim_par >> [power_par, exit_]
@@ -1233,19 +1343,18 @@ def create_hammer_dag_gcd():
 
     return {
         'clean': clean,
-        # 'build_decide': build_decide,
         'build': build,
-        # 'sim_or_syn_decide': sim_or_syn_decide,
         'sim_rtl': sim_rtl,
+        'sim_rtl_debug': sim_rtl_debug,
         'power_rtl': power_rtl,
-        # 'syn_decide': syn_decide,
         'syn': syn,
+        'syn_debug': syn_debug,
         'power_syn': power_syn,
         'timing_syn': timing_syn,
         'formal_syn': formal_syn,
         'sim_syn': sim_syn,
-        # 'par_decide': par_decide,
         'par': par,
+        'par_debug': par_debug,
         'power_par': power_par,
         'sim_par': sim_par,
         'timing_par': timing_par,
@@ -1903,5 +2012,136 @@ def create_hammer_dag_rocket():
 hammer_dag_rocket = create_hammer_dag_rocket()
 
 
+# ==========================================
+# META-DAG: Self-Healing Controller
+# ==========================================
+# Only trial tasks — each triggers the full Sledgehammer_demo_gcd DAG.
+# Click any trial in the Airflow UI to drill into the full Hammer flow.
+#
+# Number of trials is set via the `num_trials` param at trigger time.
+# Pre-allocates MAX_TRIAL_SLOTS; unused slots auto-skip instantly.
+
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+
+MAX_TRIAL_SLOTS = 10  # Max slots rendered in the DAG graph
+
+
+class PatchAwareTriggerOperator(TriggerDagRunOperator):
+    """TriggerDagRunOperator that checks patch_status.json before running.
+    
+    - trial_0: always runs (baseline), clears stale status first
+    - trial_1+: skips if no patch was applied OR if trial_num >= num_trials
+    """
+
+    def __init__(self, trial_num=0, **kwargs):
+        super().__init__(**kwargs)
+        self.trial_num = trial_num
+
+    def execute(self, context):
+        flow = AIRFlow()
+        status_path = os.path.join(flow.OBJ_DIR, "autota_patches", "patch_status.json")
+
+        # Check num_trials limit
+        num_trials = context['dag_run'].conf.get('num_trials', 3)
+        if self.trial_num >= num_trials:
+            print(f"Trial {self.trial_num} exceeds num_trials={num_trials}. Skipping.")
+            raise AirflowSkipException(f"Exceeds num_trials ({num_trials})")
+
+        if self.trial_num == 0:
+            # Baseline: clear stale status and always run
+            if os.path.exists(status_path):
+                os.remove(status_path)
+                print("Cleared stale patch_status.json")
+            print("Running baseline trial")
+        else:
+            # Retry: only run if previous trial produced a patch
+            if not os.path.exists(status_path):
+                print("No patch_status.json found — previous trial didn't patch. Skipping.")
+                raise AirflowSkipException("No patch from previous trial")
+            with open(status_path) as f:
+                status = json.load(f)
+            if not status.get("patched"):
+                print("patch_status.json exists but patched=false. Skipping.")
+                raise AirflowSkipException("No patch applied")
+            os.remove(status_path)
+            print(f"Patch from phase '{status.get('phase', '?')}' detected. Running retry trial.")
+
+        # Inject debug=True into the conf before triggering
+        if isinstance(self.conf, dict):
+            self.conf['debug'] = True
+
+        return super().execute(context)
+
+
+@dag(
+    dag_id='Sledgehammer_Meta_gcd',
+    schedule=None,
+    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
+    catchup=False,
+    tags=['sledgehammer', 'meta', 'self-healing'],
+    description='Meta-DAG: orchestrates self-healing Hammer trials with autoTA patching',
+    params={
+        'num_trials': Param(default=3, type='integer', title='Number of Trials',
+                            description='How many trial runs (including baseline). Extra slots auto-skip.'),
+        'clean': Param(default=False, type='boolean', title='Clean Build Directory',
+                       description='Clean the build directory before running'),
+        'build': Param(default=False, type='boolean', title='Build Design',
+                       description='Run the build step'),
+        'sim_rtl': Param(default=False, type='boolean', title='RTL Simulation',
+                         description='Run RTL simulation'),
+        'power_rtl': Param(default=False, type='boolean', title='RTL Power Simulation',
+                           description='Run RTL Power simulation'),
+        'syn': Param(default=False, type='boolean', title='Synthesis',
+                     description='Run logic synthesis'),
+        'sim_syn': Param(default=False, type='boolean', title='Simulation Synthesis',
+                         description='Run synthesis simulation'),
+        'timing_syn': Param(default=False, type='boolean', title='Timing Synthesis',
+                            description='Get timing from synthesis'),
+        'formal_syn': Param(default=False, type='boolean', title='Formal Synthesis',
+                            description='Get formal from synthesis'),
+        'power_syn': Param(default=False, type='boolean', title='Power Synthesis',
+                           description='Get power from synthesis'),
+        'par': Param(default=False, type='boolean', title='Place and Route',
+                     description='Run place and route'),
+        'drc': Param(default=False, type='boolean', title='Design Rule Check',
+                     description='Run design rule check'),
+        'lvs': Param(default=False, type='boolean', title='Layout Versus Schematic',
+                     description='Run layout versus schematic'),
+        'sim_par': Param(default=False, type='boolean', title='Simulation Place and Route',
+                         description='Run place and route simulation'),
+        'timing_par': Param(default=False, type='boolean', title='Timing Place and Route',
+                            description='Get timing from place and route'),
+        'formal_par': Param(default=False, type='boolean', title='Formal Place and Route',
+                            description='Get formal from place and route'),
+        'power_par': Param(default=False, type='boolean', title='Power Place and Route',
+                           description='Get power from place and route'),
+    },
+    render_template_as_native_obj=True
+)
+def create_meta_dag_gcd():
+    trials = []
+    for i in range(MAX_TRIAL_SLOTS):
+        trial = PatchAwareTriggerOperator(
+            task_id=f'trial_{i}',
+            trigger_dag_id='Sledgehammer_demo_gcd',
+            conf='{{ dag_run.conf }}',
+            wait_for_completion=True,
+            poke_interval=30,
+            trial_num=i,
+            trigger_rule=TriggerRule.ALL_DONE,
+        )
+        trials.append(trial)
+
+    # Chain: trial_0 >> trial_1 >> trial_2 >> ... >> trial_N
+    for i in range(len(trials) - 1):
+        trials[i] >> trials[i + 1]
+
+
+# Create the Meta-DAG
+meta_dag_gcd = create_meta_dag_gcd()
+
+
 def main():
     CLIDriver().main()
+
+
