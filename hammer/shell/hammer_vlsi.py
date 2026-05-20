@@ -15,6 +15,13 @@ import subprocess
 import sys
 import json
 
+# RHEL 9 workaround: Cadence tools (Genus, Innovus) need libnsl.so.1
+_libnsl_path = os.path.expanduser("~/libnsl_local/usr/lib64")
+if os.path.isfile(os.path.join(_libnsl_path, "libnsl.so.1")):
+    _ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if _libnsl_path not in _ld:
+        os.environ["LD_LIBRARY_PATH"] = f"{_libnsl_path}:{_ld}" if _ld else _libnsl_path
+
 from airflow.models.dag import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models.param import Param

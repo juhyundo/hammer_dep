@@ -2,6 +2,8 @@
 
 sim.inputs:
   level: "rtl"
-  input_files: ["src/gcd.v", "src/gcd_tb.v"]
+  input_files:
+    - "/bwrcq/home/lawrencejrhee/hammer/e2e/src/gcd.v"
+    - "/bwrcq/home/lawrencejrhee/hammer/e2e/src/gcd_tb.v"
 
 # sim.inputs.execute_sim: false

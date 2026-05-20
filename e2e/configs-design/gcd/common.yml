@@ -6,7 +6,7 @@ vlsi.inputs.power_spec_mode: "auto"
 
 synthesis.inputs:
   top_module: "gcd"
-  input_files: ["src/gcd.v"]
+  input_files: ["/bwrcq/home/lawrencejrhee/hammer/e2e/src/gcd.v"]
 
 sim.inputs:
   top_module: "gcd"

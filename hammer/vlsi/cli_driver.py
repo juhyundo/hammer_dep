@@ -630,10 +630,16 @@ class CLIDriver:
                     else:
                         post_load_func_checked(driver)
                     assert driver.syn_tool is not None, "load_synthesis_tool was unsuccessful"
-                    success, output = driver.run_synthesis(
+                    from hammer.vlsi.pd_cache import cache_or_run
+                    success, output = cache_or_run(
+                        driver, "synthesis",
+                        rundir=driver.syn_tool.run_dir,
+                        output_filename="syn-output.json",
+                        run_fn=lambda: driver.run_synthesis(
                             driver.syn_tool.get_tool_hooks() + \
                             driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
-                            list(extra_hooks or []))
+                            list(extra_hooks or [])),
+                    )
                     if not success:
                         driver.log.error("Synthesis tool did not succeed")
                         return None
@@ -654,10 +660,16 @@ class CLIDriver:
                     else:
                         post_load_func_checked(driver)
                     assert driver.par_tool is not None, "load_par_tool was unsuccessful"
-                    success, output = driver.run_par(
+                    from hammer.vlsi.pd_cache import cache_or_run
+                    success, output = cache_or_run(
+                        driver, "par",
+                        rundir=driver.par_tool.run_dir,
+                        output_filename="par-output.json",
+                        run_fn=lambda: driver.run_par(
                             driver.par_tool.get_tool_hooks() + \
                             driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
-                            list(extra_hooks or []))
+                            list(extra_hooks or [])),
+                    )
                     if not success:
                         driver.log.error("Place-and-route tool did not succeed")
                         return None
@@ -986,6 +998,16 @@ class CLIDriver:
                 # TODO(edwardw): make these output filenames configurable?
                 assert driver.syn_tool is not None, "Syn tool must exist since we ran synthesis_action successfully"
                 dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "par-input.json"), par_input)
+
+                # Also store the par-input artifact in Postgres, keyed by SHA256
+                # of its canonical JSON. Non-fatal on failure so a DB outage can't
+                # break a real syn -> par run.
+                try:
+                    from hammer.vlsi.pd_store import store_par_input
+                    sha = store_par_input(par_input)
+                    driver.log.info(f"Stored par-input in Postgres with sha256={sha}")
+                except Exception as e:
+                    driver.log.warning(f"Failed to store par-input in Postgres (POC, non-fatal): {e}")
 
                 # Use new par input and run place-and-route.
                 driver.update_project_configs([par_input])
@@ -1816,10 +1838,9 @@ class CLIDriver:
         if output != "hammer-shell appears to be on the path":
             print("hammer-shell does not appear to be on the path (hammer-shell-test failed to run: %s)" % (output),
                   file=sys.stderr)
-            sys.exit(1)
+            return 1
 
-        #sys.exit(self.run_main_parsed(vars(parser.parse_args(args))))
-        return self.run_main_parsed(vars(parser.parse_args(args))) 
+        return self.run_main_parsed(vars(parser.parse_args(args)))
 
 @task
 def import_task_to_dag():
