@@ -239,14 +239,7 @@ class SKY130Tech(HammerTechnology):
             # The cadence PDK (as of version 0.0.3) doesn't seem to have tap nor decap cells, so par won't run (and if we forced it to, lvs would fail)
             spcl_cells = [
                 SpecialCell(
-                    cell_type=CellType("stdfiller"), name=["FILL1", "FILL2", "FILL4", "FILL8", "FILL16"]
-                ),
-                SpecialCell(
-                    cell_type=CellType("decap"),
-                    name=[
-                        "FILL_DECAP8",
-                        "FILL_DECAP16",
-                    ],
+                    cell_type="stdfiller", name=[f"FILL{i**2}" for i in range(7)]
                 ),
                 SpecialCell(
                     cell_type="driver",
@@ -720,9 +713,9 @@ class SKY130Tech(HammerTechnology):
         hooks = {}
 
         def enable_scl_clk_gating_cell_hook(ht: HammerTool) -> bool:
-            ht.append(
-                "set_db [get_db lib_cells -if {.base_name == ICGX1}] .avoid false"
-            )
+            ht.append("set_db [get_db lib_cells *ICGX1*] .avoid false")
+            ht.append("set_db [get_db lib_cells *ICGX1*] .preserve false")
+            ht.append("set_db / .lp_insert_clock_gating true")
             return True
 
         # The clock gating cell is set to don't touch/use in the cadence pdk (as of v0.0.3), work around that

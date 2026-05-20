@@ -922,6 +922,7 @@ class HammerDriver:
 
         # TODO: think about artifact storage?
         self.log.info("Starting synthesis with tool '%s'" % (self.syn_tool.name))
+        self.log.info("Starting synthesis with hooks '%s'" % (hook_actions))
         if hook_actions is None:
             hooks_to_use = self.post_custom_syn_tool_hooks
         else:
