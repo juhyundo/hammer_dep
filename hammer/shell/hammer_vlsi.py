@@ -41,6 +41,22 @@ from hammer.vlsi import CLIDriver
 from hammer.vlsi.cli_driver import import_task_to_dag
 #import pdb
 #pdb.set_trace()
+
+
+def run_cli_driver():
+    """Wrapper around CLIDriver().main() that's safe to call from Airflow tasks.
+
+    CLIDriver.main() calls sys.exit() on its way out, which would otherwise
+    kill the Airflow worker process. We catch SystemExit and re-raise as a
+    plain RuntimeError on nonzero exit codes; on exit code 0 we just return.
+    """
+    try:
+        CLIDriver().main()
+    except SystemExit as e:
+        if e.code != 0 and e.code is not None:
+            raise RuntimeError(f"CLIDriver.main() failed with exit code {e.code}")
+
+
 class AIRFlow:
     def __init__(self):
         # minimal flow configuration variables
@@ -51,8 +67,10 @@ class AIRFlow:
         self.extra = os.getenv('extra', '')  # extra configs
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
         
-        # Directory structure
-        self.vlsi_dir = os.path.abspath('../e2e/')
+        # Directory structure — anchor to this file's location so cwd doesn't matter
+        self.vlsi_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'e2e')
+        )
         self.e2e_dir = os.getenv('e2e_dir', self.vlsi_dir)
         self.OBJ_DIR = os.getenv('OBJ_DIR', f"{self.e2e_dir}/build-{self.pdk}-{self.tools}/{self.design}")
         
@@ -1376,9 +1394,13 @@ class AIRFlow_rocket:
         self.extra = os.getenv('extra', '')  # extra configs
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
         
-        # Directory structure
-        self.vlsi_dir = os.path.abspath('../e2e/')
-        self.specs_abs = os.path.abspath('../../specs')
+        # Directory structure — anchor to this file's location so cwd doesn't matter
+        self.vlsi_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'e2e')
+        )
+        self.specs_abs = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '..', 'specs')
+        )
         self.e2e_dir = os.getenv('e2e_dir', self.vlsi_dir)
         self.specs_dir = os.getenv('specs_dir', self.specs_abs) #Point to specs directory for intel2x2 yml files
         self.OBJ_DIR = os.getenv('OBJ_DIR', f"{self.e2e_dir}/build-{self.pdk}-{self.tools}/{self.design}")
