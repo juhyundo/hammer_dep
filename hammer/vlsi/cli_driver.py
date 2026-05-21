@@ -652,6 +652,17 @@ class CLIDriver:
                         dump_config_to_yaml_file(os.path.join(driver.syn_tool.run_dir, "syn-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
                 else:
+                    # stage_change_check says nothing changed. Normally we'd just return.
+                    # But the local rundir may have been wiped (cleanup, fresh checkout, etc.),
+                    # in which case downstream stages won't find syn-output.json. Try restoring
+                    # from the Postgres cache before declaring success-by-skip.
+                    if driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
+                        from hammer.vlsi.pd_cache import try_restore_from_cache
+                        try_restore_from_cache(
+                            driver, "synthesis",
+                            rundir=driver.syn_tool.run_dir,
+                            output_filename="syn-output.json",
+                        )
                     return 0
             elif action_type == "par":
                 if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
@@ -682,6 +693,15 @@ class CLIDriver:
                         dump_config_to_yaml_file(os.path.join(driver.par_tool.run_dir, "par-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
                 else:
+                    # stage_change_check says nothing changed. Try cache restore in case
+                    # local par-rundir was wiped (see syn branch for full rationale).
+                    if driver.load_par_tool(get_or_else(self.par_rundir, "")):
+                        from hammer.vlsi.pd_cache import try_restore_from_cache
+                        try_restore_from_cache(
+                            driver, "par",
+                            rundir=driver.par_tool.run_dir,
+                            output_filename="par-output.json",
+                        )
                     return 0
             elif action_type == "drc":
                 if driver.database.stage_change_check(stage = "drc"):

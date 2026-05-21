@@ -138,6 +138,18 @@ def cache_or_run(
     success, output = run_fn()
     if success:
         try:
+            # Write the stage's output dict into the rundir BEFORE we tar it.
+            # cli_driver writes <stage>-output.json after we return, but we
+            # need it in the tarball so HIT-path restores can read it back.
+            output_path = Path(rundir) / output_filename
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                from hammer.config import HammerJSONEncoder
+                with output_path.open("w") as f:
+                    json.dump(output, f, cls=HammerJSONEncoder, indent=4)
+            except Exception as e:
+                _warn(f"PD cache: could not pre-write {output_filename} ({e}); tarball may lack it.")
+
             tarball = pd_store.tar_directory(Path(rundir))
             pd_store.store_stage_blob(stage_tag, key, tarball)
             _info(
@@ -146,3 +158,81 @@ def cache_or_run(
         except Exception as e:
             _warn(f"PD cache: store failed ({e}); continuing.")
     return success, output
+
+
+def try_restore_from_cache(
+    driver: Any,
+    stage_tag: str,
+    rundir: str,
+    output_filename: str,
+) -> bool:
+    """
+    Lighter sibling of cache_or_run, used in the "stage_change_check says skip"
+    branch of cli_driver.py.
+
+    Situation: Hammer's dependency tracker has decided the stage doesn't need
+    to rerun (config + inputs unchanged since the last commit_master_database).
+    But our local rundir might have been wiped since then (e.g. disk cleanup,
+    fresh checkout, or any "I cleared the build dir but kept master_database"
+    flow). If the rundir's output_filename is missing on disk, we'd skip the
+    stage AND have nothing for downstream stages to read. Bad.
+
+    This function attempts to restore from cache instead. Returns True if it
+    restored a tarball, False if it didn't (cache disabled, no matching blob,
+    or restore failed). On True the caller can proceed as if the stage ran.
+    """
+    log = getattr(driver, "log", None)
+
+    def _info(msg: str) -> None:
+        if log is not None:
+            log.info(msg)
+
+    def _warn(msg: str) -> None:
+        if log is not None:
+            log.warning(msg)
+
+    if not is_cache_enabled(driver):
+        return False
+
+    output_path = Path(rundir) / output_filename
+    if output_path.exists():
+        # Local files still present, nothing to do. The skip is safe.
+        return True
+
+    try:
+        key = _build_cache_key(driver, stage_tag)
+    except Exception as e:
+        _warn(f"PD cache (skip-path): key computation failed ({e}); not restoring.")
+        return False
+
+    short = key[:16]
+
+    try:
+        blob = pd_store.load_stage_blob(key)
+    except Exception as e:
+        _warn(f"PD cache (skip-path): lookup failed ({e}); not restoring.")
+        return False
+
+    if blob is None:
+        _warn(
+            f"PD cache (skip-path): stage_change_check would skip {stage_tag}, "
+            f"but no local {output_filename} and no matching cache blob "
+            f"(sha256={short}...). Downstream stages will likely fail."
+        )
+        return False
+
+    _, data = blob
+    rundir_path = Path(rundir)
+    try:
+        rundir_path.parent.mkdir(parents=True, exist_ok=True)
+        pd_store.untar_to_directory(data, rundir_path.parent)
+        _info(
+            f"PD cache HIT (skip-path) for {stage_tag} (sha256={short}...). "
+            f"stage_change_check said skip, local rundir was missing; "
+            f"restored from cache."
+        )
+        return True
+    except Exception as e:
+        _warn(f"PD cache (skip-path): hit but restore failed ({e}).")
+        return False
+
