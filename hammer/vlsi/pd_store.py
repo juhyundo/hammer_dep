@@ -178,8 +178,7 @@ def _pg_settings() -> Dict[str, Any]:
     )
     dbname = (
         os.environ.get("HAMMER_PG_DB")
-        or cfg.get("dbname")
-        or "airflow_lawrence"
+        or "sledgehammer_studio"  # default to the dedicated cache db; override via env
     )
     user = (
         os.environ.get("HAMMER_PG_USER")
@@ -251,22 +250,35 @@ REVOKE ALL ON ALL TABLES IN SCHEMA {SCHEMA_NAME} FROM PUBLIC;
 
 -- Hand read+write on the schema to the group role, if it exists yet.
 -- If a DBA hasn't created the role, this block just no-ops and we re-run init later.
+-- UPDATE and DELETE included so INSERT ... ON CONFLICT DO UPDATE works for group members.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{SLEDGEHAMMER_GROUP}') THEN
         EXECUTE 'GRANT USAGE ON SCHEMA {SCHEMA_NAME} TO {SLEDGEHAMMER_GROUP}';
-        EXECUTE 'GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA {SCHEMA_NAME} TO {SLEDGEHAMMER_GROUP}';
-        EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA_NAME} GRANT SELECT, INSERT ON TABLES TO {SLEDGEHAMMER_GROUP}';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {SCHEMA_NAME} TO {SLEDGEHAMMER_GROUP}';
+        EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA_NAME} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {SLEDGEHAMMER_GROUP}';
     END IF;
 END $$;
 """
 
 
-def _ensure_schema(conn) -> None:
-    """Create the schema + table if they don't exist. Safe to call repeatedly."""
-    with conn.cursor() as cur:
-        cur.execute(_DDL)
-    conn.commit()
+def _ensure_schema(conn, quiet: bool = False) -> None:
+    """Create the schema + table if they don't exist. Safe to call repeatedly.
+
+    If ``quiet`` is True, swallow InsufficientPrivilege errors. The DDL needs
+    CREATE-on-database to evaluate (even ``IF NOT EXISTS``), so a non-owner
+    user who's already in sledgehammer_users would otherwise fail here on
+    every write. The schema already exists when that user is calling, so
+    swallowing the error and continuing is the correct behavior.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_DDL)
+        conn.commit()
+    except psycopg2.errors.InsufficientPrivilege:
+        if not quiet:
+            raise
+        conn.rollback()
 
 
 def ensure_schema() -> None:
@@ -347,7 +359,7 @@ def store_artifact(data: Dict[str, Any], kind: str) -> str:
     top_module = _extract_top_module(data)
     conn = _connect()
     try:
-        _ensure_schema(conn)
+        _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -466,7 +478,7 @@ def store_master_database(design: str, master_db: Dict[str, Any]) -> None:
     """Upsert the master_database for ``design``. Latest write wins."""
     conn = _connect()
     try:
-        _ensure_schema(conn)
+        _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -502,7 +514,7 @@ def store_stage_blob(stage_tag: str, sha256: str, data: bytes) -> None:
     """Store a tarball under ``sha256``. Idempotent; same sha never re-inserts."""
     conn = _connect()
     try:
-        _ensure_schema(conn)
+        _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
                 f"""
