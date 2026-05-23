@@ -57,8 +57,116 @@ def run_cli_driver():
             raise RuntimeError(f"CLIDriver.main() failed with exit code {e.code}")
 
 
+def _lookup_triggering_user_from_db(dag_id, run_id):
+    """
+    Query the Airflow metadata DB for the triggering_user_name of a dag_run.
+
+    Airflow 3's runtime ``DagRun`` proxy (see ``airflow.sdk.types.DagRunProtocol``)
+    does NOT expose ``triggering_user_name`` to tasks - it's only available on
+    the database model. So we look it up directly from the ``dag_run`` SQL row
+    using the ``dag_id`` + ``run_id`` we DO have access to in the proxy.
+
+    Returns the username string, or None if anything goes wrong.
+    """
+    if not dag_id or not run_id:
+        return None
+    try:
+        import psycopg2
+        from hammer.vlsi import pd_store
+        settings = pd_store._parse_airflow_cfg_conn()
+        if not settings:
+            return None
+        conn = psycopg2.connect(**settings)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT triggering_user_name FROM dag_run "
+                    "WHERE dag_id = %s AND run_id = %s",
+                    (dag_id, run_id),
+                )
+                row = cur.fetchone()
+                return row[0] if row and row[0] else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _resolve_workspace_obj_dir(context, design):
+    """
+    Resolve and set OBJ_DIR in os.environ for the user who triggered this DAG run.
+
+    Looks up the triggering user (the Airflow LDAP username), then resolves
+    their per-user workspace root from ``hammer_poc.user_workspaces`` and pins
+    ``OBJ_DIR`` to ``<workspace_root>/<design>``.
+
+    Resolution order for the triggering user:
+        1. ``dag_run.triggering_user_name`` (if exposed by the SDK proxy)
+        2. SQL lookup against ``dag_run`` table using ``dag_id`` + ``run_id``
+           (the canonical source - works in Airflow 3 where the proxy hides
+           the field)
+        3. ``$USER`` env var (fallback; only used outside Airflow)
+
+    This is the safety mechanism that prevents one user's "clean" task from
+    nuking another user's build directory. Every AIRFlow*() instantiation
+    accepts a ``context=...`` kwarg and calls this before reading ``OBJ_DIR``,
+    so there is no path in the DAG code that can ever touch someone else's
+    workspace.
+
+    Returns the resolved OBJ_DIR string for logging.
+    """
+    user = None
+    dag_id = None
+    run_id = None
+    try:
+        if context is not None:
+            dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
+            if dag_run is not None:
+                user = getattr(dag_run, "triggering_user_name", None)
+                dag_id = getattr(dag_run, "dag_id", None)
+                run_id = getattr(dag_run, "run_id", None)
+    except Exception:
+        pass
+
+    # Airflow 3 SDK proxy hides triggering_user_name. Fall back to a SQL
+    # lookup keyed by (dag_id, run_id) - that always works.
+    if not user:
+        user = _lookup_triggering_user_from_db(dag_id, run_id)
+
+    if not user:
+        user = os.environ.get("USER", "default")
+
+    try:
+        from hammer.vlsi import pd_store
+        workspace_root = pd_store.get_user_workspace(user)
+    except Exception as e:
+        print(f"WARNING: could not resolve per-user workspace for {user!r}: {e}. "
+              f"Falling back to default OBJ_DIR.")
+        return None
+
+    obj_dir = os.path.join(workspace_root, design)
+    os.environ["OBJ_DIR"] = obj_dir
+    # Also clear HAMMER_D_MK since it derives from OBJ_DIR; otherwise a
+    # previous task's value could leak across users in the same worker.
+    os.environ.pop("HAMMER_D_MK", None)
+
+    # Pass dag_id / run_id down to the cache layer (pd_cache.py) so it can
+    # record per-stage HIT/MISS/SKIP events keyed by run_id. The cache layer
+    # lives several call levels below this (AIRFlow -> CLIDriver -> cache_or_run)
+    # and doesn't have its own access to the Airflow context, so env is the
+    # least invasive plumbing.
+    if dag_id:
+        os.environ["HAMMER_AIRFLOW_DAG_ID"] = str(dag_id)
+    if run_id:
+        os.environ["HAMMER_AIRFLOW_RUN_ID"] = str(run_id)
+
+    print(f"[user-workspace] triggering_user={user!r} dag_id={dag_id!r} "
+          f"run_id={run_id!r} -> OBJ_DIR={obj_dir}")
+    return obj_dir
+
+
 class AIRFlow:
-    def __init__(self):
+    def __init__(self, context=None):
         # minimal flow configuration variables
         self.design = os.getenv('design', 'gcd')
         self.pdk = os.getenv('pdk', 'sky130')
@@ -66,7 +174,14 @@ class AIRFlow:
         self.env = os.getenv('env', 'bwrc')
         self.extra = os.getenv('extra', '')  # extra configs
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
-        
+
+        # Per-user workspace isolation: if we have an Airflow DAG run context,
+        # pin OBJ_DIR to the triggering user's workspace before reading it
+        # below. This is what guarantees that no DAG task can ever operate on
+        # another user's build directory.
+        if context is not None:
+            _resolve_workspace_obj_dir(context, self.design)
+
         # Directory structure — anchor to this file's location so cwd doesn't matter
         self.vlsi_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), '..', '..', 'e2e')
@@ -928,7 +1043,7 @@ def create_hammer_dag_gcd():
     def clean(**context):
         """Clean the build directory"""
         print("Starting clean task")
-        flow = AIRFlow()
+        flow = AIRFlow(context=context)
         flow.clean()
     
     @task
@@ -937,7 +1052,7 @@ def create_hammer_dag_gcd():
         print("Starting build task")
         if context['dag_run'].conf.get('build', False):
             print("Build parameter is True, executing build")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.build():
                 raise AirflowFailException("build failed")
         else:
@@ -968,7 +1083,7 @@ def create_hammer_dag_gcd():
         print("Starting sim_rtl task")
         if context['dag_run'].conf.get('sim_rtl', False):
             print("Sim-RTL parameter is True, executing sim_rtl")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.sim_rtl():
                 raise AirflowFailException("sim_rtl failed")
         else:
@@ -981,7 +1096,7 @@ def create_hammer_dag_gcd():
         print("Starting power_rtl task")
         if context['dag_run'].conf.get('power_rtl', False):
             print("power_RTL parameter is True, executing power_rtl")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.sim_rtl_to_power():
                 raise AirflowFailException("sim_rtl_to_power failed")
             if flow.power_rtl():
@@ -996,7 +1111,7 @@ def create_hammer_dag_gcd():
         print("Starting syn task")
         if context['dag_run'].conf.get('syn', False):
             print("Synthesis parameter is True, executing syn")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.syn():
                 raise AirflowFailException("syn failed")
         else:
@@ -1009,7 +1124,7 @@ def create_hammer_dag_gcd():
         print("Starting power_syn task")
         if context['dag_run'].conf.get('power_syn', False):
             print("power_Synthesis parameter is True, executing power_syn")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.syn_to_power():
                 raise AirflowFailException("syn_to_power failed")
             if flow.sim_syn_to_power():
@@ -1026,7 +1141,7 @@ def create_hammer_dag_gcd():
         print("Starting timing_syn task")
         if context['dag_run'].conf.get('timing_syn', False):
             print("timing_Synthesis parameter is True, executing timing_syn")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.syn_to_timing():
                 raise AirflowFailException("syn_to_timing failed")
             if flow.timing_syn():
@@ -1041,7 +1156,7 @@ def create_hammer_dag_gcd():
         print("Starting formal_syn task")
         if context['dag_run'].conf.get('formal_syn', False):
             print("formal_Synthesis parameter is True, executing formal_syn")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.syn_to_formal():
                 raise AirflowFailException("syn_to_formal failed")
             if flow.formal_syn():
@@ -1056,7 +1171,7 @@ def create_hammer_dag_gcd():
         print("Starting sim_syn task")
         if context['dag_run'].conf.get('sim_syn', False):
             print("sim_Synthesis parameter is True, executing sim_syn")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.syn_to_sim():
                 raise AirflowFailException("syn_to_sim failed")
             if flow.sim_syn():
@@ -1071,7 +1186,7 @@ def create_hammer_dag_gcd():
         print("Starting par task")
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing par")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.syn_to_par():
                 raise AirflowFailException("syn_to_par failed")
             if flow.par():
@@ -1086,7 +1201,7 @@ def create_hammer_dag_gcd():
         print("Starting formal_par task")
         if context['dag_run'].conf.get('formal_par', False):
             print("formal_PAR parameter is True, executing formal_par")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.par_to_formal():
                 raise AirflowFailException("par_to_formal failed")
             if flow.formal_par():
@@ -1101,7 +1216,7 @@ def create_hammer_dag_gcd():
         print("Starting timing_par task")
         if context['dag_run'].conf.get('timing_par', False):
             print("timing_PAR parameter is True, executing timing_par")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.par_to_timing():
                 raise AirflowFailException("par_to_timing failed")
             if flow.timing_par():
@@ -1116,7 +1231,7 @@ def create_hammer_dag_gcd():
         print("Starting sim_par task")
         if context['dag_run'].conf.get('sim_par', False):
             print("sim_PAR parameter is True, executing sim_par")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.par_to_sim():
                 raise AirflowFailException("par_to_sim failed")
             if flow.sim_par():
@@ -1131,7 +1246,7 @@ def create_hammer_dag_gcd():
         print("Starting Power_Par task")
         if context['dag_run'].conf.get('power_par', False):
             print("Power_PAR parameter is True, executing Power_Par")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.sim_par_to_power():
                 raise AirflowFailException("sim_par_to_power failed")
             if flow.par_to_power():
@@ -1148,7 +1263,7 @@ def create_hammer_dag_gcd():
         print("Starting DRC task")
         if context['dag_run'].conf.get('drc', False):
             print("DRC parameter is True, executing DRC")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.par_to_drc():
                 raise AirflowFailException("par_to_drc failed")
             if flow.drc():
@@ -1163,7 +1278,7 @@ def create_hammer_dag_gcd():
         print("Starting LVS task")
         if context['dag_run'].conf.get('lvs', False):
             print("LVS parameter is True, executing LVS")
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             if flow.par_to_lvs():
                 raise AirflowFailException("par_to_lvs failed")
             if flow.lvs():
@@ -1184,7 +1299,7 @@ def create_hammer_dag_gcd():
             print("Debug parameter is False, skipping")
             raise AirflowSkipException("Debug not enabled")
         if context['dag_run'].conf.get('syn', False):
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             current_script_dir = os.path.dirname(os.path.abspath(__file__))
             gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
             command = [sys.executable, gemini_path, "--phase", "syn"]
@@ -1226,7 +1341,7 @@ def create_hammer_dag_gcd():
             print("Debug parameter is False, skipping")
             raise AirflowSkipException("Debug not enabled")
         if context['dag_run'].conf.get('sim_rtl', False):
-            flow = AIRFlow()
+            flow = AIRFlow(context=context)
             current_script_dir = os.path.dirname(os.path.abspath(__file__))
             gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
             command = [sys.executable, gemini_path, "--phase", "sim_rtl"]
@@ -1278,7 +1393,7 @@ def create_hammer_dag_gcd():
                 raise AirflowSkipException("PAR succeeded, no debug needed")
         except (AttributeError, StopIteration):
             print("Could not check PAR state, running analysis anyway")
-        flow = AIRFlow()
+        flow = AIRFlow(context=context)
         current_script_dir = os.path.dirname(os.path.abspath(__file__))
         gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
         command = [sys.executable, gemini_path, "--phase", "par"]
@@ -1385,7 +1500,7 @@ def create_hammer_dag_gcd():
 hammer_dag_gcd = create_hammer_dag_gcd()
 
 class AIRFlow_rocket:
-    def __init__(self):
+    def __init__(self, context=None):
         # minimal flow configuration variables
         self.design = os.getenv('design', 'intel2x2')
         self.pdk = os.getenv('pdk', 'intech22')
@@ -1393,7 +1508,12 @@ class AIRFlow_rocket:
         self.env = os.getenv('env', 'intel2x2')
         self.extra = os.getenv('extra', '')  # extra configs
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
-        
+
+        # Per-user workspace isolation: pin OBJ_DIR to the triggering user's
+        # workspace before reading it below. See AIRFlow.__init__ for details.
+        if context is not None:
+            _resolve_workspace_obj_dir(context, self.design)
+
         # Directory structure — anchor to this file's location so cwd doesn't matter
         self.vlsi_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), '..', '..', 'e2e')
@@ -1839,7 +1959,7 @@ def create_hammer_dag_rocket():
     def clean(**context):
         """Clean the build directory"""
         print("Starting clean task")
-        flow = AIRFlow_rocket()
+        flow = AIRFlow_rocket(context=context)
         if os.path.exists(flow.OBJ_DIR):
             subprocess.run(f"rm -rf {flow.OBJ_DIR} hammer-vlsi-*.log", shell=True, check=True)
     
@@ -1849,7 +1969,7 @@ def create_hammer_dag_rocket():
         print("Starting build task")
         if context['dag_run'].conf.get('build', False):
             print("Build parameter is True, executing build")
-            flow = AIRFlow_rocket()
+            flow = AIRFlow_rocket(context=context)
             flow.build()
         else:
             print("Build parameter is False, skipping")
@@ -1880,7 +2000,7 @@ def create_hammer_dag_rocket():
         print("Starting sim_rtl task")
         if context['dag_run'].conf.get('sim_rtl', False):
             print("Sim-RTL parameter is True, executing sim_rtl")
-            flow = AIRFlow_rocket()
+            flow = AIRFlow_rocket(context=context)
             flow.sim_rtl()
         else:
             print("Sim-RTL parameter is False, skipping")
@@ -1892,7 +2012,7 @@ def create_hammer_dag_rocket():
         print("Starting sram task")
         if context['dag_run'].conf.get('sram_generator', False):
             print("SRAM parameter is True, executing sram_generator")
-            flow = AIRFlow_rocket()
+            flow = AIRFlow_rocket(context=context)
             flow.sram_generator()
         else:
             print("SRAM parameter is False, skipping")
@@ -1916,7 +2036,7 @@ def create_hammer_dag_rocket():
         if (context['dag_run'].conf.get('sram_generator', False) or
          context['dag_run'].conf.get('syn', False)):
             print("Synthesis parameter is True, executing syn")
-            flow = AIRFlow_rocket()
+            flow = AIRFlow_rocket(context=context)
             flow.syn()
         else:
             print("Synthesis parameter is False, skipping")
@@ -1928,7 +2048,7 @@ def create_hammer_dag_rocket():
         print("Starting syn-to-par task")
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing syn-to-par")
-            flow = AIRFlow_rocket()
+            flow = AIRFlow_rocket(context=context)
             flow.syn_to_par()
         else:
             print("PAR parameter is False, skipping")
@@ -1940,7 +2060,7 @@ def create_hammer_dag_rocket():
         print("Starting par task")
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing par")
-            flow = AIRFlow_rocket()
+            flow = AIRFlow_rocket(context=context)
             flow.par()
         else:
             print("PAR parameter is False, skipping")
@@ -2060,7 +2180,7 @@ class PatchAwareTriggerOperator(TriggerDagRunOperator):
         self.trial_num = trial_num
 
     def execute(self, context):
-        flow = AIRFlow()
+        flow = AIRFlow(context=context)
         status_path = os.path.join(flow.OBJ_DIR, "autota_patches", "patch_status.json")
 
         # Check num_trials limit

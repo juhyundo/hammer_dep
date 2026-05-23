@@ -663,6 +663,25 @@ class CLIDriver:
                             rundir=driver.syn_tool.run_dir,
                             output_filename="syn-output.json",
                         )
+                        # IMPORTANT: in the combined syn_par_action flow, the caller
+                        # immediately feeds our return value to
+                        # synthesis_output_to_par_input(), which expects a dict.
+                        # Returning a bare 0 here crashes par with
+                        # "'int' object is not subscriptable". So if the cache (or
+                        # the existing on-disk file) gave us a syn-output.json,
+                        # load it and return its contents like a normal run would.
+                        syn_output_path = os.path.join(
+                            driver.syn_tool.run_dir, "syn-output.json"
+                        )
+                        if os.path.exists(syn_output_path):
+                            try:
+                                with open(syn_output_path, "r") as f:
+                                    return json.load(f)
+                            except Exception as e:
+                                driver.log.warning(
+                                    f"Skip-path: found {syn_output_path} but failed to "
+                                    f"load it ({e}); returning empty success."
+                                )
                     return 0
             elif action_type == "par":
                 if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
@@ -702,6 +721,22 @@ class CLIDriver:
                             rundir=driver.par_tool.run_dir,
                             output_filename="par-output.json",
                         )
+                        # Same shape fix as the syn skip-path: if we restored
+                        # par-output.json, return its contents (not bare 0)
+                        # so that callers chaining further actions don't see
+                        # an int where they expect a dict.
+                        par_output_path = os.path.join(
+                            driver.par_tool.run_dir, "par-output.json"
+                        )
+                        if os.path.exists(par_output_path):
+                            try:
+                                with open(par_output_path, "r") as f:
+                                    return json.load(f)
+                            except Exception as e:
+                                driver.log.warning(
+                                    f"Skip-path: found {par_output_path} but failed to "
+                                    f"load it ({e}); returning empty success."
+                                )
                     return 0
             elif action_type == "drc":
                 if driver.database.stage_change_check(stage = "drc"):

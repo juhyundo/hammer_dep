@@ -15,6 +15,18 @@ Master_database + per-stage blob subcommands:
     stage-pull  <stage_tag> --rundir <path> [--master <path>]
     blob-list   [--stage <tag>] [-n N]
 
+Per-user workspace subcommands (for the shared Airflow + LDAP deployment):
+    workspace-list                           List all registered workspaces.
+    workspace-show  <username>               Print one user's workspace root.
+    workspace-set   <username> <path>        Set or update a user's workspace.
+    workspace-unset <username>               Remove a user's registration.
+
+Cache-wipe subcommands (destructive; require --yes or confirmation):
+    wipe-blobs     [--stage <tag>]   Delete stage tarballs. Forces cold run.
+    wipe-master    [--design <name>] Delete dep-check baseline.
+    wipe-artifacts [--kind <kind>]   Delete JSON artifacts (par-input, etc.).
+    wipe-all                          Delete all cache (keep workspaces).
+
 `<path>` defaults to ./master_database.json when omitted.
 
 Connection settings come from HAMMER_PG_* env vars or airflow.cfg; see
@@ -126,7 +138,7 @@ def _cmd_stage_pull(args: argparse.Namespace) -> int:
     if blob is None:
         print(f"No blob for sha256={sha} stage={args.stage}", file=sys.stderr)
         return 1
-    stored_stage, data = blob
+    stored_stage, data, _duration = blob
     rundir = Path(args.rundir)
     if rundir.exists():
         if not args.overwrite:
@@ -152,6 +164,111 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
     pd_store.revoke_access(args.role)
     print(f"Removed '{args.role}' from {pd_store.SLEDGEHAMMER_GROUP}.")
     return 0
+
+
+def _confirm(prompt: str, assume_yes: bool) -> bool:
+    """Prompt the user to confirm a destructive op. Returns True to proceed."""
+    if assume_yes:
+        return True
+    try:
+        reply = input(f"{prompt} [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return reply in ("y", "yes")
+
+
+def _cmd_wipe_blobs(args: argparse.Namespace) -> int:
+    target = (
+        f"all rows in {pd_store.FQ_BLOB}"
+        if not args.stage
+        else f"rows in {pd_store.FQ_BLOB} where stage = '{args.stage}'"
+    )
+    if not _confirm(f"This will permanently delete {target}. Continue?", args.yes):
+        print("Aborted.", file=sys.stderr)
+        return 1
+    n = pd_store.delete_stage_blobs(stage_tag=args.stage)
+    print(f"Deleted {n} row(s) from {pd_store.FQ_BLOB}.")
+    return 0
+
+
+def _cmd_wipe_master(args: argparse.Namespace) -> int:
+    target = (
+        f"all rows in {pd_store.FQ_MASTER}"
+        if not args.design
+        else f"the row in {pd_store.FQ_MASTER} for design = '{args.design}'"
+    )
+    if not _confirm(f"This will permanently delete {target}. Continue?", args.yes):
+        print("Aborted.", file=sys.stderr)
+        return 1
+    n = pd_store.delete_master_databases(design=args.design)
+    print(f"Deleted {n} row(s) from {pd_store.FQ_MASTER}.")
+    return 0
+
+
+def _cmd_wipe_artifacts(args: argparse.Namespace) -> int:
+    target = (
+        f"all rows in {pd_store.FQ_TABLE}"
+        if not args.kind
+        else f"rows in {pd_store.FQ_TABLE} where kind = '{args.kind}'"
+    )
+    if not _confirm(f"This will permanently delete {target}. Continue?", args.yes):
+        print("Aborted.", file=sys.stderr)
+        return 1
+    n = pd_store.delete_artifacts(kind=args.kind)
+    print(f"Deleted {n} row(s) from {pd_store.FQ_TABLE}.")
+    return 0
+
+
+def _cmd_wipe_all(args: argparse.Namespace) -> int:
+    # Note: user_workspaces is intentionally left alone. That's config (where
+    # each user's builds live), not cache state, and clobbering it would force
+    # every user to re-register on next login.
+    target = (
+        f"ALL cache data: pd_blobs + master_databases + pd_artifacts in "
+        f"schema {pd_store.SCHEMA_NAME}. user_workspaces is preserved."
+    )
+    if not _confirm(f"This will permanently delete {target}. Continue?", args.yes):
+        print("Aborted.", file=sys.stderr)
+        return 1
+    blobs = pd_store.delete_stage_blobs()
+    master = pd_store.delete_master_databases()
+    artifacts = pd_store.delete_artifacts()
+    print(f"Deleted {blobs} row(s) from {pd_store.FQ_BLOB}.")
+    print(f"Deleted {master} row(s) from {pd_store.FQ_MASTER}.")
+    print(f"Deleted {artifacts} row(s) from {pd_store.FQ_TABLE}.")
+    return 0
+
+
+def _cmd_workspace_list(_args: argparse.Namespace) -> int:
+    rows = pd_store.list_user_workspaces()
+    if not rows:
+        print("(no workspaces registered)")
+        return 0
+    print(f"{'username':<24} {'workspace_root':<60} updated_at")
+    print("-" * 120)
+    for username, root, updated_at in rows:
+        print(f"{username:<24} {root:<60} {updated_at}")
+    return 0
+
+
+def _cmd_workspace_show(args: argparse.Namespace) -> int:
+    root = pd_store.get_user_workspace(args.username)
+    print(root)
+    return 0
+
+
+def _cmd_workspace_set(args: argparse.Namespace) -> int:
+    pd_store.set_user_workspace(args.username, args.workspace_root)
+    print(f"Set workspace for '{args.username}' -> {args.workspace_root}")
+    return 0
+
+
+def _cmd_workspace_unset(args: argparse.Namespace) -> int:
+    if pd_store.delete_user_workspace(args.username):
+        print(f"Removed workspace registration for '{args.username}'.")
+        return 0
+    print(f"No workspace was registered for '{args.username}'.", file=sys.stderr)
+    return 1
 
 
 def _cmd_blob_list(args: argparse.Namespace) -> int:
@@ -242,6 +359,89 @@ def _build_parser() -> argparse.ArgumentParser:
                               help=f"Remove a role from the {pd_store.SLEDGEHAMMER_GROUP} group.")
     p_revoke.add_argument("role")
     p_revoke.set_defaults(func=_cmd_revoke)
+
+    p_ws_list = sub.add_parser(
+        "workspace-list",
+        help="List all registered per-user workspace roots.",
+    )
+    p_ws_list.set_defaults(func=_cmd_workspace_list)
+
+    p_ws_show = sub.add_parser(
+        "workspace-show",
+        help="Print the workspace root for a user (auto-registers default if missing).",
+    )
+    p_ws_show.add_argument("username", help="Airflow LDAP username.")
+    p_ws_show.set_defaults(func=_cmd_workspace_show)
+
+    p_ws_set = sub.add_parser(
+        "workspace-set",
+        help="Set or update the workspace root for a user.",
+    )
+    p_ws_set.add_argument("username", help="Airflow LDAP username.")
+    p_ws_set.add_argument(
+        "workspace_root",
+        help="Absolute path to the user's workspace root. The Airflow daemon "
+             "user must have write permission here.",
+    )
+    p_ws_set.set_defaults(func=_cmd_workspace_set)
+
+    p_ws_unset = sub.add_parser(
+        "workspace-unset",
+        help="Remove a user's workspace registration. The next call for that "
+             "user will auto-register a fresh default.",
+    )
+    p_ws_unset.add_argument("username")
+    p_ws_unset.set_defaults(func=_cmd_workspace_unset)
+
+    # ---- destructive cache-wiping subcommands ----
+    p_wb = sub.add_parser(
+        "wipe-blobs",
+        help="Delete stage tarballs from pd_blobs. Forces a fresh cold run "
+             "the next time a stage is invoked. Requires --yes or interactive "
+             "confirmation.",
+    )
+    p_wb.add_argument(
+        "--stage",
+        choices=pd_store.KNOWN_STAGE_TAGS,
+        help="Only delete blobs for this stage (default: ALL stages).",
+    )
+    p_wb.add_argument("--yes", action="store_true",
+                      help="Skip the confirmation prompt.")
+    p_wb.set_defaults(func=_cmd_wipe_blobs)
+
+    p_wm = sub.add_parser(
+        "wipe-master",
+        help="Delete master_databases rows. Forces stage_change_check to say "
+             "'run' the next time (no baseline to compare against).",
+    )
+    p_wm.add_argument(
+        "--design",
+        help="Only delete the row for this design (default: ALL designs).",
+    )
+    p_wm.add_argument("--yes", action="store_true",
+                      help="Skip the confirmation prompt.")
+    p_wm.set_defaults(func=_cmd_wipe_master)
+
+    p_wa = sub.add_parser(
+        "wipe-artifacts",
+        help="Delete JSON artifacts from pd_artifacts (par-input, etc.).",
+    )
+    p_wa.add_argument(
+        "--kind",
+        help="Only delete artifacts of this kind (default: ALL kinds).",
+    )
+    p_wa.add_argument("--yes", action="store_true",
+                      help="Skip the confirmation prompt.")
+    p_wa.set_defaults(func=_cmd_wipe_artifacts)
+
+    p_wall = sub.add_parser(
+        "wipe-all",
+        help="Nuclear: delete pd_blobs + master_databases + pd_artifacts. "
+             "Preserves user_workspaces (that's config, not cache).",
+    )
+    p_wall.add_argument("--yes", action="store_true",
+                        help="Skip the confirmation prompt.")
+    p_wall.set_defaults(func=_cmd_wipe_all)
 
     return parser
 

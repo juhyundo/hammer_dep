@@ -78,8 +78,10 @@ FQ_TABLE = f"{SCHEMA_NAME}.{TABLE_NAME}"
 
 MASTER_TABLE = "master_databases"
 BLOB_TABLE = "pd_blobs"
+WORKSPACE_TABLE = "user_workspaces"
 FQ_MASTER = f"{SCHEMA_NAME}.{MASTER_TABLE}"
 FQ_BLOB = f"{SCHEMA_NAME}.{BLOB_TABLE}"
+FQ_WORKSPACE = f"{SCHEMA_NAME}.{WORKSPACE_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -228,17 +230,35 @@ CREATE TABLE IF NOT EXISTS {FQ_MASTER} (
 );
 
 CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
-    sha256     TEXT PRIMARY KEY,
-    stage      TEXT NOT NULL,
-    data       BYTEA NOT NULL,
-    size_bytes BIGINT NOT NULL,
-    owner      TEXT NOT NULL DEFAULT current_user,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    sha256           TEXT PRIMARY KEY,
+    stage            TEXT NOT NULL,
+    data             BYTEA NOT NULL,
+    size_bytes       BIGINT NOT NULL,
+    owner            TEXT NOT NULL DEFAULT current_user,
+    -- Wall-clock seconds the original tool run took (Genus, Innovus, etc.).
+    -- Recorded on the MISS path when we actually invoke the tool, then used
+    -- on the HIT path to report "saved ~X seconds" to the user.
+    duration_seconds REAL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Per-user workspace mapping. Each Airflow LDAP user gets exactly one
+-- workspace_root, into which all their build artifacts are written.
+-- Nobody's tasks ever touch anyone else's workspace_root: clean wipes only
+-- the triggering user's directory; syn/par read and write only that
+-- directory; the shared pd_blobs cache is the only thing crossing user
+-- boundaries (and that's a read-only-via-tarball relationship).
+CREATE TABLE IF NOT EXISTS {FQ_WORKSPACE} (
+    username       TEXT PRIMARY KEY,
+    workspace_root TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Backfill the owner column for tables that already exist from earlier inits.
 ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS duration_seconds REAL;
 
 CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_stage ON {FQ_BLOB} (stage);
 CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_owner ON {FQ_BLOB} (owner);
@@ -314,6 +334,198 @@ def revoke_access(role: str) -> None:
         with conn.cursor() as cur:
             cur.execute(f"REVOKE {SLEDGEHAMMER_GROUP} FROM {role}")
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_workspace(username: Optional[str]) -> str:
+    """
+    Resolve the workspace root for the given user.
+
+    Returns an absolute path under which all of the user's build artifacts
+    must live. Each user has exactly one row in ``hammer_poc.user_workspaces``;
+    no row means no workspace has been registered yet, and this function will
+    auto-register one with a sensible default (a per-user subdirectory under
+    the Airflow daemon user's ``hammer`` checkout, so file-system permissions
+    work out of the box on a shared deployment).
+
+    Callers should append a per-design subdirectory (e.g. ``/gcd``) to the
+    returned path before using it as ``OBJ_DIR``.
+
+    Falls back to the OS user if ``username`` is empty or None.
+    """
+    if not username:
+        try:
+            username = getpass.getuser()
+        except Exception:
+            username = "default"
+
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT workspace_root FROM {FQ_WORKSPACE} WHERE username = %s",
+                (username,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return row[0]
+
+            # Auto-register a default workspace. Anchor under the daemon
+            # user's home so the running Airflow process has write access
+            # without needing perms on someone else's home directory.
+            try:
+                daemon_user = getpass.getuser()
+            except Exception:
+                daemon_user = "lawrencejrhee"
+            daemon_home = os.path.expanduser(f"~{daemon_user}")
+            default = os.path.join(
+                daemon_home, "hammer", "e2e",
+                f"build-sky130-cm-{username}",
+            )
+            try:
+                cur.execute(
+                    f"INSERT INTO {FQ_WORKSPACE} (username, workspace_root) "
+                    f"VALUES (%s, %s) "
+                    f"ON CONFLICT (username) DO NOTHING",
+                    (username, default),
+                )
+            except Exception:
+                # If we can't write the row (e.g. read-only role), just
+                # return the default in-memory.
+                pass
+            return default
+    finally:
+        conn.close()
+
+
+def list_user_workspaces() -> List[Tuple[str, str, Any]]:
+    """Return all rows in user_workspaces as (username, workspace_root, updated_at)."""
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT username, workspace_root, updated_at FROM {FQ_WORKSPACE} "
+                f"ORDER BY username"
+            )
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def delete_stage_blobs(stage_tag: Optional[str] = None) -> int:
+    """
+    Delete rows from ``pd_blobs``. With no filter, deletes ALL rows.
+    With ``stage_tag``, deletes only rows for that stage (e.g. 'synthesis').
+
+    Returns the number of rows deleted.
+    """
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            if stage_tag:
+                cur.execute(
+                    f"DELETE FROM {FQ_BLOB} WHERE stage = %s",
+                    (stage_tag,),
+                )
+            else:
+                cur.execute(f"DELETE FROM {FQ_BLOB}")
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def delete_master_databases(design: Optional[str] = None) -> int:
+    """
+    Delete rows from ``master_databases``. With no filter, deletes ALL rows.
+    With ``design``, deletes only that design's row.
+
+    Returns the number of rows deleted.
+    """
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            if design:
+                cur.execute(
+                    f"DELETE FROM {FQ_MASTER} WHERE design = %s",
+                    (design,),
+                )
+            else:
+                cur.execute(f"DELETE FROM {FQ_MASTER}")
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def delete_artifacts(kind: Optional[str] = None) -> int:
+    """
+    Delete rows from ``pd_artifacts``. With no filter, deletes ALL rows.
+    With ``kind``, deletes only rows of that kind (e.g. 'par-input').
+
+    Returns the number of rows deleted.
+    """
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            if kind:
+                cur.execute(
+                    f"DELETE FROM {FQ_TABLE} WHERE kind = %s",
+                    (kind,),
+                )
+            else:
+                cur.execute(f"DELETE FROM {FQ_TABLE}")
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def delete_user_workspace(username: str) -> bool:
+    """Remove a user's workspace registration. Returns True if a row was deleted."""
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {FQ_WORKSPACE} WHERE username = %s",
+                (username,),
+            )
+            return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def set_user_workspace(username: str, workspace_root: str) -> None:
+    """Explicitly set or update the workspace root for a user."""
+    if not username:
+        raise ValueError("username must be non-empty")
+    if not workspace_root:
+        raise ValueError("workspace_root must be non-empty")
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {FQ_WORKSPACE} (username, workspace_root) "
+                f"VALUES (%s, %s) "
+                f"ON CONFLICT (username) "
+                f"DO UPDATE SET workspace_root = EXCLUDED.workspace_root, "
+                f"              updated_at     = NOW()",
+                (username, workspace_root),
+            )
     finally:
         conn.close()
 
@@ -510,32 +722,68 @@ def load_master_database(design: str) -> Optional[Dict[str, Any]]:
     return None if row is None else row[0]
 
 
-def store_stage_blob(stage_tag: str, sha256: str, data: bytes) -> None:
-    """Store a tarball under ``sha256``. Idempotent; same sha never re-inserts."""
+def store_stage_blob(
+    stage_tag: str,
+    sha256: str,
+    data: bytes,
+    duration_seconds: Optional[float] = None,
+) -> None:
+    """
+    Store a tarball under ``sha256``. Latest write wins.
+
+    Tool outputs (Genus, Innovus, etc.) aren't byte-deterministic even when
+    inputs are: log timestamps, machine IDs, and synthesis-tool internal
+    randomness mean two runs with the same config + RTL produce tarballs
+    that differ slightly even though they're functionally equivalent. We
+    upsert on ``sha256`` (which is the content hash of the *inputs*, not
+    the tarball bytes) so the cache always reflects the freshest tool
+    output rather than whoever happened to write first.
+
+    ``duration_seconds``, when provided, records how long the tool actually
+    took to produce this tarball. Used on subsequent cache HITs to report
+    "saved ~X seconds" to the user. If None, any existing value in the row
+    is preserved on UPDATE.
+    """
     conn = _connect()
     try:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO {FQ_BLOB} (sha256, stage, data, size_bytes)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (sha256) DO NOTHING
+                INSERT INTO {FQ_BLOB} (sha256, stage, data, size_bytes, duration_seconds)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (sha256) DO UPDATE
+                  SET stage            = EXCLUDED.stage,
+                      data             = EXCLUDED.data,
+                      size_bytes       = EXCLUDED.size_bytes,
+                      owner            = current_user,
+                      duration_seconds = COALESCE(EXCLUDED.duration_seconds,
+                                                  {FQ_BLOB}.duration_seconds),
+                      created_at       = NOW()
                 """,
-                (sha256, stage_tag, psycopg2.Binary(data), len(data)),
+                (sha256, stage_tag, psycopg2.Binary(data), len(data), duration_seconds),
             )
         conn.commit()
     finally:
         conn.close()
 
 
-def load_stage_blob(sha256: str) -> Optional[Tuple[str, bytes]]:
-    """Fetch a tarball by hash. Returns ``(stage, bytes)`` or None."""
+def load_stage_blob(
+    sha256: str,
+) -> Optional[Tuple[str, bytes, Optional[float]]]:
+    """
+    Fetch a tarball by hash. Returns ``(stage, bytes, duration_seconds)`` or None.
+
+    The third tuple element is the wall-clock seconds the tool took when
+    this blob was originally produced, or None if the blob predates the
+    ``duration_seconds`` column (i.e. was stored before duration tracking
+    was added).
+    """
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT stage, data FROM {FQ_BLOB} WHERE sha256 = %s",
+                f"SELECT stage, data, duration_seconds FROM {FQ_BLOB} WHERE sha256 = %s",
                 (sha256,),
             )
             row = cur.fetchone()
@@ -543,8 +791,8 @@ def load_stage_blob(sha256: str) -> Optional[Tuple[str, bytes]]:
         conn.close()
     if row is None:
         return None
-    stage, data = row
-    return stage, bytes(data)
+    stage, data, duration_seconds = row
+    return stage, bytes(data), duration_seconds
 
 
 def list_stage_blobs(

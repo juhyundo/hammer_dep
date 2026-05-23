@@ -42,4 +42,11 @@ dags/sledgehammer_demo_gcd_synpar.py
 .DS_Store
 Thumbs.db
 e2e/build-sky130-cm/
+
+# Per-user workspaces (created by Airflow per LDAP user)
+e2e/build-sky130-cm-*/
+
+# Per-DAG-run cache event logs (consumed and cleaned up by the exit_ task)
+cache_events/
+
 output.json
