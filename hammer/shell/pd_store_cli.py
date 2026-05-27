@@ -1,13 +1,15 @@
 """
 hammer-pd-store: CLI for the Postgres-backed PD store.
 
-JSON artifact subcommands (legacy POC):
-    init              Create schema + tables (idempotent).
-    list [-n N]       List recent JSON artifacts.
-    get  <sha256>     Print a JSON artifact to stdout.
-    put  <path>       Store a JSON file as an artifact. Prints its SHA256.
+Roughly grouped by what each subcommand is for:
 
-Master_database + per-stage blob subcommands:
+Schema and JSON-artifact operations (from the original POC):
+    init              Create the hammer_poc schema and tables. Idempotent.
+    list [-n N]       Show the most recent JSON artifacts.
+    get  <sha256>     Print one artifact to stdout.
+    put  <path>       Store a JSON file. Prints its sha256.
+
+Master-database and per-stage cache blobs:
     master-push <design> [--master <path>]
     master-pull <design> [--out <path>]
     stage-key   <stage_tag> [--master <path>]
@@ -15,22 +17,29 @@ Master_database + per-stage blob subcommands:
     stage-pull  <stage_tag> --rundir <path> [--master <path>]
     blob-list   [--stage <tag>] [-n N]
 
-Per-user workspace subcommands (for the shared Airflow + LDAP deployment):
-    workspace-list                           List all registered workspaces.
-    workspace-show  <username>               Print one user's workspace root.
-    workspace-set   <username> <path>        Set or update a user's workspace.
-    workspace-unset <username>               Remove a user's registration.
+Per-user workspaces (used by the shared Airflow + LDAP deployment so that
+one user's "clean" task can't wipe another user's build dir):
+    workspace-list                  List every registered workspace.
+    workspace-show  <username>      Print one user's workspace root.
+    workspace-set   <username> <p>  Set or update a user's workspace.
+    workspace-unset <username>      Drop a user's registration.
 
-Cache-wipe subcommands (destructive; require --yes or confirmation):
+Cache wipes (destructive; default behavior prompts for confirmation):
     wipe-blobs     [--stage <tag>]   Delete stage tarballs. Forces cold run.
     wipe-master    [--design <name>] Delete dep-check baseline.
     wipe-artifacts [--kind <kind>]   Delete JSON artifacts (par-input, etc.).
-    wipe-all                          Delete all cache (keep workspaces).
+    wipe-all                         Delete all cache. user_workspaces is kept.
+
+Design registration (turn RTL into Hammer configs without hand-writing YAML):
+    design-register --name <n> --top-module <m> --rtl <paths...> --clock-ns <c>
+    augment --design <n>            (fill in SRAM stuff for an existing design)
+    make-dag --design <n>           (generate the Airflow DAG and link it in)
 
 `<path>` defaults to ./master_database.json when omitted.
 
-Connection settings come from HAMMER_PG_* env vars or airflow.cfg; see
-hammer/vlsi/pd_store.py.
+Connection settings come from HAMMER_PG_* env vars, or fall back to
+sql_alchemy_conn in airflow.cfg. See hammer/vlsi/pd_store.py for the
+precise resolution order.
 """
 
 from __future__ import annotations
@@ -239,6 +248,160 @@ def _cmd_wipe_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_design_register(args: argparse.Namespace) -> int:
+    """
+    Walk a directory of RTL and write out the Hammer configs for the design.
+
+    See hammer/shell/design_register.py for the actual work. This wrapper
+    just validates arg paths, hands them off, then prints the warning list
+    and the next steps the user still has to do by hand.
+    """
+    from hammer.shell import design_register
+    rtl_paths = [Path(p) for p in args.rtl]
+    for p in rtl_paths:
+        if not p.exists():
+            print(f"RTL path not found: {p}", file=sys.stderr)
+            return 2
+    out_dir, warnings = design_register.register_design(
+        name=args.name,
+        top_module=args.top_module,
+        clock_ns=args.clock_ns,
+        rtl_paths=rtl_paths,
+        pdk=args.pdk,
+        out_dir=Path(args.out_dir) if args.out_dir else None,
+        exclude_patterns=args.exclude,
+        use_default_excludes=not args.no_default_excludes,
+    )
+    if warnings:
+        print("", file=sys.stderr)
+        print("WARNINGS:", file=sys.stderr)
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
+    print(f"\nDesign registered. Configs at {out_dir}.", file=sys.stderr)
+    print(f"Next steps:", file=sys.stderr)
+    print(f"  1. Edit {out_dir}/par.yml to add macro placement constraints.", file=sys.stderr)
+    print(f"  2. Write a DAG file for this design (no factory yet, so still a copy-paste).", file=sys.stderr)
+    print(f"  3. Trigger via the Airflow UI or hammer-vlsi syn_par.", file=sys.stderr)
+    return 0
+
+
+def _cmd_augment(args: argparse.Namespace) -> int:
+    """
+    Look at a design's existing common.yml, find the SRAM macros, and write
+    the blackbox stubs + sky130-extras.yml. Doesn't touch the user's other
+    configs.
+    """
+    from hammer.shell import design_register
+
+    design_dir = Path(args.design_dir) if args.design_dir else None
+    if design_dir is None:
+        cwd = Path.cwd()
+        if (cwd / "e2e").is_dir():
+            design_dir = cwd / "e2e" / "configs-design" / args.design
+        else:
+            design_dir = Path("e2e/configs-design") / args.design
+
+    if not design_dir.is_dir():
+        print(f"Design directory not found: {design_dir}", file=sys.stderr)
+        print(f"Create it first (with common.yml etc.) or pass --design-dir.",
+              file=sys.stderr)
+        return 2
+
+    try:
+        srams, warnings = design_register.augment_existing_design(design_dir)
+    except (FileNotFoundError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    print(f"\nAugmented {design_dir}.", file=sys.stderr)
+    print(f"  SRAM macros bound: {len(srams)}", file=sys.stderr)
+    if warnings:
+        print("\nNotes:", file=sys.stderr)
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
+    return 0
+
+
+def _cmd_make_dag(args: argparse.Namespace) -> int:
+    """
+    Build the Airflow DAG for an already-configured design and symlink it
+    into the dags/ folder so Airflow's scheduler picks it up.
+    """
+    import os
+
+    design = args.design
+    design_dir = Path(args.design_dir) if args.design_dir else None
+    if design_dir is None:
+        cwd = Path.cwd()
+        if (cwd / "e2e").is_dir():
+            design_dir = cwd / "e2e" / "configs-design" / design
+        else:
+            design_dir = Path("e2e/configs-design") / design
+
+    if not design_dir.is_dir():
+        print(f"Design directory not found: {design_dir}", file=sys.stderr)
+        return 2
+
+    if not args.skip_augment:
+        from hammer.shell import design_register
+        try:
+            srams, warnings = design_register.augment_existing_design(design_dir)
+            print(f"  Augment: bound {len(srams)} SRAM macros", file=sys.stderr)
+            for w in warnings:
+                print(f"  WARNING: {w}", file=sys.stderr)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Augment step failed: {e}", file=sys.stderr)
+            print("Pass --skip-augment to bypass.", file=sys.stderr)
+            return 2
+
+    repo_root = Path(args.repo_root) if args.repo_root else Path.cwd()
+    e2e = repo_root / "e2e"
+    obj_dir = Path(args.obj_dir) if args.obj_dir else (
+        e2e / f"build-{args.pdk}-{args.tools}" / design
+    )
+    obj_dir.mkdir(parents=True, exist_ok=True)
+
+    dags_folder = Path(args.dags_folder) if args.dags_folder else (repo_root / "dags")
+
+    env_conf = e2e / "configs-env" / f"{args.env}-env.yml"
+    pdk_conf = e2e / "configs-pdk" / f"{args.pdk}.yml"
+    tools_conf = e2e / "configs-tool" / f"{args.tools}.yml"
+
+    proj_confs = [str(pdk_conf), str(tools_conf)]
+    for yml in sorted(design_dir.glob("*.yml")):
+        proj_confs.append(str(yml))
+
+    from hammer.vlsi import HammerDriver, HammerDriverOptions
+    import hammer.config as hcfg
+
+    opts = HammerDriverOptions(
+        environment_configs=[str(env_conf)],
+        project_configs=proj_confs,
+        log_file=str(obj_dir / "hammer.log"),
+        obj_dir=str(obj_dir),
+    )
+    extra_dict = {
+        "vlsi.core.build_system": "airflow",
+        "vlsi.core.airflow_dags_folder": str(dags_folder),
+    }
+    if args.dag_id:
+        extra_dict["vlsi.core.airflow_dag_id"] = args.dag_id
+    import json
+    extra = hcfg.load_config_from_string(json.dumps(extra_dict), is_yaml=False)
+    driver = HammerDriver(opts, extra)
+
+    from hammer.vlsi.hammer_build_systems import build_airflow_dag
+    errs: List[str] = []
+    build_airflow_dag(driver, errs.append)
+    for e in errs:
+        print(f"WARNING: {e}", file=sys.stderr)
+
+    print(f"\nDAG for '{design}' generated. Airflow's dag-processor should",
+          file=sys.stderr)
+    print(f"register it within ~30 seconds as Hammer_{design}.", file=sys.stderr)
+    return 0
+
+
 def _cmd_workspace_list(_args: argparse.Namespace) -> int:
     rows = pd_store.list_user_workspaces()
     if not rows:
@@ -442,6 +605,91 @@ def _build_parser() -> argparse.ArgumentParser:
     p_wall.add_argument("--yes", action="store_true",
                         help="Skip the confirmation prompt.")
     p_wall.set_defaults(func=_cmd_wipe_all)
+
+    p_dreg = sub.add_parser(
+        "design-register",
+        help="Walk a directory of RTL and write Hammer configs for the "
+             "design: common.yml, syn.yml, sky130.yml, par.yml, plus a "
+             "blackbox stub for every sram22 macro the RTL instantiates. "
+             "The sram22 LEF/lib/GDS paths get wired into sky130.yml so "
+             "Innovus can find them at place_inst time.",
+    )
+    p_dreg.add_argument("--name", required=True,
+                        help="Design name. The configs end up at "
+                             "e2e/configs-design/<name>/.")
+    p_dreg.add_argument("--top-module", required=True,
+                        help="Top Verilog module. Make sure this matches the "
+                             "module name in the RTL, not the file name.")
+    p_dreg.add_argument("--clock-ns", required=True, type=float,
+                        help="Target clock period in nanoseconds (e.g. 11.8 "
+                             "for ~85 MHz).")
+    p_dreg.add_argument("--rtl", nargs="+", required=True,
+                        help="One or more RTL files or directories. Directories "
+                             "get walked recursively for .v and .sv files.")
+    p_dreg.add_argument("--pdk", default="sky130", choices=["sky130"],
+                        help="PDK to target. sky130 is the only one wired up "
+                             "today; asap7 and intech22 are on the to-do list.")
+    p_dreg.add_argument("--out-dir", default=None,
+                        help="Where to write the configs. Defaults to "
+                             "./e2e/configs-design/<name>.")
+    p_dreg.add_argument("--exclude", action="append", default=[],
+                        help="Glob pattern to skip when walking the RTL "
+                             "directory. Repeatable. Stacks on top of the "
+                             "built-in pattern list (testbenches, copies, "
+                             "etc.); use --no-default-excludes to turn that "
+                             "list off.")
+    p_dreg.add_argument("--no-default-excludes", action="store_true",
+                        help="Turn off the built-in exclude list. Use this if "
+                             "your design genuinely needs files matching "
+                             "*Testbench.v, *_tb.v, etc. (uncommon).")
+    p_dreg.set_defaults(func=_cmd_design_register)
+
+    p_aug = sub.add_parser(
+        "augment",
+        help="Look at an already-configured design (configs-design/<name>/ "
+             "with common.yml etc. in place) and fill in just the SRAM "
+             "pieces: blackbox stubs + sky130-extras.yml with extra_libraries. "
+             "Doesn't touch the user's other configs. Use this when you've "
+             "written your own syn/par/sky130 yml by hand and just want the "
+             "macro plumbing automated.",
+    )
+    p_aug.add_argument("--design", required=True,
+                       help="Design name (looks under e2e/configs-design/<name>/).")
+    p_aug.add_argument("--design-dir", default=None,
+                       help="Override the design directory path.")
+    p_aug.set_defaults(func=_cmd_augment)
+
+    p_dag = sub.add_parser(
+        "make-dag",
+        help="Generate an Airflow DAG for an existing design and symlink it "
+             "into the dags/ folder. Wraps hammer-vlsi build with "
+             "vlsi.core.build_system=airflow. Within ~30 seconds the DAG "
+             "appears as Hammer_<design> in the Airflow UI.",
+    )
+    p_dag.add_argument("--design", required=True,
+                       help="Design name (configs-design/<name>/).")
+    p_dag.add_argument("--design-dir", default=None,
+                       help="Override the design directory path.")
+    p_dag.add_argument("--repo-root", default=None,
+                       help="Hammer repo root (defaults to CWD).")
+    p_dag.add_argument("--obj-dir", default=None,
+                       help="Where to write the generated DAG. "
+                            "Defaults to build-<pdk>-<tools>/<design> under e2e/.")
+    p_dag.add_argument("--dags-folder", default=None,
+                       help="Where to symlink the DAG. Defaults to <repo>/dags.")
+    p_dag.add_argument("--pdk", default="sky130")
+    p_dag.add_argument("--tools", default="cm")
+    p_dag.add_argument("--env", default="bwrc")
+    p_dag.add_argument("--dag-id", default=None,
+                       help="DAG ID to use in Airflow. Defaults to "
+                            "Hammer_<design>. Pick whatever name you want "
+                            "shown in the Airflow UI.")
+    p_dag.add_argument("--skip-augment", action="store_true",
+                       help="Don't run the augment step first. By default "
+                            "make-dag runs augment to keep blackbox stubs "
+                            "and sky130-extras.yml up to date before "
+                            "generating the DAG.")
+    p_dag.set_defaults(func=_cmd_make_dag)
 
     return parser
 

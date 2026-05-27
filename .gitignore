@@ -28,9 +28,12 @@ chipyard/
 simple_auth_manager_passwords.json.generated
 standalone_admin_password.txt
 
-# Local SledgeHammer DAG drafts (not for the fork yet)
-dags/sledgehammer_dags.py
-dags/sledgehammer_demo_gcd_synpar.py
+# DAGs: gitignore everything in dags/ except the canonical demo.
+# Auto-generated DAGs (hammer_<design>_dag.py from make-dag) and per-design
+# hand-copies (sledgehammer_<design>_synpar.py) all land here and are not
+# meant to be committed.
+dags/*.py
+!dags/pd_store_demo.py
 
 # IDE
 .vscode/
