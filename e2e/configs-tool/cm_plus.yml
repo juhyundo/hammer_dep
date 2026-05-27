@@ -1,0 +1,22 @@
+# "cm_plus" tool config: same as cm.yml (Cadence + Mentor) but routes
+# synthesis through Henry's Innovus+ plugin (Innovus -stylus -synthesis,
+# Python-driven on 25.1+) instead of classic Genus.
+#
+# Use this by passing tools=cm_plus to the Makefile, or by passing
+# -p configs-tool/cm_plus.yml to hammer-vlsi directly.
+#
+# Requires an INVS500 license. If checkout fails, fall back to cm.yml.
+
+vlsi.core.build_system: make
+
+# Synthesis: Innovus+ (Henry's plugin) instead of Genus.
+vlsi.core.synthesis_tool: "hammer.synthesis.innovus_plus"
+
+# Everything else: same as cm.yml.
+vlsi.core.par_tool:     "hammer.par.innovus"
+vlsi.core.sim_tool:     "hammer.sim.vcs"
+vlsi.core.timing_tool:  "hammer.timing.tempus"
+vlsi.core.formal_tool:  "hammer.formal.conformal"
+vlsi.core.power_tool:   "hammer.power.voltus"
+vlsi.core.drc_tool:     "hammer.drc.calibre"
+vlsi.core.lvs_tool:     "hammer.lvs.calibre"

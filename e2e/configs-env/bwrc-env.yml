@@ -14,8 +14,8 @@ synopsys.MGLS_LICENSE_FILE: "MGLS_LICENSE_FILE=1717@bwrcflex-1.eecs.berkeley.edu
 synthesis.genus.version: "231_ISR2"
 synthesis.innovus_plus.version: "251"
 par.innovus.version: "251"
-power.joules.version: "231"
-sim.vcs.version: W-2024.09-1 #"S-2021.09-SP1-1" # need to bump down these versions because joules requires older FSDB version
+power.joules.version: "231_ISR2"
+sim.vcs.version: W-2024.09-1 #"S-2021.09-SP1-1"
 sim.vcs.verdi_home: "/tools/synopsys/verdi/${sim.vcs.version}"
 sim.vcs.verdi_home_meta: lazysubst
 
