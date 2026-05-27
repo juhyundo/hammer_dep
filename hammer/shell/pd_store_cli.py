@@ -422,13 +422,24 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
 
     from hammer.vlsi.hammer_build_systems import build_airflow_dag
     errs: List[str] = []
-    build_airflow_dag(driver, errs.append)
+    dep_graph = build_airflow_dag(driver, errs.append)
     for e in errs:
         print(f"WARNING: {e}", file=sys.stderr)
 
-    print(f"\nDAG for '{design}' generated. Airflow's dag-processor should",
+    dag_label = args.dag_id or f"Hammer_{design}"
+    if dep_graph:
+        leaves = sorted(m for m, edges in dep_graph.items() if not edges[1])
+        non_leaves = sorted(m for m, edges in dep_graph.items() if edges[1])
+        print(f"\nHierarchical flow detected: {len(dep_graph)} modules.",
+              file=sys.stderr)
+        print(f"  non-leaf: {', '.join(non_leaves) or '(none)'}", file=sys.stderr)
+        print(f"  leaves:   {', '.join(leaves) or '(none)'}", file=sys.stderr)
+    else:
+        print(f"\nFlat flow.", file=sys.stderr)
+
+    print(f"DAG for '{design}' generated. Airflow's dag-processor should",
           file=sys.stderr)
-    print(f"register it within ~30 seconds as Hammer_{design}.", file=sys.stderr)
+    print(f"register it within ~30 seconds as {dag_label}.", file=sys.stderr)
     return 0
 
 
