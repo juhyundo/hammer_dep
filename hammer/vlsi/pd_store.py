@@ -215,18 +215,28 @@ _DDL = f"""
 CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME};
 
 CREATE TABLE IF NOT EXISTS {FQ_TABLE} (
-    sha256      TEXT PRIMARY KEY,
-    kind        TEXT NOT NULL,
-    top_module  TEXT,
-    data        JSONB NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    sha256          TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    top_module      TEXT,
+    data            JSONB NOT NULL,
+    owner           TEXT NOT NULL DEFAULT current_user,
+    triggering_user TEXT,
+    dag_id          TEXT,
+    dag_run_id      TEXT,
+    workspace       TEXT,
+    design          TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS {FQ_MASTER} (
-    design     TEXT PRIMARY KEY,
-    db         JSONB NOT NULL,
-    owner      TEXT NOT NULL DEFAULT current_user,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    design          TEXT PRIMARY KEY,
+    db              JSONB NOT NULL,
+    owner           TEXT NOT NULL DEFAULT current_user,
+    triggering_user TEXT,
+    dag_id          TEXT,
+    dag_run_id      TEXT,
+    workspace       TEXT,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
@@ -239,6 +249,14 @@ CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
     -- Recorded on the MISS path when we actually invoke the tool, then used
     -- on the HIT path to report "saved ~X seconds" to the user.
     duration_seconds REAL,
+    -- Provenance: which Airflow user / DAG / run / workspace / design
+    -- produced this blob. All nullable so non-Airflow callers (e.g. direct
+    -- hammer-vlsi invocations from the shell) don't need to set them.
+    triggering_user  TEXT,
+    dag_id           TEXT,
+    dag_run_id       TEXT,
+    workspace        TEXT,
+    design           TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -259,6 +277,23 @@ CREATE TABLE IF NOT EXISTS {FQ_WORKSPACE} (
 ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS duration_seconds REAL;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS triggering_user TEXT;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS dag_id          TEXT;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS dag_run_id      TEXT;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS workspace       TEXT;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS design          TEXT;
+
+ALTER TABLE {FQ_TABLE}  ADD COLUMN IF NOT EXISTS owner           TEXT NOT NULL DEFAULT current_user;
+ALTER TABLE {FQ_TABLE}  ADD COLUMN IF NOT EXISTS triggering_user TEXT;
+ALTER TABLE {FQ_TABLE}  ADD COLUMN IF NOT EXISTS dag_id          TEXT;
+ALTER TABLE {FQ_TABLE}  ADD COLUMN IF NOT EXISTS dag_run_id      TEXT;
+ALTER TABLE {FQ_TABLE}  ADD COLUMN IF NOT EXISTS workspace       TEXT;
+ALTER TABLE {FQ_TABLE}  ADD COLUMN IF NOT EXISTS design          TEXT;
+
+ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS triggering_user TEXT;
+ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS dag_id          TEXT;
+ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS dag_run_id      TEXT;
+ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS workspace       TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_stage ON {FQ_BLOB} (stage);
 CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_owner ON {FQ_BLOB} (owner);
@@ -560,26 +595,57 @@ def _extract_top_module(data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def store_artifact(data: Dict[str, Any], kind: str) -> str:
+def _env_provenance() -> Dict[str, Optional[str]]:
+    """Pull airflow / workspace / design provenance from env vars set by
+    the AIRFlow class. Returns a dict with the relevant fields, or Nones
+    when not running under Airflow."""
+    return {
+        "triggering_user": os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER") or None,
+        "dag_id":          os.environ.get("HAMMER_AIRFLOW_DAG_ID") or None,
+        "dag_run_id":      os.environ.get("HAMMER_AIRFLOW_RUN_ID") or None,
+        "workspace":       os.environ.get("HAMMER_AIRFLOW_WORKSPACE") or None,
+        "design":          os.environ.get("design") or None,
+    }
+
+
+def store_artifact(
+    data: Dict[str, Any],
+    kind: str,
+    triggering_user: Optional[str] = None,
+    dag_id: Optional[str] = None,
+    dag_run_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    design: Optional[str] = None,
+) -> str:
     """
     Store ``data`` as an artifact of the given ``kind`` and return its SHA256 hex.
 
-    Uses INSERT ... ON CONFLICT DO NOTHING so identical content is deduplicated
-    and repeated calls are idempotent.
+    Provenance kwargs default to the env-var values populated by AIRFlow.
+    Pass explicit values to override.
     """
     sha = compute_sha256(data)
     top_module = _extract_top_module(data)
+    prov = _env_provenance()
+    triggering_user = triggering_user or prov["triggering_user"]
+    dag_id          = dag_id          or prov["dag_id"]
+    dag_run_id      = dag_run_id      or prov["dag_run_id"]
+    workspace       = workspace       or prov["workspace"]
+    design          = design          or prov["design"]
     conn = _connect()
     try:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO {FQ_TABLE} (sha256, kind, top_module, data)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO {FQ_TABLE} (
+                    sha256, kind, top_module, data,
+                    triggering_user, dag_id, dag_run_id, workspace, design
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (sha256) DO NOTHING
                 """,
-                (sha, kind, top_module, Json(data)),
+                (sha, kind, top_module, Json(data),
+                 triggering_user, dag_id, dag_run_id, workspace, design),
             )
         conn.commit()
     finally:
@@ -609,22 +675,21 @@ def load_artifact(sha256: str) -> Optional[Dict[str, Any]]:
     return row[0]
 
 
-def list_artifacts(limit: int = 20) -> List[Tuple[str, str, Optional[str], Any]]:
+def list_artifacts(limit: int = 20) -> List[Tuple[Any, ...]]:
     """
     List the most recent artifacts.
 
-    Returns tuples of (sha256, kind, top_module, created_at).
+    Returns tuples of
+      (sha256, kind, top_module, owner, triggering_user, dag_id, design,
+       workspace, created_at).
     """
+    cols = ("sha256, kind, top_module, owner, triggering_user, dag_id, "
+            "design, workspace, created_at")
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"""
-                SELECT sha256, kind, top_module, created_at
-                FROM {FQ_TABLE}
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
+                f"SELECT {cols} FROM {FQ_TABLE} ORDER BY created_at DESC LIMIT %s",
                 (limit,),
             )
             return list(cur.fetchall())
@@ -686,23 +751,70 @@ def compute_rtl_fingerprint(file_paths: List[str]) -> str:
     return h.hexdigest()
 
 
-def store_master_database(design: str, master_db: Dict[str, Any]) -> None:
-    """Upsert the master_database for ``design``. Latest write wins."""
+def store_master_database(
+    design: str,
+    master_db: Dict[str, Any],
+    triggering_user: Optional[str] = None,
+    dag_id: Optional[str] = None,
+    dag_run_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> None:
+    """Upsert the master_database for ``design``. Latest write wins.
+
+    Provenance kwargs default to env-var values populated by AIRFlow.
+    """
+    prov = _env_provenance()
+    triggering_user = triggering_user or prov["triggering_user"]
+    dag_id          = dag_id          or prov["dag_id"]
+    dag_run_id      = dag_run_id      or prov["dag_run_id"]
+    workspace       = workspace       or prov["workspace"]
     conn = _connect()
     try:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO {FQ_MASTER} (design, db, updated_at)
-                VALUES (%s, %s, NOW())
+                INSERT INTO {FQ_MASTER} (
+                    design, db, owner, triggering_user, dag_id,
+                    dag_run_id, workspace, updated_at
+                )
+                VALUES (%s, %s, current_user, %s, %s, %s, %s, NOW())
                 ON CONFLICT (design) DO UPDATE
-                  SET db = EXCLUDED.db,
-                      updated_at = EXCLUDED.updated_at
+                  SET db              = EXCLUDED.db,
+                      owner           = current_user,
+                      triggering_user = COALESCE(EXCLUDED.triggering_user,
+                                                 {FQ_MASTER}.triggering_user),
+                      dag_id          = COALESCE(EXCLUDED.dag_id,
+                                                 {FQ_MASTER}.dag_id),
+                      dag_run_id      = COALESCE(EXCLUDED.dag_run_id,
+                                                 {FQ_MASTER}.dag_run_id),
+                      workspace       = COALESCE(EXCLUDED.workspace,
+                                                 {FQ_MASTER}.workspace),
+                      updated_at      = NOW()
                 """,
-                (design, Json(master_db)),
+                (design, Json(master_db), triggering_user, dag_id,
+                 dag_run_id, workspace),
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def list_master_databases(limit: int = 50) -> List[Tuple[Any, ...]]:
+    """
+    Browse master_databases rows.
+
+    Returns (design, owner, triggering_user, dag_id, workspace, updated_at).
+    """
+    cols = ("design, owner, triggering_user, dag_id, workspace, updated_at")
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {cols} FROM {FQ_MASTER} ORDER BY updated_at DESC LIMIT %s",
+                (limit,),
+            )
+            return list(cur.fetchall())
     finally:
         conn.close()
 
@@ -727,6 +839,11 @@ def store_stage_blob(
     sha256: str,
     data: bytes,
     duration_seconds: Optional[float] = None,
+    triggering_user: Optional[str] = None,
+    dag_id: Optional[str] = None,
+    dag_run_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    design: Optional[str] = None,
 ) -> None:
     """
     Store a tarball under ``sha256``. Latest write wins.
@@ -739,10 +856,10 @@ def store_stage_blob(
     the tarball bytes) so the cache always reflects the freshest tool
     output rather than whoever happened to write first.
 
-    ``duration_seconds``, when provided, records how long the tool actually
-    took to produce this tarball. Used on subsequent cache HITs to report
-    "saved ~X seconds" to the user. If None, any existing value in the row
-    is preserved on UPDATE.
+    Optional provenance fields (triggering_user, dag_id, dag_run_id,
+    workspace, design) are recorded so blob-list can tell you which run
+    produced each row. They default to None when the caller doesn't have
+    them, in which case any existing value on UPDATE is preserved.
     """
     conn = _connect()
     try:
@@ -750,8 +867,11 @@ def store_stage_blob(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO {FQ_BLOB} (sha256, stage, data, size_bytes, duration_seconds)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO {FQ_BLOB} (
+                    sha256, stage, data, size_bytes, duration_seconds,
+                    triggering_user, dag_id, dag_run_id, workspace, design
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (sha256) DO UPDATE
                   SET stage            = EXCLUDED.stage,
                       data             = EXCLUDED.data,
@@ -759,9 +879,21 @@ def store_stage_blob(
                       owner            = current_user,
                       duration_seconds = COALESCE(EXCLUDED.duration_seconds,
                                                   {FQ_BLOB}.duration_seconds),
+                      triggering_user  = COALESCE(EXCLUDED.triggering_user,
+                                                  {FQ_BLOB}.triggering_user),
+                      dag_id           = COALESCE(EXCLUDED.dag_id,
+                                                  {FQ_BLOB}.dag_id),
+                      dag_run_id       = COALESCE(EXCLUDED.dag_run_id,
+                                                  {FQ_BLOB}.dag_run_id),
+                      workspace        = COALESCE(EXCLUDED.workspace,
+                                                  {FQ_BLOB}.workspace),
+                      design           = COALESCE(EXCLUDED.design,
+                                                  {FQ_BLOB}.design),
                       created_at       = NOW()
                 """,
-                (sha256, stage_tag, psycopg2.Binary(data), len(data), duration_seconds),
+                (sha256, stage_tag, psycopg2.Binary(data), len(data),
+                 duration_seconds, triggering_user, dag_id, dag_run_id,
+                 workspace, design),
             )
         conn.commit()
     finally:
@@ -798,30 +930,26 @@ def load_stage_blob(
 def list_stage_blobs(
     stage_tag: Optional[str] = None,
     limit: int = 20,
-) -> List[Tuple[str, str, int, Any]]:
-    """List recent blobs. Returns ``(sha256, stage, size_bytes, created_at)``."""
+) -> List[Tuple[Any, ...]]:
+    """
+    List recent blobs. Returns rows of:
+      (sha256, stage, size_bytes, duration_seconds, owner,
+       triggering_user, dag_id, design, workspace, created_at)
+    """
+    cols = ("sha256, stage, size_bytes, duration_seconds, owner, "
+            "triggering_user, dag_id, design, workspace, created_at")
     conn = _connect()
     try:
         with conn.cursor() as cur:
             if stage_tag is None:
                 cur.execute(
-                    f"""
-                    SELECT sha256, stage, size_bytes, created_at
-                    FROM {FQ_BLOB}
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                    """,
+                    f"SELECT {cols} FROM {FQ_BLOB} ORDER BY created_at DESC LIMIT %s",
                     (limit,),
                 )
             else:
                 cur.execute(
-                    f"""
-                    SELECT sha256, stage, size_bytes, created_at
-                    FROM {FQ_BLOB}
-                    WHERE stage = %s
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                    """,
+                    f"SELECT {cols} FROM {FQ_BLOB} WHERE stage = %s "
+                    f"ORDER BY created_at DESC LIMIT %s",
                     (stage_tag, limit),
                 )
             return list(cur.fetchall())

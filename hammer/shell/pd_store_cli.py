@@ -12,6 +12,7 @@ Schema and JSON-artifact operations (from the original POC):
 Master-database and per-stage cache blobs:
     master-push <design> [--master <path>]
     master-pull <design> [--out <path>]
+    master-list [-n N]               (list master_database rows with provenance)
     stage-key   <stage_tag> [--master <path>]
     stage-push  <stage_tag> --rundir <path> [--master <path>]
     stage-pull  <stage_tag> --rundir <path> [--master <path>]
@@ -61,16 +62,45 @@ def _cmd_init(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _short_str(s: Optional[str], n: int) -> str:
+    if s is None:
+        return "-"
+    s = str(s)
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
     rows = pd_store.list_artifacts(limit=args.limit)
     if not rows:
         print("(no artifacts)")
         return 0
-    print(f"{'sha256':<66} {'kind':<12} {'top_module':<24} created_at")
-    print("-" * 130)
-    for sha256, kind, top_module, created_at in rows:
-        tm = top_module or "-"
-        print(f"{sha256:<66} {kind:<12} {tm:<24} {created_at}")
+    header = (f"{'sha':<10} {'kind':<11} {'top_module':<18} {'owner':<14} "
+              f"{'trig_user':<14} {'design':<28} {'dag_id':<22}  created_at")
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        sha, kind, top_module, owner, trig, dag, design, workspace, created = r
+        print(f"{_short_str(sha,10):<10} {_short_str(kind,11):<11} "
+              f"{_short_str(top_module,18):<18} {_short_str(owner,14):<14} "
+              f"{_short_str(trig,14):<14} {_short_str(design,28):<28} "
+              f"{_short_str(dag,22):<22}  {created}")
+    return 0
+
+
+def _cmd_master_list(args: argparse.Namespace) -> int:
+    rows = pd_store.list_master_databases(limit=args.limit)
+    if not rows:
+        print("(no master_databases)")
+        return 0
+    header = (f"{'design':<32} {'owner':<14} {'trig_user':<14} "
+              f"{'dag_id':<28} {'workspace':<48}  updated_at")
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        design, owner, trig, dag, workspace, updated = r
+        print(f"{_short_str(design,32):<32} {_short_str(owner,14):<14} "
+              f"{_short_str(trig,14):<14} {_short_str(dag,28):<28} "
+              f"{_short_str(workspace,48):<48}  {updated}")
     return 0
 
 
@@ -434,15 +464,43 @@ def _cmd_workspace_unset(args: argparse.Namespace) -> int:
     return 1
 
 
+def _human_bytes(n: Optional[int]) -> str:
+    if n is None:
+        return "-"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
+def _human_dur(s: Optional[float]) -> str:
+    if s is None:
+        return "-"
+    s = float(s)
+    if s < 60:
+        return f"{s:.1f}s"
+    if s < 3600:
+        return f"{int(s/60)}m{int(s%60):02d}s"
+    return f"{int(s/3600)}h{int((s%3600)/60):02d}m"
+
+
 def _cmd_blob_list(args: argparse.Namespace) -> int:
     rows = pd_store.list_stage_blobs(stage_tag=args.stage, limit=args.limit)
     if not rows:
         print("(no blobs)")
         return 0
-    print(f"{'sha256':<66} {'stage':<14} {'size':>12}  created_at")
-    print("-" * 120)
-    for sha, stage, size, created in rows:
-        print(f"{sha:<66} {stage:<14} {size:>12}  {created}")
+    header = (f"{'sha':<10} {'stage':<10} {'size':>8} {'tool_time':>10} "
+              f"{'owner':<14} {'trig_user':<14} {'design':<28} {'dag_id':<28}  created_at")
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        sha, stage, size, dur_s, owner, trig, dag, design, workspace, created = r
+        print(f"{_short_str(sha,10):<10} {_short_str(stage,10):<10} {_human_bytes(size):>8} "
+              f"{_human_dur(dur_s):>10} {_short_str(owner,14):<14} "
+              f"{_short_str(trig,14):<14} {_short_str(design,28):<28} "
+              f"{_short_str(dag,28):<28}  {created}")
     return 0
 
 
@@ -482,6 +540,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_mpull.add_argument("--out", default=None,
                          help="Write JSON to this path. Default: stdout.")
     p_mpull.set_defaults(func=_cmd_master_pull)
+
+    p_mlist = sub.add_parser(
+        "master-list",
+        help="List master_database rows with provenance (design, owner, "
+             "triggering_user, dag_id, workspace, updated_at). One row per "
+             "design.",
+    )
+    p_mlist.add_argument("-n", "--limit", type=int, default=50)
+    p_mlist.set_defaults(func=_cmd_master_list)
 
     p_skey = sub.add_parser("stage-key", help="Compute a stage's cache key from a master_database.")
     p_skey.add_argument("stage", choices=pd_store.KNOWN_STAGE_TAGS,

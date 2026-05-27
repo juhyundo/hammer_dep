@@ -352,7 +352,13 @@ def cache_or_run(
 
             tarball = pd_store.tar_directory(Path(rundir))
             pd_store.store_stage_blob(
-                stage_tag, key, tarball, duration_seconds=duration_seconds,
+                stage_tag, key, tarball,
+                duration_seconds=duration_seconds,
+                triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER") or None,
+                dag_id=os.environ.get("HAMMER_AIRFLOW_DAG_ID") or None,
+                dag_run_id=os.environ.get("HAMMER_AIRFLOW_RUN_ID") or None,
+                workspace=os.environ.get("HAMMER_AIRFLOW_WORKSPACE") or None,
+                design=os.environ.get("design") or None,
             )
             _record_cache_event(
                 stage_tag, "MISS_STORE",

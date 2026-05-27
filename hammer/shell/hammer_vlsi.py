@@ -150,15 +150,17 @@ def _resolve_workspace_obj_dir(context, design):
     # previous task's value could leak across users in the same worker.
     os.environ.pop("HAMMER_D_MK", None)
 
-    # Pass dag_id / run_id down to the cache layer (pd_cache.py) so it can
-    # record per-stage HIT/MISS/SKIP events keyed by run_id. The cache layer
-    # lives several call levels below this (AIRFlow -> CLIDriver -> cache_or_run)
-    # and doesn't have its own access to the Airflow context, so env is the
-    # least invasive plumbing.
+    # Hand provenance down to the cache layer via env. pd_cache.cache_or_run
+    # reads these and stamps each pd_blobs row at STORE time so blob-list can
+    # tell us who triggered what.
     if dag_id:
         os.environ["HAMMER_AIRFLOW_DAG_ID"] = str(dag_id)
     if run_id:
         os.environ["HAMMER_AIRFLOW_RUN_ID"] = str(run_id)
+    if user:
+        os.environ["HAMMER_AIRFLOW_TRIGGERING_USER"] = str(user)
+    if workspace_root:
+        os.environ["HAMMER_AIRFLOW_WORKSPACE"] = str(workspace_root)
 
     print(f"[user-workspace] triggering_user={user!r} dag_id={dag_id!r} "
           f"run_id={run_id!r} -> OBJ_DIR={obj_dir}")
