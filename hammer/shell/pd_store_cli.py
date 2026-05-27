@@ -50,7 +50,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from hammer.config import HammerJSONEncoder
 from hammer.vlsi import pd_store
@@ -395,11 +395,22 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
 
     env_conf = e2e / "configs-env" / f"{args.env}-env.yml"
     pdk_conf = e2e / "configs-pdk" / f"{args.pdk}.yml"
-    tools_conf = e2e / "configs-tool" / f"{args.tools}.yml"
+    tools_dir = e2e / "configs-tool"
+    tools_conf = tools_dir / f"{args.tools}.yml"
 
-    proj_confs = [str(pdk_conf), str(tools_conf)]
-    for yml in sorted(design_dir.glob("*.yml")):
-        proj_confs.append(str(yml))
+    # Discover every tool config so the DAG can offer them as a runtime
+    # dropdown. The default stays whatever --tools picked.
+    design_confs = [str(yml) for yml in sorted(design_dir.glob("*.yml"))]
+    proj_confs_by_tools: Dict[str, List[str]] = {}
+    for tool_yml in sorted(tools_dir.glob("*.yml")):
+        proj_confs_by_tools[tool_yml.stem] = [str(pdk_conf), str(tool_yml)] + design_confs
+
+    # The driver itself needs ONE project_configs list to compute the dep
+    # graph (hier vs flat detection, top_module resolution, etc.). Use the
+    # caller's chosen --tools.
+    proj_confs = proj_confs_by_tools.get(
+        args.tools, [str(pdk_conf), str(tools_conf)] + design_confs
+    )
 
     from hammer.vlsi import HammerDriver, HammerDriverOptions
     import hammer.config as hcfg
@@ -422,7 +433,11 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
 
     from hammer.vlsi.hammer_build_systems import build_airflow_dag
     errs: List[str] = []
-    dep_graph = build_airflow_dag(driver, errs.append)
+    dep_graph = build_airflow_dag(
+        driver, errs.append,
+        proj_confs_by_tools=proj_confs_by_tools,
+        default_tools=args.tools,
+    )
     for e in errs:
         print(f"WARNING: {e}", file=sys.stderr)
 
@@ -437,6 +452,9 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
     else:
         print(f"\nFlat flow.", file=sys.stderr)
 
+    tool_names = sorted(proj_confs_by_tools.keys())
+    print(f"\nTool dropdown options (default {args.tools!r}): {tool_names}",
+          file=sys.stderr)
     print(f"DAG for '{design}' generated. Airflow's dag-processor should",
           file=sys.stderr)
     print(f"register it within ~30 seconds as {dag_label}.", file=sys.stderr)

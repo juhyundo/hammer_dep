@@ -8,7 +8,7 @@ from .driver import HammerDriver
 import os
 import sys
 import textwrap
-from typing import List, Dict, Tuple, Callable
+from typing import List, Dict, Tuple, Callable, Optional
 
 #import pdb
 #pdb.set_trace()
@@ -561,7 +561,11 @@ DAG_ID = {dag_id!r}
 DESIGN_NAME = {design_name!r}
 TOP_MODULE = {top_module!r}
 ENV_CONFS = {env_confs!r}
-PROJ_CONFS = {proj_confs!r}
+# Per-tool config bundles: {{tools_name: [pdk, tool, design configs...]}}.
+# Tools_name matches the file stem of e2e/configs-tool/<name>.yml.
+PROJ_CONFS_BY_TOOLS = {proj_confs_by_tools!r}
+DEFAULT_TOOLS = {default_tools!r}
+TOOLS_CHOICES = sorted(PROJ_CONFS_BY_TOOLS.keys())
 OBJ_DIR_DEFAULT = {obj_dir!r}
 
 
@@ -569,10 +573,23 @@ def _pin_design_env() -> None:
     os.environ["design"] = DESIGN_NAME
 
 
+def _resolve_proj_confs(tools_choice):
+    if tools_choice in PROJ_CONFS_BY_TOOLS:
+        return PROJ_CONFS_BY_TOOLS[tools_choice]
+    print(f"Unknown tools={{tools_choice!r}}; falling back to {{DEFAULT_TOOLS!r}}")
+    return PROJ_CONFS_BY_TOOLS[DEFAULT_TOOLS]
+
+
 from hammer.shell.hammer_vlsi import AIRFlow, run_cli_driver  # noqa: E402
 
 
 class AIRFlow_generated(AIRFlow):
+    def __init__(self, context=None, proj_confs=None):
+        super().__init__(context=context)
+        self.proj_confs = (
+            proj_confs if proj_confs is not None else PROJ_CONFS_BY_TOOLS[DEFAULT_TOOLS]
+        )
+
     def syn_par(self) -> None:
         sys.argv = [
             "hammer-vlsi",
@@ -581,7 +598,7 @@ class AIRFlow_generated(AIRFlow):
         ]
         for e in ENV_CONFS:
             sys.argv.extend(["-e", e])
-        for p in PROJ_CONFS:
+        for p in self.proj_confs:
             sys.argv.extend(["-p", p])
         if self.extra:
             sys.argv.extend(["-p", self.extra])
@@ -601,6 +618,13 @@ class AIRFlow_generated(AIRFlow):
         "clean":   Param(default=False, type="boolean", title="Clean Build Directory"),
         "build":   Param(default=True,  type="boolean", title="Build Design"),
         "syn_par": Param(default=True,  type="boolean", title="Synthesis + Place-and-Route"),
+        "tools":   Param(
+            default=DEFAULT_TOOLS,
+            type="string",
+            enum=TOOLS_CHOICES,
+            title="Tool config",
+            description="Which configs-tool/<name>.yml to use for this run.",
+        ),
     }},
     render_template_as_native_obj=True,
     description="Auto-generated Hammer syn_par DAG for " + DESIGN_NAME,
@@ -654,7 +678,10 @@ def create_generated_dag():
     def syn_par(**context):
         _pin_design_env()
         if get_param(context, "syn_par", True):
-            AIRFlow_generated(context=context).syn_par()
+            tools_choice = get_param(context, "tools", DEFAULT_TOOLS)
+            proj_confs = _resolve_proj_confs(tools_choice)
+            print(f"Tools choice: {{tools_choice!r}}; first proj_conf={{proj_confs[0]!r}}")
+            AIRFlow_generated(context=context, proj_confs=proj_confs).syn_par()
         else:
             raise AirflowSkipException("syn_par skipped")
 
@@ -729,7 +756,11 @@ DAG_ID = {dag_id!r}
 DESIGN_NAME = {design_name!r}
 TOP_MODULE = {top_module!r}
 ENV_CONFS = {env_confs!r}
-PROJ_CONFS = {proj_confs!r}
+# Per-tool config bundles: {{tools_name: [pdk, tool, design configs...]}}.
+# Tools_name matches the file stem of e2e/configs-tool/<name>.yml.
+PROJ_CONFS_BY_TOOLS = {proj_confs_by_tools!r}
+DEFAULT_TOOLS = {default_tools!r}
+TOOLS_CHOICES = sorted(PROJ_CONFS_BY_TOOLS.keys())
 OBJ_DIR_DEFAULT = {obj_dir!r}
 
 # {{module: [child, ...]}} — children whose par-output feeds this module's syn input.
@@ -741,10 +772,23 @@ def _pin_design_env() -> None:
     os.environ["design"] = DESIGN_NAME
 
 
+def _resolve_proj_confs(tools_choice):
+    if tools_choice in PROJ_CONFS_BY_TOOLS:
+        return PROJ_CONFS_BY_TOOLS[tools_choice]
+    print(f"Unknown tools={{tools_choice!r}}; falling back to {{DEFAULT_TOOLS!r}}")
+    return PROJ_CONFS_BY_TOOLS[DEFAULT_TOOLS]
+
+
 from hammer.shell.hammer_vlsi import AIRFlow, run_cli_driver  # noqa: E402
 
 
 class AIRFlow_hier(AIRFlow):
+    def __init__(self, context=None, proj_confs=None):
+        super().__init__(context=context)
+        self.proj_confs = (
+            proj_confs if proj_confs is not None else PROJ_CONFS_BY_TOOLS[DEFAULT_TOOLS]
+        )
+
     def _run(self, action, extra=None, output=None):
         sys.argv = [
             "hammer-vlsi",
@@ -753,7 +797,7 @@ class AIRFlow_hier(AIRFlow):
         ]
         for e in ENV_CONFS:
             sys.argv.extend(["-e", e])
-        for p in PROJ_CONFS:
+        for p in self.proj_confs:
             sys.argv.extend(["-p", p])
         if extra:
             sys.argv.extend(extra)
@@ -820,6 +864,13 @@ class AIRFlow_hier(AIRFlow):
         "par":     Param(default=True,  type="boolean", title="Place and Route (all modules)"),
         "drc":     Param(default=False, type="boolean", title="DRC (top module only)"),
         "lvs":     Param(default=False, type="boolean", title="LVS (top module only)"),
+        "tools":   Param(
+            default=DEFAULT_TOOLS,
+            type="string",
+            enum=TOOLS_CHOICES,
+            title="Tool config",
+            description="Which configs-tool/<name>.yml to use for this run.",
+        ),
     }},
     render_template_as_native_obj=True,
     description="Auto-generated Hammer hierarchical DAG for " + DESIGN_NAME,
@@ -831,6 +882,11 @@ def create_generated_dag():
         if name in context.get("params", {{}}):
             return context["params"][name]
         return default
+
+    def _flow(context):
+        tools_choice = gp(context, "tools", DEFAULT_TOOLS)
+        proj_confs = _resolve_proj_confs(tools_choice)
+        return AIRFlow_hier(context=context, proj_confs=proj_confs)
 
     @task.branch(trigger_rule=TriggerRule.ALL_SUCCESS)
     def start(**context):
@@ -844,7 +900,7 @@ def create_generated_dag():
     def clean(**context):
         _pin_design_env()
         if gp(context, "clean", False):
-            flow = AIRFlow_hier(context=context)
+            flow = _flow(context)
             if os.path.exists(flow.OBJ_DIR):
                 subprocess.run(f"rm -rf {{flow.OBJ_DIR}} hammer-vlsi-*.log", shell=True, check=True)
 
@@ -852,7 +908,7 @@ def create_generated_dag():
     def build(**context):
         _pin_design_env()
         if gp(context, "build", True):
-            AIRFlow_hier(context=context).build()
+            _flow(context).build()
         else:
             raise AirflowSkipException("build skipped")
 
@@ -881,7 +937,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "syn", True):
                 raise AirflowSkipException(f"syn skipped for {{module}}")
-            AIRFlow_hier(context=context).syn(module, with_hier_input=has_children)
+            _flow(context).syn(module, with_hier_input=has_children)
         return _t
 
     def _make_syn_to_par(module):
@@ -890,7 +946,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "par", True):
                 raise AirflowSkipException(f"syn-to-par skipped for {{module}}")
-            AIRFlow_hier(context=context).syn_to_par(module)
+            _flow(context).syn_to_par(module)
         return _t
 
     def _make_par(module):
@@ -899,7 +955,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "par", True):
                 raise AirflowSkipException(f"par skipped for {{module}}")
-            AIRFlow_hier(context=context).par(module)
+            _flow(context).par(module)
         return _t
 
     def _make_hps(module, children):
@@ -908,7 +964,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "syn", True):
                 raise AirflowSkipException(f"hier-par-to-syn skipped for {{module}}")
-            AIRFlow_hier(context=context).hier_par_to_syn(module, children)
+            _flow(context).hier_par_to_syn(module, children)
         return _t
 
     def _make_par_to_drc(module):
@@ -917,7 +973,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "drc", False):
                 raise AirflowSkipException(f"par-to-drc skipped for {{module}}")
-            AIRFlow_hier(context=context).par_to_drc(module)
+            _flow(context).par_to_drc(module)
         return _t
 
     def _make_drc(module):
@@ -926,7 +982,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "drc", False):
                 raise AirflowSkipException(f"drc skipped for {{module}}")
-            AIRFlow_hier(context=context).drc(module)
+            _flow(context).drc(module)
         return _t
 
     def _make_par_to_lvs(module):
@@ -935,7 +991,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "lvs", False):
                 raise AirflowSkipException(f"par-to-lvs skipped for {{module}}")
-            AIRFlow_hier(context=context).par_to_lvs(module)
+            _flow(context).par_to_lvs(module)
         return _t
 
     def _make_lvs(module):
@@ -944,7 +1000,7 @@ def create_generated_dag():
             _pin_design_env()
             if not gp(context, "lvs", False):
                 raise AirflowSkipException(f"lvs skipped for {{module}}")
-            AIRFlow_hier(context=context).lvs(module)
+            _flow(context).lvs(module)
         return _t
 
     start_t = start()
@@ -1005,7 +1061,8 @@ def _build_airflow_dag_flat(
     obj_dir: str,
     top_module: str,
     env_confs: List[str],
-    proj_confs: List[str],
+    proj_confs_by_tools: Dict[str, List[str]],
+    default_tools: str,
     design_name: str,
     dag_id: str,
 ) -> None:
@@ -1014,7 +1071,8 @@ def _build_airflow_dag_flat(
         design_name=design_name,
         top_module=top_module,
         env_confs=env_confs,
-        proj_confs=proj_confs,
+        proj_confs_by_tools=proj_confs_by_tools,
+        default_tools=default_tools,
         obj_dir=obj_dir,
     )
     _write_dag(dag_file_for(obj_dir), dag_text, design_name, dag_id, driver, append_error_func)
@@ -1026,7 +1084,8 @@ def _build_airflow_dag_hier(
     obj_dir: str,
     top_module: str,
     env_confs: List[str],
-    proj_confs: List[str],
+    proj_confs_by_tools: Dict[str, List[str]],
+    default_tools: str,
     design_name: str,
     dag_id: str,
     dependency_graph: dict,
@@ -1043,7 +1102,8 @@ def _build_airflow_dag_hier(
         design_name=design_name,
         top_module=top_module,
         env_confs=env_confs,
-        proj_confs=proj_confs,
+        proj_confs_by_tools=proj_confs_by_tools,
+        default_tools=default_tools,
         obj_dir=obj_dir,
         dep_graph=dep_graph,
     )
@@ -1084,7 +1144,12 @@ def _write_dag(
         print(f"Or set vlsi.core.airflow_dags_folder in your config and re-run build.")
 
 
-def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], None]) -> dict:
+def build_airflow_dag(
+    driver: HammerDriver,
+    append_error_func: Callable[[str], None],
+    proj_confs_by_tools: Optional[Dict[str, List[str]]] = None,
+    default_tools: Optional[str] = None,
+) -> dict:
     dependency_graph = driver.get_hierarchical_dependency_graph()
 
     obj_dir = os.path.realpath(driver.obj_dir)
@@ -1095,20 +1160,29 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     dag_id = driver.database.get_setting("vlsi.core.airflow_dag_id", nullvalue="") \
         or f"Hammer_{design_name}"
 
+    # When the caller (e.g. hammer-pd-store make-dag) didn't pass an explicit
+    # per-tool bundle, fall back to a single-option dict so the generated DAG
+    # still has the `tools` dropdown but only one choice in it.
+    if proj_confs_by_tools is None:
+        proj_confs_by_tools = {"default": proj_confs}
+        default_tools = "default"
+    elif default_tools is None or default_tools not in proj_confs_by_tools:
+        default_tools = sorted(proj_confs_by_tools.keys())[0]
+
     if dependency_graph:
-        # Hier flow: use the configured hierarchical top_module if available,
-        # otherwise fall back to whatever syn.inputs.top_module says.
         hier_top = driver.database.get_setting(
             "vlsi.inputs.hierarchical.top_module", nullvalue=""
         ) or top_module
         _build_airflow_dag_hier(
             driver, append_error_func, obj_dir, hier_top,
-            env_confs, proj_confs, design_name, dag_id, dependency_graph,
+            env_confs, proj_confs_by_tools, default_tools,
+            design_name, dag_id, dependency_graph,
         )
     else:
         _build_airflow_dag_flat(
             driver, append_error_func, obj_dir, top_module,
-            env_confs, proj_confs, design_name, dag_id,
+            env_confs, proj_confs_by_tools, default_tools,
+            design_name, dag_id,
         )
 
     return dependency_graph
