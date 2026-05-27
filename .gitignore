@@ -35,6 +35,13 @@ standalone_admin_password.txt
 dags/*.py
 !dags/pd_store_demo.py
 
+# Per-design configs: gitignore auto-generated ones from design-register.
+# Only the hand-written canonical templates stay tracked.
+e2e/configs-design/*/
+!e2e/configs-design/gcd/
+!e2e/configs-design/pass/
+!e2e/configs-design/sram_wrapper_sky130/
+
 # IDE
 .vscode/
 .idea/
