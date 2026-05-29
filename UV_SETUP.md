@@ -178,21 +178,22 @@ That's it — no Python bootstrap, no pip, no wheel needed.
 `psycopg2` (the real PostgreSQL adapter, **not** `psycopg2-binary`) must be compiled from C source. This requires `pg_config` and the PostgreSQL development headers, which are **not** installed system-wide on BWRC servers. We extract them locally from the `libpq-devel` RPM — no root access needed.
 
 ```bash
-# Create a temp directory and download the RPMs
+# Create a temp directory and download the RPMs explicitly. We do NOT
+# use `--resolve` here: BWRC servers already have libpq installed
+# system-wide, and `--resolve` would skip downloading it (it only fetches
+# deps that aren't already present). That leaves us with libpq-devel but
+# no libpq.so.5 to symlink to, and the psycopg2 build fails at link time.
 mkdir -p /tmp/pg_build_$$
 cd /tmp/pg_build_$$
-dnf download --resolve libpq-devel
+dnf download libpq-devel
+dnf download libpq
 
 # Extract the devel RPM (contains pg_config + headers)
 mkdir -p ~/pg_local
 rpm2cpio libpq-devel-*x86_64.rpm | (cd ~/pg_local && cpio -idmv)
 
 # Extract the libpq RPM (contains libpq.so shared libraries)
-# Find the non-devel libpq RPM filename, then extract it
-LIBPQ_RPM=$(ls libpq-[0-9]*x86_64.rpm 2>/dev/null | head -1)
-if [ -n "$LIBPQ_RPM" ]; then
-    rpm2cpio "$LIBPQ_RPM" | (cd ~/pg_local && cpio -idmv)
-fi
+rpm2cpio libpq-[0-9]*x86_64.rpm | (cd ~/pg_local && cpio -idmv)
 
 # Create the linker symlink
 ln -sf libpq.so.5 ~/pg_local/usr/lib64/libpq.so
@@ -1081,6 +1082,15 @@ uv pip install psycopg2==2.9.11 --no-binary psycopg2 --reinstall
 # 3. Verify it's the real psycopg2 (compiled from C source)
 python3 -c "import psycopg2; print('psycopg2:', psycopg2.__version__)"
 # Should show: 2.9.11 (dt dec pq3 ext lo64)
+```
+
+**Error**: `cannot find -lpq` or `libpq.so: cannot open shared object file`
+
+You ran an older version of Step 1.5 that used `dnf download --resolve libpq-devel`. On BWRC the system already has `libpq` installed, so `--resolve` skipped downloading it, leaving `~/pg_local/usr/lib64/libpq.so` as a dangling symlink. Re-run Step 1.5 (current version) — it explicitly downloads both `libpq-devel` and `libpq` so the local copy is complete:
+
+```bash
+rm -rf ~/pg_local
+# ...then re-run Step 1.5
 ```
 
 **If `dnf download` doesn't work** in Step 1.5, contact:
