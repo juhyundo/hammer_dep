@@ -75,7 +75,6 @@ commands =
 """
 
 [tool.pylint.format]
-# Maximum number of characters on a single line.
 max-line-length = 120
 
 [tool.pylint.reports]
@@ -83,10 +82,13 @@ output-format = "text"
 reports = true
 
 [tool.pylint."messages control"]
+<<<<<<< Updated upstream
 # Disable no-else-return since it's sometimes clearer to use else
 # Also emulates a functional programming style
 # Disable len-as-condition since len(lst) == 0 is more clear on types
 # where as if <var> is confusing since it's not clear what <var> is.
+=======
+>>>>>>> Stashed changes
 disable = ["no-else-return", "len-as-condition"]
 
 [tool.pyright]

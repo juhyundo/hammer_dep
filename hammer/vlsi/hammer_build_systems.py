@@ -1,7 +1,5 @@
 #  hammer_build_systems.py
 #  Class containing all the methods to create VLSI flow build system infrastructure
-#
-#  See LICENSE for licence details.
 
 from .driver import HammerDriver
 
@@ -10,513 +8,410 @@ import sys
 import textwrap
 from typing import List, Dict, Tuple, Callable
 
-#import pdb
-#pdb.set_trace()
-
 def build_noop(driver: HammerDriver, append_error_func: Callable[[str], None]) -> dict:
-    """
-    Do nothing, just return the dependency graph.
-
-    :param driver: The HammerDriver
-    :return: The dependency graph
-    """
     dependency_graph = driver.get_hierarchical_dependency_graph()
     return dependency_graph
 
 
 def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None]) -> dict:
-    #pdb.set_trace()    #[Trace Path 1]
-    """
-    Build a Makefile include in the obj_dir called hammer.d. This is intended to be dynamically
-    created and included into a top-level Makefile.
-
-    The Makefile will contain targets for the following hammer actions, as well as any necessary
-    bridge actions (xyz-to-abc):
-        - pcb
-        - syn
-        - par
-        - drc
-        - lvs
-        - sim-rtl
-        - sim-syn
-        - sim-par
-        - power-rtl
-        - power-syn
-        - power-par
-        - formal-syn
-        - formal-par
-        - timing-syn
-        - timing-par
-
-    For hierarchical flows, the syn, par, drc, lvs, sim, power, formal, and timing actions will all be suffixed with the name
-    of the hierarchical modules (e.g. syn-Top, syn-SubModA, par-SubModA, etc.). The appropriate
-    dependencies and bridge actions are automatically generated from the hierarchy provided in the
-    Hammer IR.
-
-    For actions that can be run at multiple points in the flow such as sim, the name of the target
-    will include the action it is being run after (e.g. sim-syn, sim-par, etc.). With no suffix
-    an rtl level simulation will be run.
-
-    Additionally, "redo" steps are created (e.g. redo-par for flat designs or redo-par-Top for
-    hierarchical), which allow the user to bypass the normal Makefile dependencies and force a
-    rerun of a particular task. This is useful when the user wants to change an input Hammer IR file
-    knowing it will not affect intermediate steps in the design.
-
-    An example use case for integrating this file into a top flow is provided below. Be sure to use
-    real tabs if copying this snippet!
-
-    ```
-    TOP ?= MyTop
-    OBJ_DIR ?= $(abspath build-$(TOP))
-    INPUT_CONFS ?= foo.yaml bar.yaml baz.yaml
-
-    HAMMER_EXEC ?= ./mychip-vlsi.py
-
-    .PHONY: all
-    all: drc-$(TOP) lvs-$(TOP)
-
-    GENERATED_CONF = $(OBJ_DIR)/input.yaml
-
-    $(GENERATED_CONF):
-        echo "synthesis.inputs.top_module: $(TOP)" > $@
-        echo "pcb.inputs.top_module: $(TOP)" >> $@
-
-    $(OBJ_DIR)/hammer.d: $(GENERATED_CONF)
-        $(HAMMER_EXEC) -e env.yaml $(foreach x,$(INPUT_CONFS) $(GENERATED_CONF), -p $(x)) --obj_dir $(OBJ_DIR) build
-
-    include $(OBJ_DIR)/hammer.d
-    ```
-
-    The generated Makefile has a few variables that are set if absent. This allows the user to override them without
-    modifying hammer.d. They are listed as follows:
-        - HAMMER_EXEC: This sets the actual python executable containing the HammerDriver main() function. It is set to
-          the executable used to generate the Makefile by default.
-        - HAMMER_DEPENDENCIES: The list of dependences to use for the initial syn and pcb targets. It is set to the set
-          of all input configurations, environment settings, and input files by default.
-        - HAMMER_*_DEPENDENCIES: There is a version of this variable for each action. It allows the user to have more
-          fine grained depencies compared to the blunt HAMMER_DEPENDENCIES. It is set as a dependency for the respective
-          action. Often used with clearing the global HAMMER_DEPENDENCIES.
-        - HAMMER_EXTRA_ARGS: This is passed to the Hammer executable for all targets. This is unset by default.
-          Its primary uses are for adding additional configuration files with -p, --to_step/until_step, and/or --from_step/
-          after_step options. An example use is "make redo-par-Top HAMMER_EXTRA_ARGS="-p patch.yaml --from_step placement".
-
-    :param driver: The HammerDriver
-    :return: The dependency graph
-    """
     dependency_graph = driver.get_hierarchical_dependency_graph()
-    #pdb.set_trace()
-    makefile = os.path.join(driver.obj_dir, "hammer.d")
-    default_dependencies = driver.options.project_configs + driver.options.environment_configs
-    default_dependencies.extend(list(driver.database.get_setting("synthesis.inputs.input_files", [])))
-    # Resolve the canonical path for each dependency
-    default_dependencies = [os.path.realpath(x) for x in default_dependencies]
-    output = "HAMMER_EXEC ?= {}\n".format(os.path.realpath(sys.argv[0]))
-    output += "HAMMER_DEPENDENCIES ?= {}\n\n".format(" ".join(default_dependencies))
-    syn_deps = "$(HAMMER_DEPENDENCIES)"
-    # Get the confs passed into this execution
-    env_confs = " ".join(["-e " + os.path.realpath(x) for x in driver.options.environment_configs])
-    proj_confs = " ".join(["-p " + os.path.realpath(x) for x in driver.options.project_configs])
+    dag_file = os.path.join(driver.obj_dir, "hammer_dag.py")
+    
+    env_confs = [os.path.realpath(x) for x in driver.options.environment_configs]
+    proj_confs = [os.path.realpath(x) for x in driver.options.project_configs]
     obj_dir = os.path.realpath(driver.obj_dir)
+    hammer_exec = os.path.realpath(sys.argv[0])
 
-    # Global steps that are the same for hier or flat
-    pcb_run_dir = os.path.join(obj_dir, "pcb-rundir")
-    pcb_out = os.path.join(pcb_run_dir, "pcb-output-full.json")
+    env_str = ", ".join([f"'{x}'" for x in env_confs])
+    proj_str = ", ".join([f"'{x}'" for x in proj_confs])
+
+    # 1. Base DAG Header & Safe Execution Subprocess Wrapper
+    output = textwrap.dedent(f"""\
+        # Auto-generated Airflow DAG by Hammer Build System
+        import os
+        import sys
+        import pendulum
+        import subprocess
+        from datetime import datetime, timedelta
+        from airflow.decorators import task, dag
+        from airflow.models import Param
+        from airflow.utils.task_group import TaskGroup
+        from airflow.utils.trigger_rule import TriggerRule
+        from airflow.exceptions import AirflowSkipException, AirflowFailException
+
+        HAMMER_EXEC = "{hammer_exec}"
+        OBJ_DIR = "{obj_dir}"
+        ENV_CONFIGS = [{env_str}]
+        PROJ_CONFIGS = [{proj_str}]
+
+        default_args = {{
+            'owner': 'hammer',
+            'start_date': pendulum.datetime(2026, 1, 1, tz="UTC"),
+            'retries': 0,
+        }}
+
+        def run_hammer_action(action, extra_flags=None):
+            \"\"\"
+            Spawns a clean python subprocess executing the target stage.
+            \"\"\"
+            print(f"Running active Hammer Action: {{action}}")
+            cmd = [sys.executable, HAMMER_EXEC]
+            for env in ENV_CONFIGS:
+                cmd += ["-e", env]
+            for proj in PROJ_CONFIGS:
+                cmd += ["-p", proj]
+            if extra_flags:
+                cmd += extra_flags
+            cmd += ["--obj_dir", OBJ_DIR, action]
+            
+            print(f"Executing Process Command: {{' '.join(cmd)}}")
+            res = subprocess.run(cmd)
+            if res.returncode != 0:
+                raise AirflowFailException(f"Hammer action {{action}} failed with exit code {{res.returncode}}")
+    """)
+
+    # 2. Re-implement tasks matching context['dag_run'].conf configuration validation strategy
     output += textwrap.dedent("""
-        ####################################################################################
-        ## Global steps temp
-        ####################################################################################
-        .PHONY: pcb
-        pcb: {pcb_out}
-
-        {pcb_out}: {syn_deps}
-        \t$(HAMMER_EXEC) {env_confs} {all_inputs} --obj_dir {obj_dir} pcb
-
-        """.format(pcb_out=pcb_out, syn_deps=syn_deps, env_confs=env_confs, all_inputs=proj_confs, obj_dir=obj_dir))
-
-    make_text = textwrap.dedent("""
-        ####################################################################################
-        ## Steps for {mod}
-        ####################################################################################
-        .PHONY: sim-rtl{suffix} syn{suffix} syn-to-sim{suffix} sim-syn{suffix} syn-to-par{suffix} par{suffix} par-to-sim{suffix} sim-par{suffix} sim-par-to-power{suffix} par-to-power{suffix} power-par{suffix} power-rtl{suffix} sim-rtl-to-power{suffix} sim-syn-to-power{suffix} syn-to-power{suffix} power-syn{suffix} par-to-drc{suffix} drc{suffix} par-to-lvs{suffix} lvs{suffix} syn-to-formal{suffix} formal-syn{suffix} par-to-formal{suffix} formal-par{suffix} syn-to-timing{suffix} timing-syn{suffix} par-to-timing{suffix} timing-par{suffix}
-
-        sim-rtl{suffix}          : {sim_rtl_out}
-        syn{suffix}              : {syn_out}
-
-        syn-to-sim{suffix}       : {sim_syn_in}
-        sim-syn{suffix}          : {sim_syn_out}
-
-        syn-to-par{suffix}       : {par_in}
-        par{suffix}              : {par_out}
-
-        par-to-sim{suffix}       : {sim_par_in}
-        sim-par{suffix}          : {sim_par_out}
-
-        sim-par-to-power{suffix} : {power_sim_par_in}
-        par-to-power{suffix}     : {power_par_in}
-        power-par{suffix}        : {power_par_out}
-
-        sim-rtl-to-power{suffix} : {power_sim_rtl_in}
-        power-rtl{suffix}        : {power_rtl_out}
-
-        sim-syn-to-power{suffix} : {power_sim_syn_in}
-        syn-to-power{suffix}     : {power_syn_in}
-        power-syn{suffix}        : {power_syn_out}
-
-        par-to-drc{suffix}       : {drc_in}
-        drc{suffix}              : {drc_out}
-
-        par-to-lvs{suffix}       : {lvs_in}
-        lvs{suffix}              : {lvs_out}
-
-        syn-to-formal{suffix}    : {formal_syn_in}
-        formal-syn{suffix}       : {formal_syn_out}
-
-        par-to-formal{suffix}    : {formal_par_in}
-        formal-par{suffix}       : {formal_par_out}
-
-        syn-to-timing{suffix}    : {timing_syn_in}
-        timing-syn{suffix}       : {timing_syn_out}
-
-        par-to-timing{suffix}    : {timing_par_in}
-        timing-par{suffix}       : {timing_par_out}
-
-        {par_to_syn}
-
-        {sim_rtl_out}: {syn_deps} $(HAMMER_SIM_RTL_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} {p_sim_rtl_in} $(HAMMER_EXTRA_ARGS) --sim_rundir {sim_rtl_run_dir} --obj_dir {obj_dir} sim{suffix}
-
-        {power_sim_rtl_in}: {sim_rtl_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_rtl_out} $(HAMMER_EXTRA_ARGS) -o {power_sim_rtl_in} --obj_dir {obj_dir} sim-to-power
-
-        {power_rtl_out}: {power_sim_rtl_in} $(HAMMER_POWER_RTL_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {power_sim_rtl_in} $(HAMMER_EXTRA_ARGS) --power_rundir {power_rtl_run_dir} --obj_dir {obj_dir} power{suffix}
-
-        {syn_out}: {syn_deps} $(HAMMER_SYN_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} {p_syn_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} syn{suffix}
-
-        {sim_syn_in}: {syn_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {sim_syn_in} --obj_dir {obj_dir} syn-to-sim
-
-        {sim_syn_out}: {sim_syn_in} $(HAMMER_SIM_SYN_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_syn_in} $(HAMMER_EXTRA_ARGS) --sim_rundir {sim_syn_run_dir} --obj_dir {obj_dir} sim{suffix}
-
-        {power_sim_syn_in}: {sim_syn_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_syn_out} $(HAMMER_EXTRA_ARGS) -o {power_sim_syn_in} --obj_dir {obj_dir} sim-to-power
-
-        {power_syn_in}: {syn_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {power_syn_in} --obj_dir {obj_dir} syn-to-power
-
-        {power_syn_out}: {power_sim_syn_in} {power_syn_in} $(HAMMER_POWER_SYN_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {power_sim_syn_in} -p {power_syn_in} $(HAMMER_EXTRA_ARGS) --power_rundir {power_syn_run_dir} --obj_dir {obj_dir} power{suffix}
-
-        {par_in}: {syn_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {par_in} --obj_dir {obj_dir} syn-to-par
-
-        {par_out}: {par_in} $(HAMMER_PAR_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {par_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} par{suffix}
-
-        {sim_par_in}: {par_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {sim_par_in} --obj_dir {obj_dir} par-to-sim
-
-        {sim_par_out}: {sim_par_in} $(HAMMER_SIM_PAR_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_par_in} $(HAMMER_EXTRA_ARGS) --sim_rundir {sim_par_run_dir} --obj_dir {obj_dir} sim{suffix}
-
-        {power_sim_par_in}: {sim_par_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_par_out} $(HAMMER_EXTRA_ARGS) -o {power_sim_par_in} --obj_dir {obj_dir} sim-to-power
-
-        {power_par_in}: {par_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {power_par_in} --obj_dir {obj_dir} par-to-power
-
-        {power_par_out}: {power_sim_par_in} {power_par_in} $(HAMMER_POWER_PAR_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {power_sim_par_in} -p {power_par_in} $(HAMMER_EXTRA_ARGS) --power_rundir {power_par_run_dir} --obj_dir {obj_dir} power{suffix}
-
-        {drc_in}: {par_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {drc_in} --obj_dir {obj_dir} par-to-drc
-
-        {drc_out}: {drc_in} $(HAMMER_DRC_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {drc_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} drc{suffix}
-
-        {lvs_in}: {par_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {lvs_in} --obj_dir {obj_dir} par-to-lvs
-
-        {lvs_out}: {lvs_in} $(HAMMER_LVS_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {lvs_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} lvs{suffix}
-
-        {formal_syn_in}: {syn_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {formal_syn_in} --obj_dir {obj_dir} syn-to-formal
-
-        {formal_syn_out}: {formal_syn_in} $(HAMMER_FORMAL_SYN_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {formal_syn_in} $(HAMMER_EXTRA_ARGS) --formal_rundir {formal_syn_run_dir} --obj_dir {obj_dir} formal{suffix}
-
-        {formal_par_in}: {par_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {formal_par_in} --obj_dir {obj_dir} par-to-formal
-
-        {formal_par_out}: {formal_syn_in} $(HAMMER_FORMAL_PAR_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {formal_par_in} $(HAMMER_EXTRA_ARGS) --formal_rundir {formal_par_run_dir} --obj_dir {obj_dir} formal{suffix}
-
-        {timing_syn_in}: {syn_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {timing_syn_in} --obj_dir {obj_dir} syn-to-timing
-
-        {timing_syn_out}: {timing_syn_in} $(HAMMER_TIMING_SYN_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {timing_syn_in} $(HAMMER_EXTRA_ARGS) --timing_rundir {timing_syn_run_dir} --obj_dir {obj_dir} timing{suffix}
-
-        {timing_par_in}: {par_out}
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {timing_par_in} --obj_dir {obj_dir} par-to-timing
-
-        {timing_par_out}: {timing_syn_in} $(HAMMER_TIMING_PAR_DEPENDENCIES)
-        \t$(HAMMER_EXEC) {env_confs} -p {timing_par_in} $(HAMMER_EXTRA_ARGS) --timing_rundir {timing_par_run_dir} --obj_dir {obj_dir} timing{suffix}
-
-        # Redo steps
-        # These intentionally break the dependency graph, but allow the flexibility to rerun a step after changing a config.
-        # Hammer doesn't know what settings impact synthesis only, e.g., so these are for power-users who "know better."
-        # The HAMMER_EXTRA_ARGS variable allows patching in of new configurations with -p or using --to_step or --from_step, for example.
-        .PHONY: redo-sim-rtl{suffix} redo-sim-rtl-to-power{suffix} redo-syn{suffix} redo-syn-to-sim{suffix} redo-syn-to-power{suffix} redo-sim-syn{suffix} redo-sim-syn-to-power{suffix} redo-syn-to-par{suffix} redo-par{suffix} redo-par-to-sim{suffix} redo-sim-par{suffix} redo-sim-par-to-power{suffix} redo-par-to-power{suffix} redo-power-par{suffix} redo-par-to-drc{suffix} redo-drc{suffix} redo-par-to-lvs{suffix} redo-lvs{suffix} redo-syn-to-formal{suffix} redo-formal-syn{suffix} redo-par-to-formal{suffix} redo-formal-par{suffix} redo-syn-to-timing{suffix} redo-timing-syn{suffix} redo-par-to-timing{suffix} redo-timing-par{suffix}
-
-        redo-sim-rtl{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} {p_sim_rtl_in} $(HAMMER_EXTRA_ARGS) --sim_rundir {sim_rtl_run_dir} --obj_dir {obj_dir} sim{suffix}
-
-        redo-sim-rtl-to-power{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_rtl_out} $(HAMMER_EXTRA_ARGS) -o {power_sim_rtl_in} --obj_dir {obj_dir} sim-to-power
-
-        redo-power-rtl{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {power_sim_rtl_in} $(HAMMER_EXTRA_ARGS) --power_rundir {power_rtl_run_dir} --obj_dir {obj_dir} power{suffix}
-
-        redo-syn{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} {p_syn_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} syn{suffix}
-
-        redo-syn-to-sim{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {sim_syn_in} --obj_dir {obj_dir} syn-to-sim
-
-        redo-syn-to-power{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {power_syn_in} --obj_dir {obj_dir} syn-to-power
-
-        redo-sim-syn{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_syn_in} $(HAMMER_EXTRA_ARGS) --sim_rundir {sim_syn_run_dir} --obj_dir {obj_dir} sim{suffix}
-
-        redo-sim-syn-to-power{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_syn_out} $(HAMMER_EXTRA_ARGS) -o {power_sim_syn_in} --obj_dir {obj_dir} sim-to-power
-
-        redo-syn-to-par{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {par_in} --obj_dir {obj_dir} syn-to-par
-
-        redo-power-syn{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {power_sim_syn_in} -p {power_syn_in} $(HAMMER_EXTRA_ARGS) --power_rundir {power_syn_run_dir} --obj_dir {obj_dir} power{suffix}
-
-        redo-par{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {par_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} par{suffix}
-
-        redo-par-to-sim{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {sim_par_in} --obj_dir {obj_dir} par-to-sim
-
-        redo-sim-par{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_par_in} $(HAMMER_EXTRA_ARGS) --sim_rundir {sim_par_run_dir} --obj_dir {obj_dir} sim{suffix}
-
-        redo-sim-par-to-power{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {sim_par_out} $(HAMMER_EXTRA_ARGS) -o {power_sim_par_in} --obj_dir {obj_dir} sim-to-power
-
-        redo-par-to-power{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {power_par_in} --obj_dir {obj_dir} par-to-power
-
-        redo-power-par{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {power_sim_par_in} -p {power_par_in} $(HAMMER_EXTRA_ARGS) --power_rundir {power_par_run_dir} --obj_dir {obj_dir} power{suffix}
-
-        redo-par-to-drc{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {drc_in} --obj_dir {obj_dir} par-to-drc
-
-        redo-drc{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {drc_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} drc{suffix}
-
-        redo-par-to-lvs{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {lvs_in} --obj_dir {obj_dir} par-to-lvs
-
-        redo-lvs{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {lvs_in} $(HAMMER_EXTRA_ARGS) --obj_dir {obj_dir} lvs{suffix}
-
-        redo-syn-to-formal{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {formal_syn_in} --obj_dir {obj_dir} syn-to-formal
-
-        redo-formal-syn{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {formal_syn_in} $(HAMMER_EXTRA_ARGS) --formal_rundir {formal_syn_run_dir} --obj_dir {obj_dir} formal{suffix}
-
-        redo-par-to-formal{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {formal_par_in} --obj_dir {obj_dir} par-to-formal
-
-        redo-formal-par{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {formal_par_in} $(HAMMER_EXTRA_ARGS) --formal_rundir {formal_par_run_dir} --obj_dir {obj_dir} formal{suffix}
-
-        redo-syn-to-timing{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {syn_out} $(HAMMER_EXTRA_ARGS) -o {timing_syn_in} --obj_dir {obj_dir} syn-to-timing
-
-        redo-timing-syn{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {timing_syn_in} $(HAMMER_EXTRA_ARGS) --timing_rundir {timing_syn_run_dir} --obj_dir {obj_dir} timing{suffix}
-
-        redo-par-to-timing{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {par_out} $(HAMMER_EXTRA_ARGS) -o {timing_par_in} --obj_dir {obj_dir} par-to-timing
-
-        redo-timing-par{suffix}:
-        \t$(HAMMER_EXEC) {env_confs} -p {timing_par_in} $(HAMMER_EXTRA_ARGS) --timing_rundir {timing_par_run_dir} --obj_dir {obj_dir} timing{suffix}
-
-        """)
-
+        @task
+        def sim_rtl(suffix, run_dir, **context):
+            if context['dag_run'].conf.get('sim_rtl', False):
+                run_hammer_action(f"sim{suffix}", ["--sim_rundir", run_dir])
+            else:
+                raise AirflowSkipException("sim_rtl task skipped")
+
+        @task
+        def sim_to_power(**context):
+            if context['dag_run'].conf.get('power_rtl', False):
+                run_hammer_action("sim-to-power")
+            else:
+                raise AirflowSkipException("sim-to-power skipped")
+
+        @task
+        def power_rtl(suffix, run_dir, **context):
+            if context['dag_run'].conf.get('power_rtl', False):
+                run_hammer_action(f"power{suffix}", ["--power_rundir", run_dir])
+            else:
+                raise AirflowSkipException("power_rtl task skipped")
+
+        @task
+        def syn(suffix, **context):
+            if context['dag_run'].conf.get('syn', False):
+                run_hammer_action(f"syn{suffix}")
+            else:
+                raise AirflowSkipException("syn task skipped")
+
+        @task
+        def syn_to_sim(**context):
+            if context['dag_run'].conf.get('sim_syn', False):
+                run_hammer_action("syn-to-sim")
+            else:
+                raise AirflowSkipException("syn-to-sim skipped")
+
+        @task
+        def sim_syn(suffix, run_dir, **context):
+            if context['dag_run'].conf.get('sim_syn', False):
+                run_hammer_action(f"sim{suffix}", ["--sim_rundir", run_dir])
+            else:
+                raise AirflowSkipException("sim_syn task skipped")
+
+        @task
+        def syn_to_power(**context):
+            if context['dag_run'].conf.get('power_syn', False):
+                run_hammer_action("syn-to-power")
+            else:
+                raise AirflowSkipException("syn-to-power skipped")
+
+        @task
+        def sim_syn_to_power(**context):
+            if context['dag_run'].conf.get('power_syn', False):
+                run_hammer_action("sim-to-power")
+            else:
+                raise AirflowSkipException("sim_syn_to_power skipped")
+
+        @task
+        def power_syn(suffix, run_dir, **context):
+            if context['dag_run'].conf.get('power_syn', False):
+                run_hammer_action(f"power{suffix}", ["--power_rundir", run_dir])
+            else:
+                raise AirflowSkipException("power_syn task skipped")
+
+        @task
+        def syn_to_formal(**context):
+            if context['dag_run'].conf.get('formal_syn', False):
+                run_hammer_action("syn-to-formal")
+            else:
+                raise AirflowSkipException("syn-to-formal skipped")
+
+        @task
+        def formal_syn(suffix, **context):
+            if context['dag_run'].conf.get('formal_syn', False):
+                run_hammer_action(f"formal{suffix}")
+            else:
+                raise AirflowSkipException("formal_syn task skipped")
+
+        @task
+        def syn_to_timing(**context):
+            if context['dag_run'].conf.get('timing_syn', False):
+                run_hammer_action("syn-to-timing")
+            else:
+                raise AirflowSkipException("syn-to-timing skipped")
+
+        @task
+        def timing_syn(suffix, **context):
+            if context['dag_run'].conf.get('timing_syn', False):
+                run_hammer_action(f"timing{suffix}")
+            else:
+                raise AirflowSkipException("timing_syn task skipped")
+
+        @task
+        def syn_to_par(**context):
+            if context['dag_run'].conf.get('par', False):
+                run_hammer_action("syn-to-par")
+            else:
+                raise AirflowSkipException("syn-to-par skipped")
+
+        @task
+        def par(suffix, **context):
+            if context['dag_run'].conf.get('par', False):
+                run_hammer_action(f"par{suffix}")
+            else:
+                raise AirflowSkipException("par task skipped")
+
+        @task
+        def par_to_sim(**context):
+            if context['dag_run'].conf.get('sim_par', False):
+                run_hammer_action("par-to-sim")
+            else:
+                raise AirflowSkipException("par-to-sim skipped")
+
+        @task
+        def sim_par(suffix, run_dir, **context):
+            if context['dag_run'].conf.get('sim_par', False):
+                run_hammer_action(f"sim{suffix}", ["--sim_rundir", run_dir])
+            else:
+                raise AirflowSkipException("sim_par task skipped")
+
+        @task
+        def par_to_power(**context):
+            if context['dag_run'].conf.get('power_par', False):
+                run_hammer_action("par-to-power")
+            else:
+                raise AirflowSkipException("par-to-power skipped")
+
+        @task
+        def sim_par_to_power(**context):
+            if context['dag_run'].conf.get('power_par', False):
+                run_hammer_action("sim-to-power")
+            else:
+                raise AirflowSkipException("sim_par_to_power skipped")
+
+        @task
+        def power_par(suffix, run_dir, **context):
+            if context['dag_run'].conf.get('power_par', False):
+                run_hammer_action(f"power{suffix}", ["--power_rundir", run_dir])
+            else:
+                raise AirflowSkipException("power_par task skipped")
+
+        @task
+        def par_to_formal(**context):
+            if context['dag_run'].conf.get('formal_par', False):
+                run_hammer_action("par-to-formal")
+            else:
+                raise AirflowSkipException("par-to-formal skipped")
+
+        @task
+        def formal_par(suffix, **context):
+            if context['dag_run'].conf.get('formal_par', False):
+                run_hammer_action(f"formal{suffix}")
+            else:
+                raise AirflowSkipException("formal_par task skipped")
+
+        @task
+        def par_to_timing(**context):
+            if context['dag_run'].conf.get('timing_par', False):
+                run_hammer_action("par-to-timing")
+            else:
+                raise AirflowSkipException("par-to-timing skipped")
+
+        @task
+        def timing_par(suffix, **context):
+            if context['dag_run'].conf.get('timing_par', False):
+                run_hammer_action(f"timing{suffix}")
+            else:
+                raise AirflowSkipException("timing_par task skipped")
+
+        @task
+        def par_to_drc(**context):
+            if context['dag_run'].conf.get('drc', False):
+                run_hammer_action("par-to-drc")
+            else:
+                raise AirflowSkipException("par-to-drc skipped")
+
+        @task
+        def drc(suffix, **context):
+            if context['dag_run'].conf.get('drc', False):
+                run_hammer_action(f"drc{suffix}")
+            else:
+                raise AirflowSkipException("drc task skipped")
+
+        @task
+        def par_to_lvs(**context):
+            if context['dag_run'].conf.get('lvs', False):
+                run_hammer_action("par-to-lvs")
+            else:
+                raise AirflowSkipException("par-to-lvs skipped")
+
+        @task
+        def lvs(suffix, **context):
+            if context['dag_run'].conf.get('lvs', False):
+                run_hammer_action(f"lvs{suffix}")
+            else:
+                raise AirflowSkipException("lvs task skipped")
+
+        @task(task_id="hier_par_to_syn")
+        def hier_par_to_syn(**context):
+            run_hammer_action("hier-par-to-syn")
+    """)
+
+    # 3. Base Parameter Input Configuration mapping hammer_dag.py
+    output += textwrap.dedent("""
+        @dag(
+            dag_id='hammer_vlsi_flow',
+            default_args=default_args,
+            schedule=None,
+            catchup=False,
+            params={
+                'sim_rtl': Param(default=False, type='boolean', title='RTL Simulation'),
+                'power_rtl': Param(default=False, type='boolean', title='RTL Power Simulation'),
+                'syn': Param(default=False, type='boolean', title='Synthesis'),
+                'sim_syn': Param(default=False, type='boolean', title='Simulation Synthesis'),
+                'timing_syn': Param(default=False, type='boolean', title='Timing Synthesis'),
+                'formal_syn': Param(default=False, type='boolean', title='Formal Synthesis'),
+                'power_syn': Param(default=False, type='boolean', title='Power Synthesis'),
+                'par': Param(default=False, type='boolean', title='Place and Route'),
+                'drc': Param(default=False, type='boolean', title='Design Rule Check'),
+                'lvs': Param(default=False, type='boolean', title='Layout Versus Schematic'),
+                'sim_par': Param(default=False, type='boolean', title='Simulation Place and Route'),
+                'timing_par': Param(default=False, type='boolean', title='Timing Place and Route'),
+                'formal_par': Param(default=False, type='boolean', title='Formal Place and Route'),
+                'power_par': Param(default=False, type='boolean', title='Power Place and Route'),
+            },
+            render_template_as_native_obj=True
+        )
+        def hammer_dag():
+
+            @task(task_id="start")
+            def start(**context):
+                print("Starting Hammer Flow Pipeline Execution Orchestration...")
+
+            @task(task_id="exit_", trigger_rule=TriggerRule.NONE_FAILED)
+            def exit_():
+                print("Exiting flow safely.")
+
+            def create_module_pipeline(mod_name, suffix):
+                with TaskGroup(group_id=f"module_{mod_name or 'Top'}") as tg:
+                    sim_rtl_run = os.path.join(OBJ_DIR, f"sim-rtl-{mod_name}")
+                    power_rtl_run = os.path.join(OBJ_DIR, f"power-rtl-{mod_name}")
+                    sim_syn_run = os.path.join(OBJ_DIR, f"sim-syn-{mod_name}")
+                    power_syn_run = os.path.join(OBJ_DIR, f"power-syn-{mod_name}")
+                    sim_par_run = os.path.join(OBJ_DIR, f"sim-par-{mod_name}")
+                    power_par_run = os.path.join(OBJ_DIR, f"power-par-{mod_name}")
+
+                    # 1. RTL Simulation Track
+                    s_rtl = sim_rtl(suffix, sim_rtl_run)
+                    s_rtl_to_p = sim_to_power()
+                    p_rtl = power_rtl(suffix, power_rtl_run)
+
+                    # 2. Synthesis Track
+                    s_node = syn(suffix)
+                    s_to_sim = syn_to_sim()
+                    s_syn = sim_syn(suffix, sim_syn_run)
+                    s_to_p = syn_to_power()
+                    s_syn_to_p = sim_syn_to_power()
+                    p_syn = power_syn(suffix, power_syn_run)
+
+                    # Post-Synthesis Sign-Off Verification Steps
+                    s_to_form = syn_to_formal()
+                    f_syn = formal_syn(suffix)
+                    s_to_time = syn_to_timing()
+                    t_syn = timing_syn(suffix)
+
+                    # 3. Place & Route Track
+                    s_to_par = syn_to_par()
+                    p_node = par(suffix)
+
+                    # Post-P&R Signoff Verification
+                    p_to_sim = par_to_sim()
+                    s_par = sim_par(suffix, sim_par_run)
+                    p_to_p = par_to_power()
+                    s_par_to_p = sim_par_to_power()
+                    p_par = power_par(suffix, power_par_run)
+
+                    # Post-P&R Parallel Signoff Extensions
+                    p_to_form = par_to_formal()
+                    f_par = formal_par(suffix)
+                    p_to_time = par_to_timing()
+                    t_par = timing_par(suffix)
+
+                    # Physical Verification
+                    p_to_drc = par_to_drc()
+                    d_node = drc(suffix)
+                    p_to_lvs = par_to_lvs()
+                    l_node = lvs(suffix)
+
+                    # --- Structural Dependencies inside the module group ---
+                    s_rtl >> s_rtl_to_p >> p_rtl
+                    
+                    s_node >> [s_to_sim, s_to_p, s_to_form, s_to_time, s_to_par]
+                    s_to_sim >> s_syn >> s_syn_to_p
+                    [s_to_p, s_syn_to_p] >> p_syn
+                    s_to_form >> f_syn
+                    s_to_time >> t_syn
+                    
+                    s_to_par >> p_node
+                    p_node >> [p_to_sim, p_to_p, p_to_form, p_to_time, p_to_drc, p_to_lvs]
+                    p_to_sim >> s_par >> s_par_to_p
+                    [p_to_p, s_par_to_p] >> p_par
+                    p_to_form >> f_par
+                    p_to_time >> t_par
+                    p_to_drc >> d_node
+                    p_to_lvs >> l_node
+
+                return tg
+
+            start_node = start()
+            exit_node = exit_()
+    """)
+
+    # 4. Programmatic Inter-Module Routing
     if not dependency_graph:
-        # Flat flow
         top_module = str(driver.database.get_setting("synthesis.inputs.top_module"))
-
-        # TODO make this DRY
-        sim_rtl_run_dir = os.path.join(obj_dir, "sim-rtl-rundir")
-        power_rtl_run_dir = os.path.join(obj_dir, "power-rtl-rundir")
-        syn_run_dir = os.path.join(obj_dir, "syn-rundir")
-        sim_syn_run_dir = os.path.join(obj_dir, "sim-syn-rundir")
-        power_syn_run_dir = os.path.join(obj_dir, "power-syn-rundir")
-        par_run_dir = os.path.join(obj_dir, "par-rundir")
-        sim_par_run_dir = os.path.join(obj_dir, "sim-par-rundir")
-        power_par_run_dir = os.path.join(obj_dir, "power-par-rundir")
-        drc_run_dir = os.path.join(obj_dir, "drc-rundir")
-        lvs_run_dir = os.path.join(obj_dir, "lvs-rundir")
-        formal_syn_run_dir = os.path.join(obj_dir, "formal-syn-rundir")
-        formal_par_run_dir = os.path.join(obj_dir, "formal-par-rundir")
-        timing_syn_run_dir = os.path.join(obj_dir, "timing-syn-rundir")
-        timing_par_run_dir = os.path.join(obj_dir, "timing-par-rundir")
-
-        p_sim_rtl_in = proj_confs
-        sim_rtl_out = os.path.join(sim_rtl_run_dir, "sim-output-full.json")
-        power_sim_rtl_in = os.path.join(obj_dir, "power-sim-rtl-input.json")
-        #power_rtl_in = os.path.join(obj_dir, "power-rtl-input.json")
-        power_rtl_out = os.path.join(power_rtl_run_dir, "power-output-full.json")
-        p_syn_in = proj_confs
-        syn_out = os.path.join(syn_run_dir, "syn-output-full.json")
-        sim_syn_in = os.path.join(obj_dir, "sim-syn-input.json")
-        sim_syn_out = os.path.join(sim_syn_run_dir, "sim-output-full.json")
-        power_sim_syn_in = os.path.join(obj_dir, "power-sim-syn-input.json")
-        power_syn_in = os.path.join(obj_dir, "power-syn-input.json")
-        power_syn_out = os.path.join(power_syn_run_dir, "power-output-full.json")
-        par_in = os.path.join(obj_dir, "par-input.json")
-        par_out = os.path.join(par_run_dir, "par-output-full.json")
-        sim_par_in = os.path.join(obj_dir, "sim-par-input.json")
-        sim_par_out = os.path.join(sim_par_run_dir, "sim-output-full.json")
-        power_sim_par_in = os.path.join(obj_dir, "power-sim-par-input.json")
-        power_par_in = os.path.join(obj_dir, "power-par-input.json")
-        power_par_out = os.path.join(power_par_run_dir, "power-output-full.json")
-        drc_in = os.path.join(obj_dir, "drc-input.json")
-        drc_out = os.path.join(drc_run_dir, "drc-output-full.json")
-        lvs_in = os.path.join(obj_dir, "lvs-input.json")
-        lvs_out = os.path.join(lvs_run_dir, "lvs-output-full.json")
-        formal_syn_in = os.path.join(obj_dir, "formal-syn-input.json")
-        formal_syn_out = os.path.join(formal_syn_run_dir, "formal-output-full.json")
-        formal_par_in = os.path.join(obj_dir, "formal-par-input.json")
-        formal_par_out = os.path.join(formal_par_run_dir, "formal-output-full.json")
-        timing_syn_in = os.path.join(obj_dir, "timing-syn-input.json")
-        timing_syn_out = os.path.join(timing_syn_run_dir, "timing-output-full.json")
-        timing_par_in = os.path.join(obj_dir, "timing-par-input.json")
-        timing_par_out = os.path.join(timing_par_run_dir, "timing-output-full.json")
-
-        par_to_syn = ""
-
-        output += make_text.format(suffix="", mod=top_module, env_confs=env_confs, obj_dir=obj_dir, syn_deps=syn_deps,
-            par_to_syn=par_to_syn,
-            p_sim_rtl_in=p_sim_rtl_in, sim_rtl_out=sim_rtl_out, sim_rtl_run_dir=sim_rtl_run_dir,
-            sim_syn_in=sim_syn_in, sim_syn_out=sim_syn_out, sim_syn_run_dir=sim_syn_run_dir,
-            power_sim_rtl_in=power_sim_rtl_in, power_rtl_out=power_rtl_out, power_rtl_run_dir=power_rtl_run_dir,
-            sim_par_in=sim_par_in, sim_par_out=sim_par_out, sim_par_run_dir=sim_par_run_dir,
-            p_syn_in=p_syn_in, syn_out=syn_out, par_in=par_in, par_out=par_out,
-            power_sim_syn_in=power_sim_syn_in, power_syn_in=power_syn_in, power_syn_out=power_syn_out, power_syn_run_dir=power_syn_run_dir,
-            power_sim_par_in=power_sim_par_in, power_par_in=power_par_in, power_par_out=power_par_out, power_par_run_dir=power_par_run_dir,
-            drc_in=drc_in, drc_out=drc_out, lvs_in=lvs_in, lvs_out=lvs_out,
-            formal_syn_in=formal_syn_in, formal_syn_out=formal_syn_out, formal_syn_run_dir=formal_syn_run_dir,
-            formal_par_in=formal_par_in, formal_par_out=formal_par_out, formal_par_run_dir=formal_par_run_dir,
-            timing_syn_in=timing_syn_in, timing_syn_out=timing_syn_out, timing_syn_run_dir=timing_syn_run_dir,
-            timing_par_in=timing_par_in, timing_par_out=timing_par_out, timing_par_run_dir=timing_par_run_dir)
+        output += "            mod_tg = create_module_pipeline('{0}', '')\n".format(top_module)
+        output += "            start_node >> mod_tg >> exit_node\n"
     else:
-        # Hierarchical flow
+        output += "            pipelines = {}\n"
+        for node, edges in dependency_graph.items():
+            if len(edges[1]) == 0:
+                output += "            pipelines['{0}'] = create_module_pipeline('{0}', '-{0}')\n".format(node)
+                output += "            start_node >> pipelines['{0}']\n".format(node)
+        
         for node, edges in dependency_graph.items():
             out_edges = edges[1]
-
-            # TODO make this DRY
-            sim_rtl_run_dir = os.path.join(obj_dir, "sim-rtl-" + node)
-            power_rtl_run_dir = os.path.join(obj_dir, "power-rtl-" + node)
-            syn_run_dir = os.path.join(obj_dir, "syn-" + node)
-            sim_syn_run_dir = os.path.join(obj_dir, "sim-syn-" + node)
-            power_syn_run_dir = os.path.join(obj_dir, "power-syn-" + node)
-            par_run_dir = os.path.join(obj_dir, "par-" + node)
-            sim_par_run_dir = os.path.join(obj_dir, "sim-par-" + node)
-            power_par_run_dir = os.path.join(obj_dir, "power-par-" + node)
-            drc_run_dir = os.path.join(obj_dir, "drc-" + node)
-            lvs_run_dir = os.path.join(obj_dir, "lvs-" + node)
-            formal_syn_run_dir = os.path.join(obj_dir, "formal-syn-" + node)
-            formal_par_run_dir = os.path.join(obj_dir, "formal-par-" + node)
-            timing_syn_run_dir = os.path.join(obj_dir, "timing-syn-" + node)
-            timing_par_run_dir = os.path.join(obj_dir, "timing-par-" + node)
-
-            p_sim_rtl_in = proj_confs
-            sim_rtl_out = os.path.join(sim_rtl_run_dir, "sim-output-full.json")
-            power_sim_rtl_in = os.path.join(obj_dir, "power-sim-rtl-{}-input.json".format(node))
-            #power_rtl_in = os.path.join(obj_dir, "power-rtl-{}-input.json".format(node))
-            power_rtl_out = os.path.join(power_rtl_run_dir, "power-output-full.json")
-            p_syn_in = proj_confs
-            syn_out = os.path.join(syn_run_dir, "syn-output-full.json")
-            sim_syn_in = os.path.join(obj_dir, "sim-syn-{}-input.json".format(node))
-            sim_syn_out = os.path.join(sim_syn_run_dir, "sim-output-full.json")
-            power_sim_syn_in = os.path.join(obj_dir, "power-sim-syn-{}-input.json".format(node))
-            power_syn_in = os.path.join(obj_dir, "power-syn-{}-input.json".format(node))
-            power_syn_out = os.path.join(power_syn_run_dir, "power-output-full.json")
-            par_in = os.path.join(obj_dir, "par-{}-input.json".format(node))
-            par_out = os.path.join(par_run_dir, "par-output-full.json")
-            sim_par_in = os.path.join(obj_dir, "sim-par-{}-input.json".format(node))
-            sim_par_out = os.path.join(sim_par_run_dir, "sim-output-full.json")
-            power_sim_par_in = os.path.join(obj_dir, "power-sim-par-{}-input.json".format(node))
-            power_par_in = os.path.join(obj_dir, "power-par-{}-input.json".format(node))
-            power_par_out = os.path.join(power_par_run_dir, "power-output-full.json")
-            drc_in = os.path.join(obj_dir, "drc-{}-input.json".format(node))
-            drc_out = os.path.join(drc_run_dir, "drc-output-full.json")
-            lvs_in = os.path.join(obj_dir, "lvs-{}-input.json".format(node))
-            lvs_out = os.path.join(lvs_run_dir, "lvs-output-full.json")
-            formal_syn_in = os.path.join(obj_dir, "formal-syn-{}-input.json".format(node))
-            formal_syn_out = os.path.join(formal_syn_run_dir, "formal-output-full.json")
-            formal_par_in = os.path.join(obj_dir, "formal-par-{}-input.json".format(node))
-            formal_par_out = os.path.join(formal_par_run_dir, "formal-output-full.json")
-            timing_syn_in = os.path.join(obj_dir, "timing-syn-{}-input.json".format(node))
-            timing_syn_out = os.path.join(timing_syn_run_dir, "timing-output-full.json")
-            timing_par_in = os.path.join(obj_dir, "timing-par-{}-input.json".format(node))
-            timing_par_out = os.path.join(timing_par_run_dir, "timing-output-full.json")
-
-            # need to revert this each time
-            syn_deps = "$(HAMMER_DEPENDENCIES)"
-            par_to_syn = ""
             if len(out_edges) > 0:
-                syn_deps = os.path.join(obj_dir, "syn-{}-input.json".format(node))
-                p_syn_in = "-p {}".format(syn_deps)
-                out_confs = [os.path.join(obj_dir, "par-" + x, "par-output-full.json") for x in out_edges]
-                prereqs = " ".join(out_confs)
-                pstring = " ".join(["-p " + x for x in out_confs])
-                par_to_syn = textwrap.dedent("""
-                    .PHONY: hier-par-to-syn-{node} redo-hier-par-to-syn-{node}
+                child_arr = ", ".join([f"pipelines['{x}']" for x in out_edges])
+                output += "            # Hierarchical Assembly for macro: {0}\n".format(node)
+                output += "            hier_bridge_{0} = hier_par_to_syn.override(task_id='hier_par_to_syn_{0}')()\n".format(node)
+                output += "            pipelines['{0}'] = create_module_pipeline('{0}', '-{0}')\n".format(node)
+                output += "            [{0}] >> hier_bridge_{1} >> pipelines['{1}']\n".format(child_arr, node)
+        
+        all_nodes = list(dependency_graph.keys())
+        output += "            # Route all workflow paths safely to exit entrypoint\n"
+        output += "            exit_drivers = [pipelines[x] for x in {0}]\n".format(all_nodes)
+        output += "            exit_drivers >> exit_node\n"
 
-                    {syn_deps}: {prereqs}
-                    \t$(HAMMER_EXEC) {env_confs} {pstring} -o {syn_deps} --obj_dir {obj_dir} hier-par-to-syn
+    output += "\ndag_instance = hammer_dag()\n"
 
-                    hier-par-to-syn-{node}: {syn_deps}
-
-                    redo-hier-par-to-syn-{node}:
-                    \t$(HAMMER_EXEC) {env_confs} {pstring} -o {syn_deps} --obj_dir {obj_dir} hier-par-to-syn
-                    """.format(syn_deps=syn_deps, prereqs=prereqs, env_confs=env_confs, pstring=pstring,
-                    obj_dir=obj_dir, node=node))
-
-            output += make_text.format(suffix="-"+node, mod=node, env_confs=env_confs, obj_dir=obj_dir, syn_deps=syn_deps,
-                par_to_syn=par_to_syn,
-                p_sim_rtl_in=p_sim_rtl_in, sim_rtl_out=sim_rtl_out, sim_rtl_run_dir=sim_rtl_run_dir,
-                power_sim_rtl_in=power_sim_rtl_in, power_rtl_out=power_rtl_out, power_rtl_run_dir=power_rtl_run_dir,
-                sim_syn_in=sim_syn_in, sim_syn_out=sim_syn_out, sim_syn_run_dir=sim_syn_run_dir,
-                sim_par_in=sim_par_in, sim_par_out=sim_par_out, sim_par_run_dir=sim_par_run_dir,
-                p_syn_in=p_syn_in, syn_out=syn_out, par_in=par_in, par_out=par_out,
-                power_sim_syn_in=power_sim_syn_in, power_syn_in=power_syn_in, power_syn_out=power_syn_out, power_syn_run_dir=power_syn_run_dir,
-                power_sim_par_in=power_sim_par_in, power_par_in=power_par_in, power_par_out=power_par_out, power_par_run_dir=power_par_run_dir,
-                drc_in=drc_in, drc_out=drc_out, lvs_in=lvs_in, lvs_out=lvs_out,
-                formal_syn_in=formal_syn_in, formal_syn_out=formal_syn_out, formal_syn_run_dir=formal_syn_run_dir,
-                formal_par_in=formal_par_in, formal_par_out=formal_par_out, formal_par_run_dir=formal_par_run_dir,
-                timing_syn_in=timing_syn_in, timing_syn_out=timing_syn_out, timing_syn_run_dir=timing_syn_run_dir,
-                timing_par_in=timing_par_in, timing_par_out=timing_par_out, timing_par_run_dir=timing_par_run_dir)
-
-    with open(makefile, "w") as f:
+    with open(dag_file, "w") as f:
         f.write(output)
 
     return dependency_graph
@@ -524,4 +419,4 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
 BuildSystems = {
     "make": build_makefile,
     "none": build_noop
-}  # type: Dict[str, Callable[[HammerDriver, Callable[[str], None]], dict]]
+}

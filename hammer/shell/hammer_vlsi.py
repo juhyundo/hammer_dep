@@ -38,7 +38,6 @@ import pendulum
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'vlsi')))
 
 from hammer.vlsi import CLIDriver
-from hammer.vlsi.cli_driver import import_task_to_dag
 #import pdb
 #pdb.set_trace()
 
