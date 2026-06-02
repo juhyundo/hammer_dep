@@ -19,6 +19,9 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
     dependency_graph = driver.get_hierarchical_dependency_graph()
     dag_file = os.path.join(driver.obj_dir, "hammer_dag.py")
     
+    # Extract top module name dynamically to cleanly uniqueness check DAG namespaces
+    top_module = str(driver.database.get_setting("synthesis.inputs.top_module"))
+    
     env_confs = [os.path.realpath(x) for x in driver.options.environment_configs]
     proj_confs = [os.path.realpath(x) for x in driver.options.project_configs]
     obj_dir = os.path.realpath(driver.obj_dir)
@@ -126,7 +129,7 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
         @task
         def sim_to_power(sim_rtl_out, power_sim_rtl_in, **context):
             if should_run_stage('power_rtl', context) or should_run_stage('power_syn', context) or should_run_stage('power_par', context):
-                run_hammer_action("sim-to-power", ["-p", sim_rtl_out, -"-o", power_sim_rtl_in])
+                run_hammer_action("sim-to-power", ["-p", sim_rtl_out, "-o", power_sim_rtl_in])
             else:
                 raise AirflowSkipException("sim-to-power skipped")
 
@@ -310,14 +313,14 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
             run_hammer_action("hier-par-to-syn", flags)
     """)
 
-    # 3. Parameter Inputs & DAG Skeleton Generation
-    output += """
+    # 3. Parameter Inputs & Unique DAG Skeleton Generation
+    output += f"""
 @dag(
-    dag_id='hammer_vlsi_flow',
+    dag_id='hammer_vlsi_flow_{top_module}',
     default_args=default_args,
     schedule=None,
     catchup=False,
-    params={
+    params={{
         'sim_rtl': Param(default=False, type='boolean', title='RTL Simulation'),
         'power_rtl': Param(default=False, type='boolean', title='RTL Power Simulation'),
         'syn': Param(default=False, type='boolean', title='Synthesis'),
@@ -332,7 +335,7 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
         'timing_par': Param(default=False, type='boolean', title='Timing Place and Route'),
         'formal_par': Param(default=False, type='boolean', title='Formal Place and Route'),
         'power_par': Param(default=False, type='boolean', title='Power Place and Route'),
-    },
+    }},
     render_template_as_native_obj=True
 )
 def hammer_dag():
@@ -346,7 +349,7 @@ def hammer_dag():
         print("Exiting flow safely.")
 
     def create_module_pipeline(mod_name, suffix, paths_dict):
-        with TaskGroup(group_id=f"module_{mod_name or 'Top'}") as tg:
+        with TaskGroup(group_id=f"module_{{mod_name or 'Top'}}") as tg:
             
             # 1. RTL Simulation Track
             s_rtl = sim_rtl(suffix, paths_dict['p_sim_rtl_in'], paths_dict['sim_rtl_run_dir'])
@@ -415,8 +418,6 @@ def hammer_dag():
 
     # 4. Programmatic Inter-Module Routing Map
     if not dependency_graph:
-        top_module = str(driver.database.get_setting("synthesis.inputs.top_module"))
-        
         # Build 1:1 matching directory mapping dictionary literal values
         output += f"""
     paths_{top_module} = {{
