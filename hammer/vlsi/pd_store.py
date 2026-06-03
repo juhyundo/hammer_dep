@@ -249,6 +249,11 @@ CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
     -- Recorded on the MISS path when we actually invoke the tool, then used
     -- on the HIT path to report "saved ~X seconds" to the user.
     duration_seconds REAL,
+    -- CPU seconds (user + sys, summed across all child processes) the
+    -- original tool run consumed. Always >= duration_seconds for multi-
+    -- threaded tools like Innovus. Lets us report CPU-time saved as well
+    -- as wall-clock saved on cache hits.
+    cpu_seconds      REAL,
     -- Provenance: which Airflow user / DAG / run / workspace / design
     -- produced this blob. All nullable so non-Airflow callers (e.g. direct
     -- hammer-vlsi invocations from the shell) don't need to set them.
@@ -277,6 +282,7 @@ CREATE TABLE IF NOT EXISTS {FQ_WORKSPACE} (
 ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS duration_seconds REAL;
+ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS cpu_seconds      REAL;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS triggering_user TEXT;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS dag_id          TEXT;
 ALTER TABLE {FQ_BLOB}   ADD COLUMN IF NOT EXISTS dag_run_id      TEXT;
@@ -839,6 +845,7 @@ def store_stage_blob(
     sha256: str,
     data: bytes,
     duration_seconds: Optional[float] = None,
+    cpu_seconds: Optional[float] = None,
     triggering_user: Optional[str] = None,
     dag_id: Optional[str] = None,
     dag_run_id: Optional[str] = None,
@@ -869,9 +876,10 @@ def store_stage_blob(
                 f"""
                 INSERT INTO {FQ_BLOB} (
                     sha256, stage, data, size_bytes, duration_seconds,
+                    cpu_seconds,
                     triggering_user, dag_id, dag_run_id, workspace, design
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (sha256) DO UPDATE
                   SET stage            = EXCLUDED.stage,
                       data             = EXCLUDED.data,
@@ -879,6 +887,8 @@ def store_stage_blob(
                       owner            = current_user,
                       duration_seconds = COALESCE(EXCLUDED.duration_seconds,
                                                   {FQ_BLOB}.duration_seconds),
+                      cpu_seconds      = COALESCE(EXCLUDED.cpu_seconds,
+                                                  {FQ_BLOB}.cpu_seconds),
                       triggering_user  = COALESCE(EXCLUDED.triggering_user,
                                                   {FQ_BLOB}.triggering_user),
                       dag_id           = COALESCE(EXCLUDED.dag_id,
@@ -892,8 +902,8 @@ def store_stage_blob(
                       created_at       = NOW()
                 """,
                 (sha256, stage_tag, psycopg2.Binary(data), len(data),
-                 duration_seconds, triggering_user, dag_id, dag_run_id,
-                 workspace, design),
+                 duration_seconds, cpu_seconds, triggering_user, dag_id,
+                 dag_run_id, workspace, design),
             )
         conn.commit()
     finally:
@@ -902,20 +912,22 @@ def store_stage_blob(
 
 def load_stage_blob(
     sha256: str,
-) -> Optional[Tuple[str, bytes, Optional[float]]]:
+) -> Optional[Tuple[str, bytes, Optional[float], Optional[float]]]:
     """
-    Fetch a tarball by hash. Returns ``(stage, bytes, duration_seconds)`` or None.
+    Fetch a tarball by hash. Returns
+    ``(stage, bytes, duration_seconds, cpu_seconds)`` or None.
 
-    The third tuple element is the wall-clock seconds the tool took when
-    this blob was originally produced, or None if the blob predates the
-    ``duration_seconds`` column (i.e. was stored before duration tracking
-    was added).
+    The third and fourth tuple elements are the wall-clock and CPU
+    (user + sys, summed across child procs) seconds the tool took when this
+    blob was originally produced. Either may be None for blobs that predate
+    the corresponding column.
     """
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT stage, data, duration_seconds FROM {FQ_BLOB} WHERE sha256 = %s",
+                f"SELECT stage, data, duration_seconds, cpu_seconds "
+                f"FROM {FQ_BLOB} WHERE sha256 = %s",
                 (sha256,),
             )
             row = cur.fetchone()
@@ -923,8 +935,8 @@ def load_stage_blob(
         conn.close()
     if row is None:
         return None
-    stage, data, duration_seconds = row
-    return stage, bytes(data), duration_seconds
+    stage, data, duration_seconds, cpu_seconds = row
+    return stage, bytes(data), duration_seconds, cpu_seconds
 
 
 def list_stage_blobs(
@@ -933,10 +945,10 @@ def list_stage_blobs(
 ) -> List[Tuple[Any, ...]]:
     """
     List recent blobs. Returns rows of:
-      (sha256, stage, size_bytes, duration_seconds, owner,
+      (sha256, stage, size_bytes, duration_seconds, cpu_seconds, owner,
        triggering_user, dag_id, design, workspace, created_at)
     """
-    cols = ("sha256, stage, size_bytes, duration_seconds, owner, "
+    cols = ("sha256, stage, size_bytes, duration_seconds, cpu_seconds, owner, "
             "triggering_user, dag_id, design, workspace, created_at")
     conn = _connect()
     try:

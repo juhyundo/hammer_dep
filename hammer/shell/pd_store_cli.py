@@ -177,7 +177,7 @@ def _cmd_stage_pull(args: argparse.Namespace) -> int:
     if blob is None:
         print(f"No blob for sha256={sha} stage={args.stage}", file=sys.stderr)
         return 1
-    stored_stage, data, _duration = blob
+    stored_stage, data, _duration, _cpu = blob
     rundir = Path(args.rundir)
     if rundir.exists():
         if not args.overwrite:
@@ -520,14 +520,16 @@ def _cmd_blob_list(args: argparse.Namespace) -> int:
     if not rows:
         print("(no blobs)")
         return 0
-    header = (f"{'sha':<10} {'stage':<10} {'size':>8} {'tool_time':>10} "
+    header = (f"{'sha':<10} {'stage':<10} {'size':>8} {'wall':>10} {'cpu':>10} "
               f"{'owner':<14} {'trig_user':<14} {'design':<28} {'dag_id':<28}  created_at")
     print(header)
     print("-" * len(header))
     for r in rows:
-        sha, stage, size, dur_s, owner, trig, dag, design, workspace, created = r
+        (sha, stage, size, dur_s, cpu_s, owner, trig, dag,
+         design, workspace, created) = r
         print(f"{_short_str(sha,10):<10} {_short_str(stage,10):<10} {_human_bytes(size):>8} "
-              f"{_human_dur(dur_s):>10} {_short_str(owner,14):<14} "
+              f"{_human_dur(dur_s):>10} {_human_dur(cpu_s):>10} "
+              f"{_short_str(owner,14):<14} "
               f"{_short_str(trig,14):<14} {_short_str(design,28):<28} "
               f"{_short_str(dag,28):<28}  {created}")
     return 0

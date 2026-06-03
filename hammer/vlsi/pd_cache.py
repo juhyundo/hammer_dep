@@ -27,7 +27,27 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+try:
+    # POSIX-only; harmless to skip on Windows since the cache is Linux-only.
+    import resource as _resource
+except ImportError:  # pragma: no cover
+    _resource = None  # type: ignore
+
 from hammer.vlsi import pd_store
+
+
+def _child_cpu_seconds() -> Optional[float]:
+    """
+    Cumulative CPU (user + sys) consumed by all child processes waited on so
+    far in this process. Take a snapshot before and after run_fn() and
+    subtract to get the CPU time the tool itself burned.
+
+    Returns None if the resource module isn't available.
+    """
+    if _resource is None:
+        return None
+    ru = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+    return ru.ru_utime + ru.ru_stime
 
 
 def _format_duration(seconds: float) -> str:
@@ -44,16 +64,34 @@ def _format_duration(seconds: float) -> str:
     return f"{h}h{m:02d}m{s:02d}s"
 
 
-def _format_savings(original_duration: Optional[float], restore_seconds: float) -> str:
-    """Build the '(saved ~Xs vs original Ys tool run)' suffix, or '' if unknown."""
+def _format_savings(
+    original_duration: Optional[float],
+    restore_seconds: float,
+    original_cpu: Optional[float] = None,
+) -> str:
+    """Build the '(saved ~Xs vs original Ys tool run)' suffix, or '' if unknown.
+
+    If ``original_cpu`` is set, also report the CPU time saved (which for
+    multi-threaded tools like Innovus is often much bigger than wall-clock
+    saved).
+    """
     if original_duration is None or original_duration <= 0:
         return ""
     saved = max(0.0, original_duration - restore_seconds)
-    return (
-        f" Saved ~{_format_duration(saved)} "
+    msg = (
+        f" Saved ~{_format_duration(saved)} wall "
         f"(restore {_format_duration(restore_seconds)} "
-        f"vs original {_format_duration(original_duration)} tool run)."
+        f"vs original {_format_duration(original_duration)} tool run)"
     )
+    if original_cpu is not None and original_cpu > 0:
+        # Restore is single-threaded tar untar, so CPU cost is ~= wall cost
+        # for that side. Subtract it from the cached CPU figure.
+        cpu_saved = max(0.0, original_cpu - restore_seconds)
+        msg += (
+            f"; ~{_format_duration(cpu_saved)} CPU "
+            f"(original tool consumed {_format_duration(original_cpu)} CPU)"
+        )
+    return msg + "."
 
 
 # ----- Per-DAG-run event log (for the exit_ task summary) -----
@@ -88,6 +126,8 @@ def _record_cache_event(
     saved_seconds: Optional[float] = None,
     tool_seconds: Optional[float] = None,
     restore_seconds: Optional[float] = None,
+    saved_cpu_seconds: Optional[float] = None,
+    tool_cpu_seconds: Optional[float] = None,
 ) -> None:
     """
     Append a single cache event for the current DAG run.
@@ -97,6 +137,10 @@ def _record_cache_event(
     files missing so restored from tarball), ``SKIP_NO_BLOB`` (dep-check
     skip, no local files AND no cache blob - downstream will likely fail).
 
+    The ``*_cpu_seconds`` pair mirrors the wall-clock pair: for MISS_STORE
+    we record what the tool just burned; for HIT/SKIP we record the saved
+    figure pulled from the cached blob.
+
     Silently no-ops outside an Airflow run (no AIRFLOW_HOME or no run_id).
     """
     run_id = os.environ.get("HAMMER_AIRFLOW_RUN_ID", "")
@@ -105,14 +149,16 @@ def _record_cache_event(
     if f is None:
         return
     event = {
-        "ts":              time.time(),
-        "dag_id":          dag_id,
-        "run_id":          run_id,
-        "stage_tag":       stage_tag,
-        "outcome":         outcome,
-        "saved_seconds":   saved_seconds,
-        "tool_seconds":    tool_seconds,
-        "restore_seconds": restore_seconds,
+        "ts":                time.time(),
+        "dag_id":            dag_id,
+        "run_id":            run_id,
+        "stage_tag":         stage_tag,
+        "outcome":           outcome,
+        "saved_seconds":     saved_seconds,
+        "tool_seconds":      tool_seconds,
+        "restore_seconds":   restore_seconds,
+        "saved_cpu_seconds": saved_cpu_seconds,
+        "tool_cpu_seconds":  tool_cpu_seconds,
     }
     try:
         with f.open("a") as fh:
@@ -157,11 +203,22 @@ def read_run_cache_summary(run_id: str) -> str:
     #                     cache was never even consulted)
     # MISS_STORE       -> no savings; the tool actually ran
     # SKIP_NO_BLOB     -> no savings; the run probably failed
-    cache_saved = 0.0       # HIT + SKIP_RESTORED
-    depcheck_saved = 0.0    # SKIP_LOCAL
-    total_ran = 0.0         # MISS_STORE
+    cache_saved = 0.0       # HIT + SKIP_RESTORED  (wall-clock)
+    depcheck_saved = 0.0    # SKIP_LOCAL           (wall-clock)
+    total_ran = 0.0         # MISS_STORE           (wall-clock)
+    cache_saved_cpu = 0.0   # HIT + SKIP_RESTORED  (CPU)
+    depcheck_saved_cpu = 0.0  # SKIP_LOCAL         (CPU)
+    total_ran_cpu = 0.0     # MISS_STORE           (CPU)
+
+    def _wc(s: Optional[float]) -> str:
+        """Format 'wall / cpu' pair for the detail column."""
+        return _format_duration(s) if s is not None else "-"
+
     lines = []
-    header = f"{'stage':<12}  {'outcome':<14}  {'attributed to':<14}  {'detail':<48}"
+    header = (
+        f"{'stage':<12}  {'outcome':<14}  {'attributed to':<14}  "
+        f"{'wall':<10}  {'cpu':<10}  detail"
+    )
     lines.append(header)
     lines.append("-" * len(header))
     for ev in events:
@@ -170,24 +227,44 @@ def read_run_cache_summary(run_id: str) -> str:
         saved = ev.get("saved_seconds")
         tool = ev.get("tool_seconds")
         restore = ev.get("restore_seconds")
+        saved_cpu = ev.get("saved_cpu_seconds")
+        tool_cpu = ev.get("tool_cpu_seconds")
         attribution = ""
+        wall_col = "-"
+        cpu_col = "-"
         detail = ""
         if outcome == "HIT" and saved is not None:
             attribution = "cache"
-            detail = f"saved {_format_duration(saved)} (restore {_format_duration(restore or 0)})"
+            wall_col = _wc(saved)
+            cpu_col = _wc(saved_cpu)
+            detail = f"restore {_format_duration(restore or 0)}"
             cache_saved += saved
+            if saved_cpu is not None:
+                cache_saved_cpu += saved_cpu
         elif outcome == "SKIP_LOCAL" and saved is not None:
             attribution = "dep-check"
-            detail = f"saved {_format_duration(saved)} (no restore needed, files on disk)"
+            wall_col = _wc(saved)
+            cpu_col = _wc(saved_cpu)
+            detail = "no restore needed, files on disk"
             depcheck_saved += saved
+            if saved_cpu is not None:
+                depcheck_saved_cpu += saved_cpu
         elif outcome == "SKIP_RESTORED" and saved is not None:
             attribution = "cache"
-            detail = f"saved {_format_duration(saved)} (dep-check skip, restored from cache)"
+            wall_col = _wc(saved)
+            cpu_col = _wc(saved_cpu)
+            detail = "dep-check skip, restored from cache"
             cache_saved += saved
+            if saved_cpu is not None:
+                cache_saved_cpu += saved_cpu
         elif outcome == "MISS_STORE" and tool is not None:
             attribution = "—"
-            detail = f"ran {_format_duration(tool)} (stored to cache)"
+            wall_col = _wc(tool)
+            cpu_col = _wc(tool_cpu)
+            detail = "ran, stored to cache"
             total_ran += tool
+            if tool_cpu is not None:
+                total_ran_cpu += tool_cpu
         elif outcome == "SKIP_NO_BLOB":
             attribution = "—"
             detail = "WARNING: dep-check skip but no cache blob — downstream may fail"
@@ -196,13 +273,24 @@ def read_run_cache_summary(run_id: str) -> str:
             # we skipped a tool run but can't quantify how much we saved.
             attribution = "cache" if outcome != "SKIP_LOCAL" else "dep-check"
             detail = "skipped tool run (original duration not recorded)"
-        lines.append(f"{stage:<12}  {outcome:<14}  {attribution:<14}  {detail:<48}")
+        lines.append(
+            f"{stage:<12}  {outcome:<14}  {attribution:<14}  "
+            f"{wall_col:<10}  {cpu_col:<10}  {detail}"
+        )
     lines.append("-" * len(header))
     total_saved = cache_saved + depcheck_saved
-    lines.append(f"  Saved by cache:           {_format_duration(cache_saved)}")
-    lines.append(f"  Saved by dependency check:{_format_duration(depcheck_saved):>10}")
-    lines.append(f"  Total time saved:         {_format_duration(total_saved)}")
-    lines.append(f"  Stages that actually ran: {_format_duration(total_ran)}")
+    total_saved_cpu = cache_saved_cpu + depcheck_saved_cpu
+
+    def _pair(wall: float, cpu: float) -> str:
+        return (
+            f"wall {_format_duration(wall):<10}  "
+            f"cpu {_format_duration(cpu):<10}"
+        )
+
+    lines.append(f"  Saved by cache:            {_pair(cache_saved, cache_saved_cpu)}")
+    lines.append(f"  Saved by dependency check: {_pair(depcheck_saved, depcheck_saved_cpu)}")
+    lines.append(f"  Total time saved:          {_pair(total_saved, total_saved_cpu)}")
+    lines.append(f"  Stages that actually ran:  {_pair(total_ran, total_ran_cpu)}")
     return "\n".join(lines)
 
 
@@ -303,7 +391,7 @@ def cache_or_run(
         return run_fn()
 
     if blob is not None:
-        _, data, original_duration = blob
+        _, data, original_duration, original_cpu = blob
         rundir_path = Path(rundir)
         try:
             t0 = time.monotonic()
@@ -314,17 +402,23 @@ def cache_or_run(
                 output = json.load(f)
             restore_seconds = time.monotonic() - t0
             saved = None
+            saved_cpu = None
             if original_duration is not None:
                 saved = max(0.0, original_duration - restore_seconds)
+            if original_cpu is not None:
+                # Restore is a single-threaded tar untar, so its CPU cost ~=
+                # its wall-clock cost. Use that to net it out of the saved-CPU.
+                saved_cpu = max(0.0, original_cpu - restore_seconds)
             _record_cache_event(
                 stage_tag, "HIT",
                 saved_seconds=saved,
                 restore_seconds=restore_seconds,
+                saved_cpu_seconds=saved_cpu,
             )
             _info(
                 f"PD cache HIT for {stage_tag} (sha256={short}...). "
                 f"Restored {rundir_path}, skipping run."
-                f"{_format_savings(original_duration, restore_seconds)}"
+                f"{_format_savings(original_duration, restore_seconds, original_cpu)}"
             )
             return True, output
         except Exception as e:
@@ -334,8 +428,13 @@ def cache_or_run(
 
     _info(f"PD cache MISS for {stage_tag} (sha256={short}...). Running stage.")
     t0 = time.monotonic()
+    cpu0 = _child_cpu_seconds()
     success, output = run_fn()
     duration_seconds = time.monotonic() - t0
+    cpu1 = _child_cpu_seconds()
+    cpu_seconds: Optional[float] = None
+    if cpu0 is not None and cpu1 is not None:
+        cpu_seconds = max(0.0, cpu1 - cpu0)
     if success:
         try:
             # Write the stage's output dict into the rundir BEFORE we tar it.
@@ -354,6 +453,7 @@ def cache_or_run(
             pd_store.store_stage_blob(
                 stage_tag, key, tarball,
                 duration_seconds=duration_seconds,
+                cpu_seconds=cpu_seconds,
                 triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER") or None,
                 dag_id=os.environ.get("HAMMER_AIRFLOW_DAG_ID") or None,
                 dag_run_id=os.environ.get("HAMMER_AIRFLOW_RUN_ID") or None,
@@ -363,10 +463,16 @@ def cache_or_run(
             _record_cache_event(
                 stage_tag, "MISS_STORE",
                 tool_seconds=duration_seconds,
+                tool_cpu_seconds=cpu_seconds,
+            )
+            cpu_msg = (
+                f", CPU={_format_duration(cpu_seconds)}"
+                if cpu_seconds is not None else ""
             )
             _info(
                 f"PD cache STORE {stage_tag} (sha256={short}..., "
-                f"bytes={len(tarball)}, tool runtime={_format_duration(duration_seconds)})."
+                f"bytes={len(tarball)}, "
+                f"tool runtime={_format_duration(duration_seconds)}{cpu_msg})."
             )
         except Exception as e:
             _warn(f"PD cache: store failed ({e}); continuing.")
@@ -411,24 +517,30 @@ def try_restore_from_cache(
     if output_path.exists():
         # Local files still present, nothing to do. The skip is safe.
         # Still helpful to surface the savings vs a fresh tool run.
-        original_duration = None
+        original_duration: Optional[float] = None
+        original_cpu: Optional[float] = None
         try:
             key = _build_cache_key(driver, stage_tag)
             blob_meta = pd_store.load_stage_blob(key)
             if blob_meta is not None:
-                _, _, original_duration = blob_meta
+                _, _, original_duration, original_cpu = blob_meta
                 if original_duration:
+                    cpu_msg = (
+                        f"; {_format_duration(original_cpu)} CPU"
+                        if original_cpu else ""
+                    )
                     _info(
                         f"PD cache (skip-path) for {stage_tag}: stage_change_check "
                         f"says skip, local rundir present. "
-                        f"Saved ~{_format_duration(original_duration)} "
-                        f"(original tool runtime) by not re-running."
+                        f"Saved ~{_format_duration(original_duration)} wall"
+                        f"{cpu_msg} (original tool runtime) by not re-running."
                     )
         except Exception:
             pass
         _record_cache_event(
             stage_tag, "SKIP_LOCAL",
             saved_seconds=original_duration,
+            saved_cpu_seconds=original_cpu,
         )
         return True
 
@@ -455,7 +567,7 @@ def try_restore_from_cache(
         )
         return False
 
-    _, data, original_duration = blob
+    _, data, original_duration, original_cpu = blob
     rundir_path = Path(rundir)
     try:
         t0 = time.monotonic()
@@ -463,18 +575,22 @@ def try_restore_from_cache(
         pd_store.untar_to_directory(data, rundir_path.parent)
         restore_seconds = time.monotonic() - t0
         saved = None
+        saved_cpu = None
         if original_duration is not None:
             saved = max(0.0, original_duration - restore_seconds)
+        if original_cpu is not None:
+            saved_cpu = max(0.0, original_cpu - restore_seconds)
         _record_cache_event(
             stage_tag, "SKIP_RESTORED",
             saved_seconds=saved,
             restore_seconds=restore_seconds,
+            saved_cpu_seconds=saved_cpu,
         )
         _info(
             f"PD cache HIT (skip-path) for {stage_tag} (sha256={short}...). "
             f"stage_change_check said skip, local rundir was missing; "
             f"restored from cache."
-            f"{_format_savings(original_duration, restore_seconds)}"
+            f"{_format_savings(original_duration, restore_seconds, original_cpu)}"
         )
         return True
     except Exception as e:
