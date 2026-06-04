@@ -284,8 +284,9 @@ class AIRFlow:
             if conf:
                 sys.argv.extend(['-p', conf])
             
-        sys.argv.extend(['-p', self.SIM_SYN_CONF])
         sys.argv.extend(['-p', self.OBJ_DIR + '/syn-to-sim_input.json'])
+        sys.argv.extend(['-p', self.OBJ_DIR + '/syn-rundir/syn-output.json'])
+        sys.argv.extend(['-p', self.SIM_SYN_CONF])
 
         if self.args:
             sys.argv.extend(self.args.split())

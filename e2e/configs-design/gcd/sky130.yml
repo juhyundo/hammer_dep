@@ -6,6 +6,7 @@ vlsi.inputs.clocks: [
 sim.inputs:
   defines: ["CLOCK_PERIOD=10"]
   defines_meta: "append"
+  timescale: "1ns/1ps"
 
 # Placement Constraints
 vlsi.inputs.placement_constraints:
