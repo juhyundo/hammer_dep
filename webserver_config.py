@@ -1,6 +1,21 @@
 """Airflow webserver auth: EECS LDAP via FAB."""
 
 import os
+
+# python-ldap 3.x does NOT auto-import its submodules: a bare `import ldap`
+# leaves `ldap.filter` / `ldap.dn` unset. Airflow's FAB LDAP login calls
+# `ldap.filter.escape_filter_chars(...)` without importing it first, so a fresh
+# login dies with "module 'ldap' has no attribute 'filter'". Importing the
+# submodules here registers them in sys.modules globally (this config is loaded
+# by the FAB app at startup, before any login), so the auth path finds them.
+#
+# This lives here rather than in a site-packages .pth shim on purpose: it's
+# version-controlled, survives package reinstalls, and stays scoped to the web
+# app -- a .pth would also import ldap into every DAG-task subprocess.
+import ldap  # noqa: F401  (python-ldap)
+import ldap.dn  # noqa: F401
+import ldap.filter  # noqa: F401
+
 from flask_appbuilder.security.manager import AUTH_LDAP
 
 # Use LDAP for login.
