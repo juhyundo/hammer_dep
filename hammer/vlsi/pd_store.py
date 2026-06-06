@@ -66,6 +66,10 @@ __all__ = [
     "store_stage_blob",
     "load_stage_blob",
     "list_stage_blobs",
+    "find_blobs",
+    "count_blobs",
+    "delete_blobs",
+    "reassign_blobs",
     "tar_directory",
     "untar_to_directory",
     "KNOWN_STAGE_TAGS",
@@ -265,18 +269,41 @@ CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Per-user workspace mapping. Each Airflow LDAP user gets exactly one
--- workspace_root, into which all their build artifacts are written.
--- Nobody's tasks ever touch anyone else's workspace_root: clean wipes only
--- the triggering user's directory; syn/par read and write only that
--- directory; the shared pd_blobs cache is the only thing crossing user
--- boundaries (and that's a read-only-via-tarball relationship).
+-- Per-user NAMED workspaces. A user may register multiple workspaces (keyed by
+-- workspace_name) so they can operate in several at the same time -- e.g. one
+-- per branch / tool config / experiment. The active workspace for a given DAG
+-- run is selected per-run (dag_run.conf["workspace"] or $HAMMER_WORKSPACE),
+-- defaulting to 'default'. Each (username, workspace_name) maps to one
+-- workspace_root into which that run's build artifacts are written. Nobody's
+-- tasks ever touch anyone else's directory: clean wipes only the triggering
+-- user's resolved <workspace_root>/<design>; the shared pd_blobs cache is the
+-- only thing crossing user boundaries (read-only-via-tarball).
 CREATE TABLE IF NOT EXISTS {FQ_WORKSPACE} (
-    username       TEXT PRIMARY KEY,
+    username       TEXT NOT NULL,
+    workspace_name TEXT NOT NULL DEFAULT 'default',
     workspace_root TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (username, workspace_name)
 );
+
+-- Migrate older single-column-PK workspace tables (username was the sole PK)
+-- to the composite key in place, so existing deployments gain multi-workspace
+-- support without a manual DROP/recreate. Existing rows become each user's
+-- 'default' workspace. Idempotent: the DO block only fires while the PK is
+-- still 1 column.
+ALTER TABLE {FQ_WORKSPACE} ADD COLUMN IF NOT EXISTS workspace_name TEXT NOT NULL DEFAULT 'default';
+DO $$
+DECLARE pk_name text; pk_cols int;
+BEGIN
+    SELECT conname, array_length(conkey, 1) INTO pk_name, pk_cols
+    FROM pg_constraint
+    WHERE conrelid = '{FQ_WORKSPACE}'::regclass AND contype = 'p';
+    IF pk_cols = 1 THEN
+        EXECUTE format('ALTER TABLE {FQ_WORKSPACE} DROP CONSTRAINT %I', pk_name);
+        EXECUTE 'ALTER TABLE {FQ_WORKSPACE} ADD PRIMARY KEY (username, workspace_name)';
+    END IF;
+END $$;
 
 -- Backfill the owner column for tables that already exist from earlier inits.
 ALTER TABLE {FQ_MASTER} ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT current_user;
@@ -379,27 +406,32 @@ def revoke_access(role: str) -> None:
         conn.close()
 
 
-def get_user_workspace(username: Optional[str]) -> str:
+def get_user_workspace(username: Optional[str], workspace_name: str = "default") -> str:
     """
-    Resolve the workspace root for the given user.
+    Resolve the workspace root for the given user + named workspace.
 
-    Returns an absolute path under which all of the user's build artifacts
-    must live. Each user has exactly one row in ``hammer_poc.user_workspaces``;
-    no row means no workspace has been registered yet, and this function will
-    auto-register one with a sensible default (a per-user subdirectory under
-    the Airflow daemon user's ``hammer`` checkout, so file-system permissions
-    work out of the box on a shared deployment).
+    Returns an absolute path under which the user's build artifacts for this
+    workspace must live. A user may have MANY named workspaces (so they can
+    operate in several at once); ``workspace_name`` selects which one, and
+    defaults to ``'default'``. No row for that (user, workspace) pair means it
+    hasn't been registered yet, and this function auto-registers one with a
+    sensible default (a per-user[-workspace] subdirectory under the Airflow
+    daemon user's ``hammer`` checkout, so file-system permissions work out of
+    the box on a shared deployment).
 
     Callers should append a per-design subdirectory (e.g. ``/gcd``) to the
     returned path before using it as ``OBJ_DIR``.
 
-    Falls back to the OS user if ``username`` is empty or None.
+    Falls back to the OS user if ``username`` is empty or None, and to the
+    'default' workspace if ``workspace_name`` is empty or None.
     """
     if not username:
         try:
             username = getpass.getuser()
         except Exception:
             username = "default"
+    if not workspace_name:
+        workspace_name = "default"
 
     settings = _pg_settings()
     conn = psycopg2.connect(**settings)
@@ -408,31 +440,42 @@ def get_user_workspace(username: Optional[str]) -> str:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT workspace_root FROM {FQ_WORKSPACE} WHERE username = %s",
-                (username,),
+                f"SELECT workspace_root FROM {FQ_WORKSPACE} "
+                f"WHERE username = %s AND workspace_name = %s",
+                (username, workspace_name),
             )
             row = cur.fetchone()
             if row and row[0]:
                 return row[0]
 
-            # Auto-register a default workspace. Anchor under the daemon
-            # user's home so the running Airflow process has write access
-            # without needing perms on someone else's home directory.
-            try:
-                daemon_user = getpass.getuser()
-            except Exception:
-                daemon_user = "lawrencejrhee"
-            daemon_home = os.path.expanduser(f"~{daemon_user}")
+            # Auto-register this (user, workspace). Anchor the default under the
+            # checkout THIS code is running from -- i.e. the user's OWN hammer
+            # working copy -- so each user's builds land in their own directory,
+            # not whichever daemon happened to create the row first. (Anchoring
+            # under the daemon's home meant a row created by user A's Airflow
+            # pointed every other user at A's home.) __file__ here is
+            # <checkout>/hammer/vlsi/pd_store.py, so three dirnames up is the
+            # checkout root; fall back to the triggering user's home only if that
+            # checkout has no e2e/. The build dir is always per-user
+            # (build-sky130-cm-<user>); named workspaces add a '-<name>' suffix.
+            checkout = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            e2e_dir = os.path.join(checkout, "e2e")
+            if not os.path.isdir(e2e_dir):
+                e2e_dir = os.path.join(
+                    os.path.expanduser(f"~{username}"), "hammer", "e2e"
+                )
+            suffix = "" if workspace_name == "default" else f"-{workspace_name}"
             default = os.path.join(
-                daemon_home, "hammer", "e2e",
-                f"build-sky130-cm-{username}",
+                e2e_dir, f"build-sky130-cm-{username}{suffix}",
             )
             try:
                 cur.execute(
-                    f"INSERT INTO {FQ_WORKSPACE} (username, workspace_root) "
-                    f"VALUES (%s, %s) "
-                    f"ON CONFLICT (username) DO NOTHING",
-                    (username, default),
+                    f"INSERT INTO {FQ_WORKSPACE} (username, workspace_name, workspace_root) "
+                    f"VALUES (%s, %s, %s) "
+                    f"ON CONFLICT (username, workspace_name) DO NOTHING",
+                    (username, workspace_name, default),
                 )
             except Exception:
                 # If we can't write the row (e.g. read-only role), just
@@ -443,17 +486,27 @@ def get_user_workspace(username: Optional[str]) -> str:
         conn.close()
 
 
-def list_user_workspaces() -> List[Tuple[str, str, Any]]:
-    """Return all rows in user_workspaces as (username, workspace_root, updated_at)."""
+def list_user_workspaces(username: Optional[str] = None) -> List[Tuple[str, str, str, Any]]:
+    """Return rows from user_workspaces as
+    (username, workspace_name, workspace_root, updated_at). Pass ``username`` to
+    list only that user's workspaces; omit it to list everyone's."""
     settings = _pg_settings()
     conn = psycopg2.connect(**settings)
     try:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT username, workspace_root, updated_at FROM {FQ_WORKSPACE} "
-                f"ORDER BY username"
-            )
+            if username:
+                cur.execute(
+                    f"SELECT username, workspace_name, workspace_root, updated_at "
+                    f"FROM {FQ_WORKSPACE} WHERE username = %s "
+                    f"ORDER BY username, workspace_name",
+                    (username,),
+                )
+            else:
+                cur.execute(
+                    f"SELECT username, workspace_name, workspace_root, updated_at "
+                    f"FROM {FQ_WORKSPACE} ORDER BY username, workspace_name"
+                )
             return list(cur.fetchall())
     finally:
         conn.close()
@@ -531,28 +584,210 @@ def delete_artifacts(kind: Optional[str] = None) -> int:
         conn.close()
 
 
-def delete_user_workspace(username: str) -> bool:
-    """Remove a user's workspace registration. Returns True if a row was deleted."""
+def delete_user_workspace(username: str, workspace_name: Optional[str] = None) -> bool:
+    """Remove a user's workspace registration(s). Returns True if a row was deleted.
+
+    With ``workspace_name``, removes only that one named workspace; without it,
+    removes ALL of the user's workspaces."""
     settings = _pg_settings()
     conn = psycopg2.connect(**settings)
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                f"DELETE FROM {FQ_WORKSPACE} WHERE username = %s",
-                (username,),
-            )
+            if workspace_name:
+                cur.execute(
+                    f"DELETE FROM {FQ_WORKSPACE} "
+                    f"WHERE username = %s AND workspace_name = %s",
+                    (username, workspace_name),
+                )
+            else:
+                cur.execute(
+                    f"DELETE FROM {FQ_WORKSPACE} WHERE username = %s",
+                    (username,),
+                )
             return cur.rowcount > 0
     finally:
         conn.close()
 
 
-def set_user_workspace(username: str, workspace_root: str) -> None:
-    """Explicitly set or update the workspace root for a user."""
+# ---------------------------------------------------------------------------
+# Filter-based management of pd_blobs (find / count / delete / reassign).
+#
+# Powers the blob-find / blob-delete / blob-reassign CLI verbs. Every filter
+# is optional and ANDed together. delete/reassign refuse to run with no filter
+# at all, so a stray command can never touch the whole table -- use wipe-blobs
+# to clear everything on purpose.
+# ---------------------------------------------------------------------------
+
+# Columns that filter as a simple `col = %s` equality.
+_BLOB_EQ_FILTERS = ("owner", "triggering_user", "design", "stage", "dag_id",
+                    "workspace")
+
+
+def _blob_filter_sql(
+    *,
+    user: Optional[str] = None,
+    owner: Optional[str] = None,
+    triggering_user: Optional[str] = None,
+    design: Optional[str] = None,
+    stage: Optional[str] = None,
+    dag_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+    sha: Optional[str] = None,
+) -> Tuple[str, list, int]:
+    """
+    Build a parameterized WHERE clause for pd_blobs from optional filters.
+
+    ``user`` matches either ``owner`` OR ``triggering_user`` (the common
+    "everything from this person" case); ``owner``/``triggering_user`` match
+    that exact column. ``before``/``after`` bound ``created_at`` (any string
+    Postgres can cast to timestamptz, e.g. '2026-06-01'). ``sha`` matches a
+    sha256 prefix.
+
+    Returns (where_sql, params, num_filters); where_sql is '' when no filter
+    was given (num_filters == 0).
+    """
+    clauses: list = []
+    params: list = []
+    eq = {"owner": owner, "triggering_user": triggering_user, "design": design,
+          "stage": stage, "dag_id": dag_id, "workspace": workspace}
+    for col in _BLOB_EQ_FILTERS:
+        if eq[col] is not None:
+            clauses.append(f"{col} = %s")
+            params.append(eq[col])
+    if user is not None:
+        clauses.append("(owner = %s OR triggering_user = %s)")
+        params.extend([user, user])
+    if after is not None:
+        clauses.append("created_at >= %s::timestamptz")
+        params.append(after)
+    if before is not None:
+        clauses.append("created_at < %s::timestamptz")
+        params.append(before)
+    if sha is not None:
+        clauses.append("sha256 LIKE %s")
+        params.append(sha + "%")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params, len(clauses)
+
+
+# Columns returned by find_blobs -- same shape/order as list_stage_blobs.
+_BLOB_LIST_COLS = ("sha256, stage, size_bytes, duration_seconds, cpu_seconds, "
+                   "owner, triggering_user, dag_id, design, workspace, created_at")
+
+
+def find_blobs(limit: Optional[int] = 50, **filters: Any) -> List[Tuple[Any, ...]]:
+    """List pd_blobs rows matching the filters (see _blob_filter_sql), newest
+    first. ``limit`` caps the row count (None = no cap)."""
+    where, params, _ = _blob_filter_sql(**filters)
+    sql = f"SELECT {_BLOB_LIST_COLS} FROM {FQ_BLOB}{where} ORDER BY created_at DESC"
+    if limit is not None:
+        sql += " LIMIT %s"
+        params = params + [limit]
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def count_blobs(**filters: Any) -> Tuple[int, int]:
+    """Return (row_count, total_size_bytes) for pd_blobs rows matching filters."""
+    where, params, _ = _blob_filter_sql(**filters)
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM {FQ_BLOB}{where}",
+                params,
+            )
+            row = cur.fetchone()
+            return int(row[0]), int(row[1])
+    finally:
+        conn.close()
+
+
+def delete_blobs(**filters: Any) -> int:
+    """
+    Delete pd_blobs rows matching the filters. Returns rows deleted.
+
+    Refuses to run with no filter (raises ValueError) so a stray blob-delete
+    can never clear the whole table -- use wipe-blobs for that.
+    """
+    where, params, n = _blob_filter_sql(**filters)
+    if n == 0:
+        raise ValueError(
+            "refusing to delete with no filter; pass at least one of "
+            "--user/--design/--stage/--before/--after/--sha (or use wipe-blobs)."
+        )
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {FQ_BLOB}{where}", params)
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def reassign_blobs(
+    *,
+    set_owner: Optional[str] = None,
+    set_triggering_user: Optional[str] = None,
+    set_design: Optional[str] = None,
+    set_workspace: Optional[str] = None,
+    **filters: Any,
+) -> int:
+    """
+    Update provenance columns (owner / triggering_user / design / workspace)
+    on pd_blobs rows matching the filters. Returns rows updated.
+
+    Refuses to run with no filter, or with nothing to set. Handy for
+    "move user A's blobs to workspace X" or "retag a design".
+    """
+    where, params, n = _blob_filter_sql(**filters)
+    if n == 0:
+        raise ValueError("refusing to update with no filter; narrow it with --user/--design/etc.")
+    set_cols: list = []
+    set_params: list = []
+    for col, val in (("owner", set_owner),
+                     ("triggering_user", set_triggering_user),
+                     ("design", set_design),
+                     ("workspace", set_workspace)):
+        if val is not None:
+            set_cols.append(f"{col} = %s")
+            set_params.append(val)
+    if not set_cols:
+        raise ValueError("nothing to set; pass at least one --set-* value.")
+    sql = f"UPDATE {FQ_BLOB} SET {', '.join(set_cols)}{where}"
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, set_params + params)
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def set_user_workspace(username: str, workspace_root: str,
+                       workspace_name: str = "default") -> None:
+    """Explicitly set or update one named workspace root for a user.
+
+    ``workspace_name`` defaults to 'default'; pass a distinct name to register
+    an additional workspace the user can run in concurrently."""
     if not username:
         raise ValueError("username must be non-empty")
     if not workspace_root:
         raise ValueError("workspace_root must be non-empty")
+    if not workspace_name:
+        workspace_name = "default"
     settings = _pg_settings()
     conn = psycopg2.connect(**settings)
     conn.autocommit = True
@@ -560,12 +795,12 @@ def set_user_workspace(username: str, workspace_root: str) -> None:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(
-                f"INSERT INTO {FQ_WORKSPACE} (username, workspace_root) "
-                f"VALUES (%s, %s) "
-                f"ON CONFLICT (username) "
+                f"INSERT INTO {FQ_WORKSPACE} (username, workspace_name, workspace_root) "
+                f"VALUES (%s, %s, %s) "
+                f"ON CONFLICT (username, workspace_name) "
                 f"DO UPDATE SET workspace_root = EXCLUDED.workspace_root, "
                 f"              updated_at     = NOW()",
-                (username, workspace_root),
+                (username, workspace_name, workspace_root),
             )
     finally:
         conn.close()

@@ -461,35 +461,40 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_workspace_list(_args: argparse.Namespace) -> int:
-    rows = pd_store.list_user_workspaces()
+def _cmd_workspace_list(args: argparse.Namespace) -> int:
+    rows = pd_store.list_user_workspaces(getattr(args, "username", None))
     if not rows:
         print("(no workspaces registered)")
         return 0
-    print(f"{'username':<24} {'workspace_root':<60} updated_at")
+    print(f"{'username':<20} {'workspace':<16} {'workspace_root':<56} updated_at")
     print("-" * 120)
-    for username, root, updated_at in rows:
-        print(f"{username:<24} {root:<60} {updated_at}")
+    for username, name, root, updated_at in rows:
+        print(f"{username:<20} {name:<16} {root:<56} {updated_at}")
     return 0
 
 
 def _cmd_workspace_show(args: argparse.Namespace) -> int:
-    root = pd_store.get_user_workspace(args.username)
+    root = pd_store.get_user_workspace(args.username, args.name)
     print(root)
     return 0
 
 
 def _cmd_workspace_set(args: argparse.Namespace) -> int:
-    pd_store.set_user_workspace(args.username, args.workspace_root)
-    print(f"Set workspace for '{args.username}' -> {args.workspace_root}")
+    pd_store.set_user_workspace(args.username, args.workspace_root, args.name)
+    print(f"Set workspace '{args.name}' for '{args.username}' -> {args.workspace_root}")
     return 0
 
 
 def _cmd_workspace_unset(args: argparse.Namespace) -> int:
-    if pd_store.delete_user_workspace(args.username):
-        print(f"Removed workspace registration for '{args.username}'.")
+    name = getattr(args, "name", None)
+    if pd_store.delete_user_workspace(args.username, name):
+        if name:
+            print(f"Removed workspace '{name}' for '{args.username}'.")
+        else:
+            print(f"Removed ALL workspace registrations for '{args.username}'.")
         return 0
-    print(f"No workspace was registered for '{args.username}'.", file=sys.stderr)
+    target = f"workspace '{name}'" if name else "any workspace"
+    print(f"No {target} was registered for '{args.username}'.", file=sys.stderr)
     return 1
 
 
@@ -515,11 +520,8 @@ def _human_dur(s: Optional[float]) -> str:
     return f"{int(s/3600)}h{int((s%3600)/60):02d}m"
 
 
-def _cmd_blob_list(args: argparse.Namespace) -> int:
-    rows = pd_store.list_stage_blobs(stage_tag=args.stage, limit=args.limit)
-    if not rows:
-        print("(no blobs)")
-        return 0
+def _print_blob_rows(rows) -> None:
+    """Print pd_blobs rows (the shape returned by list_stage_blobs / find_blobs)."""
     header = (f"{'sha':<10} {'stage':<10} {'size':>8} {'wall':>10} {'cpu':>10} "
               f"{'owner':<14} {'trig_user':<14} {'design':<28} {'dag_id':<28}  created_at")
     print(header)
@@ -532,6 +534,108 @@ def _cmd_blob_list(args: argparse.Namespace) -> int:
               f"{_short_str(owner,14):<14} "
               f"{_short_str(trig,14):<14} {_short_str(design,28):<28} "
               f"{_short_str(dag,28):<28}  {created}")
+
+
+def _cmd_blob_list(args: argparse.Namespace) -> int:
+    rows = pd_store.list_stage_blobs(stage_tag=args.stage, limit=args.limit)
+    if not rows:
+        print("(no blobs)")
+        return 0
+    _print_blob_rows(rows)
+    return 0
+
+
+# ---- Filter-based management: blob-find / blob-delete / blob-reassign ----
+
+def _blob_filter_kwargs(args: argparse.Namespace) -> dict:
+    """Pull the shared filter flags off ``args`` into pd_store filter kwargs."""
+    return {
+        "user": getattr(args, "user", None),
+        "owner": getattr(args, "owner", None),
+        "triggering_user": getattr(args, "triggering_user", None),
+        "design": getattr(args, "design", None),
+        "stage": getattr(args, "stage", None),
+        "dag_id": getattr(args, "dag_id", None),
+        "workspace": getattr(args, "workspace", None),
+        "before": getattr(args, "before", None),
+        "after": getattr(args, "after", None),
+        "sha": getattr(args, "sha", None),
+    }
+
+
+def _cmd_blob_find(args: argparse.Namespace) -> int:
+    kw = _blob_filter_kwargs(args)
+    rows = pd_store.find_blobs(limit=args.limit, **kw)
+    if not rows:
+        print("(no matching blobs)")
+        return 0
+    _print_blob_rows(rows)
+    n, total = pd_store.count_blobs(**kw)
+    extra = "" if n <= len(rows) else f" (showing newest {len(rows)})"
+    print(f"\n{n} blob(s) match, {_human_bytes(total)} total{extra}")
+    return 0
+
+
+def _cmd_blob_delete(args: argparse.Namespace) -> int:
+    kw = _blob_filter_kwargs(args)
+    if all(v is None for v in kw.values()):
+        print("Refusing to delete with no filter. Pass --user/--design/--stage/"
+              "--before/--after/--sha (or use wipe-blobs to clear everything).",
+              file=sys.stderr)
+        return 2
+    n, total = pd_store.count_blobs(**kw)
+    if n == 0:
+        print("(no matching blobs; nothing to delete)")
+        return 0
+    print(f"Matched {n} blob(s), {_human_bytes(total)}:")
+    _print_blob_rows(pd_store.find_blobs(limit=10, **kw))
+    if n > 10:
+        print(f"  ... and {n - 10} more")
+    if args.dry_run:
+        print(f"\n[dry-run] would delete {n} blob(s). Re-run without --dry-run to apply.")
+        return 0
+    if not _confirm(f"Permanently delete {n} blob(s) ({_human_bytes(total)})?", args.yes):
+        print("Aborted.")
+        return 1
+    deleted = pd_store.delete_blobs(**kw)
+    print(f"Deleted {deleted} blob(s).")
+    return 0
+
+
+def _cmd_blob_reassign(args: argparse.Namespace) -> int:
+    kw = _blob_filter_kwargs(args)
+    sets = {
+        "set_owner": args.set_owner,
+        "set_triggering_user": args.set_user,
+        "set_design": args.set_design,
+        "set_workspace": args.set_workspace,
+    }
+    if all(v is None for v in kw.values()):
+        print("Refusing to update with no filter. Narrow it with --user/--design/etc.",
+              file=sys.stderr)
+        return 2
+    if all(v is None for v in sets.values()):
+        print("Nothing to set. Pass at least one of --set-owner/--set-user/"
+              "--set-design/--set-workspace.", file=sys.stderr)
+        return 2
+    n, total = pd_store.count_blobs(**kw)
+    if n == 0:
+        print("(no matching blobs; nothing to update)")
+        return 0
+    changes = ", ".join(f"{k.replace('set_', '')}={v}"
+                        for k, v in sets.items() if v is not None)
+    print(f"Matched {n} blob(s). Will set: {changes}")
+    _print_blob_rows(pd_store.find_blobs(limit=10, **kw))
+    if n > 10:
+        print(f"  ... and {n - 10} more")
+    if args.dry_run:
+        print(f"\n[dry-run] would update {n} blob(s). Re-run without --dry-run to apply.")
+        return 0
+    if not _confirm(f"Update {n} blob(s) ({changes})?", args.yes):
+        print("Aborted.")
+        return 1
+    updated = pd_store.reassign_blobs(**sets, **kw)
+    print(f"Updated {updated} blob(s).")
     return 0
 
 
@@ -611,6 +715,59 @@ def _build_parser() -> argparse.ArgumentParser:
     p_blist.add_argument("-n", "--limit", type=int, default=20)
     p_blist.set_defaults(func=_cmd_blob_list)
 
+    def _add_blob_filters(p: argparse.ArgumentParser) -> None:
+        """Shared filter flags for blob-find / blob-delete / blob-reassign."""
+        g = p.add_argument_group("filters (ANDed together)")
+        g.add_argument("--user", help="match owner OR triggering_user (everything from this person)")
+        g.add_argument("--owner", help="exact Postgres role that stored the blob")
+        g.add_argument("--triggering-user", dest="triggering_user",
+                       help="exact Airflow user who triggered the run")
+        g.add_argument("--design", help="design name")
+        g.add_argument("--stage", help="stage tag (synthesis, par, drc, lvs, ...)")
+        g.add_argument("--dag-id", dest="dag_id", help="Airflow dag_id")
+        g.add_argument("--workspace", help="workspace root")
+        g.add_argument("--before", metavar="DATE",
+                       help="created_at < DATE (e.g. 2026-06-01 or 2026-06-01T12:00)")
+        g.add_argument("--after", metavar="DATE", help="created_at >= DATE")
+        g.add_argument("--sha", help="sha256 prefix")
+
+    p_bfind = sub.add_parser(
+        "blob-find",
+        help="List stage blobs filtered by user / design / stage / date / etc.",
+    )
+    _add_blob_filters(p_bfind)
+    p_bfind.add_argument("-n", "--limit", type=int, default=50,
+                         help="Max rows to print (default 50).")
+    p_bfind.set_defaults(func=_cmd_blob_find)
+
+    p_bdel = sub.add_parser(
+        "blob-delete",
+        help="Delete stage blobs matching filters (user/design/stage/date/...). "
+             "Refuses to run with no filter; prompts unless --yes.",
+    )
+    _add_blob_filters(p_bdel)
+    p_bdel.add_argument("--dry-run", action="store_true",
+                        help="Show what would be deleted, don't delete.")
+    p_bdel.add_argument("--yes", action="store_true",
+                        help="Skip the confirmation prompt.")
+    p_bdel.set_defaults(func=_cmd_blob_delete)
+
+    p_brea = sub.add_parser(
+        "blob-reassign",
+        help="Move/retag blobs: set owner/user/design/workspace on matching rows.",
+    )
+    _add_blob_filters(p_brea)
+    s = p_brea.add_argument_group("updates (at least one required)")
+    s.add_argument("--set-owner", dest="set_owner", help="new owner (Postgres role)")
+    s.add_argument("--set-user", dest="set_user", help="new triggering_user")
+    s.add_argument("--set-design", dest="set_design", help="new design name")
+    s.add_argument("--set-workspace", dest="set_workspace", help="new workspace root")
+    p_brea.add_argument("--dry-run", action="store_true",
+                        help="Show what would change, don't update.")
+    p_brea.add_argument("--yes", action="store_true",
+                        help="Skip the confirmation prompt.")
+    p_brea.set_defaults(func=_cmd_blob_reassign)
+
     p_grant = sub.add_parser("grant",
                              help=f"Add a role to the {pd_store.SLEDGEHAMMER_GROUP} group.")
     p_grant.add_argument("role", help="Postgres role name (e.g. 'colin').")
@@ -623,7 +780,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_ws_list = sub.add_parser(
         "workspace-list",
-        help="List all registered per-user workspace roots.",
+        help="List registered workspaces (all users, or just one user's).",
+    )
+    p_ws_list.add_argument(
+        "username", nargs="?", default=None,
+        help="Optional: list only this user's workspaces.",
     )
     p_ws_list.set_defaults(func=_cmd_workspace_list)
 
@@ -632,26 +793,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print the workspace root for a user (auto-registers default if missing).",
     )
     p_ws_show.add_argument("username", help="Airflow LDAP username.")
+    p_ws_show.add_argument(
+        "--name", default="default",
+        help="Workspace name to resolve (default: 'default').",
+    )
     p_ws_show.set_defaults(func=_cmd_workspace_show)
 
     p_ws_set = sub.add_parser(
         "workspace-set",
-        help="Set or update the workspace root for a user.",
+        help="Set or update a named workspace root for a user.",
     )
     p_ws_set.add_argument("username", help="Airflow LDAP username.")
     p_ws_set.add_argument(
         "workspace_root",
-        help="Absolute path to the user's workspace root. The Airflow daemon "
+        help="Absolute path to the workspace root. The Airflow daemon "
              "user must have write permission here.",
+    )
+    p_ws_set.add_argument(
+        "--name", default="default",
+        help="Workspace name (default: 'default'). Use distinct names to "
+             "register multiple workspaces a user can run in concurrently.",
     )
     p_ws_set.set_defaults(func=_cmd_workspace_set)
 
     p_ws_unset = sub.add_parser(
         "workspace-unset",
-        help="Remove a user's workspace registration. The next call for that "
-             "user will auto-register a fresh default.",
+        help="Remove a user's workspace registration(s). With --name removes "
+             "just that one; without it removes ALL of the user's workspaces. "
+             "The next call auto-registers a fresh default.",
     )
     p_ws_unset.add_argument("username")
+    p_ws_unset.add_argument(
+        "--name", default=None,
+        help="Workspace name to remove. Omit to remove ALL of the user's.",
+    )
     p_ws_unset.set_defaults(func=_cmd_workspace_unset)
 
     # ---- destructive cache-wiping subcommands ----

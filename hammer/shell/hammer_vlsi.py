@@ -38,7 +38,6 @@ import pendulum
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'vlsi')))
 
 from hammer.vlsi import CLIDriver
-from hammer.vlsi.cli_driver import import_task_to_dag
 #import pdb
 #pdb.set_trace()
 
@@ -118,6 +117,7 @@ def _resolve_workspace_obj_dir(context, design):
     user = None
     dag_id = None
     run_id = None
+    ws_name = None
     try:
         if context is not None:
             dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
@@ -125,6 +125,13 @@ def _resolve_workspace_obj_dir(context, design):
                 user = getattr(dag_run, "triggering_user_name", None)
                 dag_id = getattr(dag_run, "dag_id", None)
                 run_id = getattr(dag_run, "run_id", None)
+                # Which NAMED workspace this run targets. This is what lets one
+                # user operate in several workspaces at the same time: trigger
+                # the DAG with conf={"workspace": "<name>"} and each run lands
+                # in its own <workspace_root>/<design>. Defaults to 'default'.
+                conf = getattr(dag_run, "conf", None)
+                if isinstance(conf, dict):
+                    ws_name = conf.get("workspace") or conf.get("workspace_name")
     except Exception:
         pass
 
@@ -136,9 +143,36 @@ def _resolve_workspace_obj_dir(context, design):
     if not user:
         user = os.environ.get("USER", "default")
 
+    # Run provenance for the cache layer -- stamped regardless of whether we
+    # override OBJ_DIR, since it's path-independent metadata that
+    # pd_cache.cache_or_run reads to tag each stored blob with who/which-run
+    # produced it.
+    if dag_id:
+        os.environ["HAMMER_AIRFLOW_DAG_ID"] = str(dag_id)
+    if run_id:
+        os.environ["HAMMER_AIRFLOW_RUN_ID"] = str(run_id)
+    if user:
+        os.environ["HAMMER_AIRFLOW_TRIGGERING_USER"] = str(user)
+
+    # The per-user workspace OBJ_DIR override is OPT-IN. By default the DAG each
+    # user generated in their OWN checkout already bakes the correct build dir
+    # (the gen-time OBJ_DIR), so recomputing it from the shared user_workspaces
+    # table is redundant -- and actively wrong when that table holds a stale row
+    # (it pointed one user at another user's build dir). Returning None here
+    # leaves the gen-time OBJ_DIR authoritative. Set HAMMER_PER_USER_WORKSPACE=1
+    # only for a shared-DAG deployment where ONE generated DAG serves many users
+    # (this flag also enables named workspaces via conf["workspace"]).
+    if not os.environ.get("HAMMER_PER_USER_WORKSPACE"):
+        return None
+
+    # Per-run workspace selection. Env var is the fallback for non-Airflow /
+    # direct-CLI runs (set HAMMER_WORKSPACE=<name>); default keeps old behavior.
+    if not ws_name:
+        ws_name = os.environ.get("HAMMER_WORKSPACE") or "default"
+
     try:
         from hammer.vlsi import pd_store
-        workspace_root = pd_store.get_user_workspace(user)
+        workspace_root = pd_store.get_user_workspace(user, ws_name)
     except Exception as e:
         print(f"WARNING: could not resolve per-user workspace for {user!r}: {e}. "
               f"Falling back to default OBJ_DIR.")
@@ -149,21 +183,13 @@ def _resolve_workspace_obj_dir(context, design):
     # Also clear HAMMER_D_MK since it derives from OBJ_DIR; otherwise a
     # previous task's value could leak across users in the same worker.
     os.environ.pop("HAMMER_D_MK", None)
-
-    # Hand provenance down to the cache layer via env. pd_cache.cache_or_run
-    # reads these and stamps each pd_blobs row at STORE time so blob-list can
-    # tell us who triggered what.
-    if dag_id:
-        os.environ["HAMMER_AIRFLOW_DAG_ID"] = str(dag_id)
-    if run_id:
-        os.environ["HAMMER_AIRFLOW_RUN_ID"] = str(run_id)
-    if user:
-        os.environ["HAMMER_AIRFLOW_TRIGGERING_USER"] = str(user)
     if workspace_root:
         os.environ["HAMMER_AIRFLOW_WORKSPACE"] = str(workspace_root)
+    if ws_name:
+        os.environ["HAMMER_AIRFLOW_WORKSPACE_NAME"] = str(ws_name)
 
-    print(f"[user-workspace] triggering_user={user!r} dag_id={dag_id!r} "
-          f"run_id={run_id!r} -> OBJ_DIR={obj_dir}")
+    print(f"[user-workspace] triggering_user={user!r} workspace={ws_name!r} "
+          f"dag_id={dag_id!r} run_id={run_id!r} -> OBJ_DIR={obj_dir}")
     return obj_dir
 
 
