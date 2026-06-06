@@ -45,8 +45,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
-import psycopg2
-from psycopg2.extras import Json
+try:
+    import psycopg2
+    from psycopg2.extras import Json
+except ImportError:
+    # The Postgres driver is OPTIONAL. pd_store is imported on the hammer run
+    # path (pd_cache wraps every stage), but synthesis itself doesn't need
+    # Postgres. If psycopg2 isn't installed, leave it unset rather than crash
+    # the whole run: cache_or_run already falls back to running the stage
+    # normally on any pd_store error, so plain hammer keeps working in envs that
+    # never installed the cache driver (e.g. a chipyard conda env). Install
+    # psycopg2-binary to turn the cache back on.
+    psycopg2 = None  # type: ignore
+    Json = None      # type: ignore
 
 from hammer.config import HammerJSONEncoder
 
@@ -212,6 +223,11 @@ def _pg_settings() -> Dict[str, Any]:
 
 def _connect():
     """Open a new psycopg2 connection using env-var config."""
+    if psycopg2 is None:
+        raise RuntimeError(
+            "psycopg2 is not installed; the Postgres PD cache is unavailable. "
+            "Install it with `pip install psycopg2-binary` to enable caching."
+        )
     return psycopg2.connect(**_pg_settings())
 
 
