@@ -34,14 +34,6 @@ from hammer.utils import add_dicts, deeplist, deepdict, get_or_else, check_funct
 
 from hammer.config import HammerJSONEncoder
 
-from airflow.models.dag import DAG
-from airflow.operators.python import PythonOperator
-from airflow.models.baseoperator import chain
-from airflow.decorators import task, dag
-from datetime import datetime, timedelta
-
-#import pdb
-#pdb.set_trace()
 
 KEY_DIR = tempfile.mkdtemp()
 KEY_PATH = os.path.join(KEY_DIR, "key-history.json")
@@ -1896,8 +1888,3 @@ class CLIDriver:
             return 1
 
         return self.run_main_parsed(vars(parser.parse_args(args)))
-
-@task
-def import_task_to_dag():
-    print("hi")
-    return
