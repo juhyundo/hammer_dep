@@ -165,6 +165,7 @@ class CLIDriver:
         self.par_rundir = ""  # type: Optional[str]
         self.drc_rundir = ""  # type: Optional[str]
         self.lvs_rundir = ""  # type: Optional[str]
+        self.force_rerun = False  # type: bool
         self.sram_generator_rundir = ""  # type: Optional[str]
         self.sim_rundir = ""  # type: Optional[str]
         self.power_rundir = "" # type: Optional[str]
@@ -624,7 +625,7 @@ class CLIDriver:
 
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
-                if driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
+                if self.force_rerun or driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
                         return None
                     else:
@@ -648,7 +649,7 @@ class CLIDriver:
                 else:
                     return 0
             elif action_type == "par":
-                if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
+                if self.force_rerun or driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
                         return None
                     else:
@@ -672,7 +673,7 @@ class CLIDriver:
                 else:
                     return 0
             elif action_type == "drc":
-                if driver.database.stage_change_check(stage = "drc"):
+                if self.force_rerun or driver.database.stage_change_check(stage = "drc"):
                     if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
                         return None
                     else:
@@ -696,7 +697,7 @@ class CLIDriver:
                 else:
                     return 0
             elif action_type == "lvs":
-                if driver.database.stage_change_check(stage = "lvs"):
+                if self.force_rerun or driver.database.stage_change_check(stage = "lvs"):
                     if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
                         return None
                     else:
@@ -1708,6 +1709,8 @@ class CLIDriver:
 
         driver, errors = self.args_to_driver(args)
 
+        self.force_rerun = bool(args.get('force', False))
+
         # Check for action after creating the driver (e.g. for custom actions like hierarchical actions).
         action = str(args['action'])  # type: str
         if action not in self.valid_actions():
@@ -1792,6 +1795,8 @@ class CLIDriver:
                             help="Run the given action until the given step (exclusive). Not compatible with --stop_after_step.")
         parser.add_argument("--only_step", dest="only_step", required=False,
                             help="Run only the given step. Not compatible with --{start|stop}_{before|after}_step.")
+        parser.add_argument("--force", dest="force", default=False, action='store_true',
+                            help='Force rerun even if dependency check finds no changes.')
         # Required arguments for CLI hammer driver.
         parser.add_argument("-o", "--output", default="output.json", required=False,
                             help='Output JSON file for results and modular use of hammer-vlsi. Default: output.json.')
