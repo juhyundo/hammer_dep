@@ -194,7 +194,7 @@ def _resolve_workspace_obj_dir(context, design):
 
 
 class AIRFlow:
-    def __init__(self, context=None):
+    def __init__(self, context=None, force: bool = False):
         # minimal flow configuration variables
         self.design = os.getenv('design', 'gcd')
         self.pdk = os.getenv('pdk', 'sky130')
@@ -202,6 +202,8 @@ class AIRFlow:
         self.env = os.getenv('env', 'bwrc')
         self.extra = os.getenv('extra', '')  # extra configs
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
+        if force:
+            self.args = (self.args + ' --force').strip()
 
         # Per-user workspace isolation: if we have an Airflow DAG run context,
         # pin OBJ_DIR to the triggering user's workspace before reading it
@@ -1036,6 +1038,12 @@ class AIRFlow:
             type='boolean',
             title='AutoTA Debug',
             description='Run AI-powered autoTA debug analysis after each stage'
+        ),
+        'force': Param(
+            default=False,
+            type='boolean',
+            title='Force Rerun',
+            description='Force rerun of selected stages even if dependency check finds no changes'
         )
     },
     render_template_as_native_obj=True
@@ -1080,7 +1088,7 @@ def create_hammer_dag_gcd():
         print("Starting build task")
         if context['dag_run'].conf.get('build', False):
             print("Build parameter is True, executing build")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.build():
                 raise AirflowFailException("build failed")
         else:
@@ -1111,7 +1119,7 @@ def create_hammer_dag_gcd():
         print("Starting sim_rtl task")
         if context['dag_run'].conf.get('sim_rtl', False):
             print("Sim-RTL parameter is True, executing sim_rtl")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.sim_rtl():
                 raise AirflowFailException("sim_rtl failed")
         else:
@@ -1124,7 +1132,7 @@ def create_hammer_dag_gcd():
         print("Starting power_rtl task")
         if context['dag_run'].conf.get('power_rtl', False):
             print("power_RTL parameter is True, executing power_rtl")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.sim_rtl_to_power():
                 raise AirflowFailException("sim_rtl_to_power failed")
             if flow.power_rtl():
@@ -1139,7 +1147,7 @@ def create_hammer_dag_gcd():
         print("Starting syn task")
         if context['dag_run'].conf.get('syn', False):
             print("Synthesis parameter is True, executing syn")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.syn():
                 raise AirflowFailException("syn failed")
         else:
@@ -1152,7 +1160,7 @@ def create_hammer_dag_gcd():
         print("Starting power_syn task")
         if context['dag_run'].conf.get('power_syn', False):
             print("power_Synthesis parameter is True, executing power_syn")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.syn_to_power():
                 raise AirflowFailException("syn_to_power failed")
             if flow.sim_syn_to_power():
@@ -1169,7 +1177,7 @@ def create_hammer_dag_gcd():
         print("Starting timing_syn task")
         if context['dag_run'].conf.get('timing_syn', False):
             print("timing_Synthesis parameter is True, executing timing_syn")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.syn_to_timing():
                 raise AirflowFailException("syn_to_timing failed")
             if flow.timing_syn():
@@ -1184,7 +1192,7 @@ def create_hammer_dag_gcd():
         print("Starting formal_syn task")
         if context['dag_run'].conf.get('formal_syn', False):
             print("formal_Synthesis parameter is True, executing formal_syn")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.syn_to_formal():
                 raise AirflowFailException("syn_to_formal failed")
             if flow.formal_syn():
@@ -1199,7 +1207,7 @@ def create_hammer_dag_gcd():
         print("Starting sim_syn task")
         if context['dag_run'].conf.get('sim_syn', False):
             print("sim_Synthesis parameter is True, executing sim_syn")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.syn_to_sim():
                 raise AirflowFailException("syn_to_sim failed")
             if flow.sim_syn():
@@ -1214,7 +1222,7 @@ def create_hammer_dag_gcd():
         print("Starting par task")
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing par")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.syn_to_par():
                 raise AirflowFailException("syn_to_par failed")
             if flow.par():
@@ -1229,7 +1237,7 @@ def create_hammer_dag_gcd():
         print("Starting formal_par task")
         if context['dag_run'].conf.get('formal_par', False):
             print("formal_PAR parameter is True, executing formal_par")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.par_to_formal():
                 raise AirflowFailException("par_to_formal failed")
             if flow.formal_par():
@@ -1244,7 +1252,7 @@ def create_hammer_dag_gcd():
         print("Starting timing_par task")
         if context['dag_run'].conf.get('timing_par', False):
             print("timing_PAR parameter is True, executing timing_par")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.par_to_timing():
                 raise AirflowFailException("par_to_timing failed")
             if flow.timing_par():
@@ -1259,7 +1267,7 @@ def create_hammer_dag_gcd():
         print("Starting sim_par task")
         if context['dag_run'].conf.get('sim_par', False):
             print("sim_PAR parameter is True, executing sim_par")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.par_to_sim():
                 raise AirflowFailException("par_to_sim failed")
             if flow.sim_par():
@@ -1274,7 +1282,7 @@ def create_hammer_dag_gcd():
         print("Starting Power_Par task")
         if context['dag_run'].conf.get('power_par', False):
             print("Power_PAR parameter is True, executing Power_Par")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.sim_par_to_power():
                 raise AirflowFailException("sim_par_to_power failed")
             if flow.par_to_power():
@@ -1291,7 +1299,7 @@ def create_hammer_dag_gcd():
         print("Starting DRC task")
         if context['dag_run'].conf.get('drc', False):
             print("DRC parameter is True, executing DRC")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.par_to_drc():
                 raise AirflowFailException("par_to_drc failed")
             if flow.drc():
@@ -1306,7 +1314,7 @@ def create_hammer_dag_gcd():
         print("Starting LVS task")
         if context['dag_run'].conf.get('lvs', False):
             print("LVS parameter is True, executing LVS")
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             if flow.par_to_lvs():
                 raise AirflowFailException("par_to_lvs failed")
             if flow.lvs():
@@ -1327,7 +1335,7 @@ def create_hammer_dag_gcd():
             print("Debug parameter is False, skipping")
             raise AirflowSkipException("Debug not enabled")
         if context['dag_run'].conf.get('syn', False):
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             current_script_dir = os.path.dirname(os.path.abspath(__file__))
             gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
             command = [sys.executable, gemini_path, "--phase", "syn"]
@@ -1369,7 +1377,7 @@ def create_hammer_dag_gcd():
             print("Debug parameter is False, skipping")
             raise AirflowSkipException("Debug not enabled")
         if context['dag_run'].conf.get('sim_rtl', False):
-            flow = AIRFlow(context=context)
+            flow = AIRFlow(context=context, force=context['dag_run'].conf.get('force', False))
             current_script_dir = os.path.dirname(os.path.abspath(__file__))
             gemini_path = os.path.join(current_script_dir, "autoTA", "gemini.py")
             command = [sys.executable, gemini_path, "--phase", "sim_rtl"]
@@ -1528,7 +1536,7 @@ def create_hammer_dag_gcd():
 hammer_dag_gcd = create_hammer_dag_gcd()
 
 class AIRFlow_rocket:
-    def __init__(self, context=None):
+    def __init__(self, context=None, force: bool = False):
         # minimal flow configuration variables
         self.design = os.getenv('design', 'intel2x2')
         self.pdk = os.getenv('pdk', 'intech22')
@@ -1536,6 +1544,8 @@ class AIRFlow_rocket:
         self.env = os.getenv('env', 'intel2x2')
         self.extra = os.getenv('extra', '')  # extra configs
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
+        if force:
+            self.args = (self.args + ' --force').strip()
 
         # Per-user workspace isolation: pin OBJ_DIR to the triggering user's
         # workspace before reading it below. See AIRFlow.__init__ for details.
@@ -1963,6 +1973,12 @@ class AIRFlow_rocket:
             type='boolean',
             title='Power Place and Route',
             description='Get power from place and route'
+        ),
+        'force': Param(
+            default=False,
+            type='boolean',
+            title='Force Rerun',
+            description='Force rerun of selected stages even if dependency check finds no changes'
         )
     },
     render_template_as_native_obj=True
@@ -1997,7 +2013,7 @@ def create_hammer_dag_rocket():
         print("Starting build task")
         if context['dag_run'].conf.get('build', False):
             print("Build parameter is True, executing build")
-            flow = AIRFlow_rocket(context=context)
+            flow = AIRFlow_rocket(context=context, force=context['dag_run'].conf.get('force', False))
             flow.build()
         else:
             print("Build parameter is False, skipping")
@@ -2028,7 +2044,7 @@ def create_hammer_dag_rocket():
         print("Starting sim_rtl task")
         if context['dag_run'].conf.get('sim_rtl', False):
             print("Sim-RTL parameter is True, executing sim_rtl")
-            flow = AIRFlow_rocket(context=context)
+            flow = AIRFlow_rocket(context=context, force=context['dag_run'].conf.get('force', False))
             flow.sim_rtl()
         else:
             print("Sim-RTL parameter is False, skipping")
@@ -2040,7 +2056,7 @@ def create_hammer_dag_rocket():
         print("Starting sram task")
         if context['dag_run'].conf.get('sram_generator', False):
             print("SRAM parameter is True, executing sram_generator")
-            flow = AIRFlow_rocket(context=context)
+            flow = AIRFlow_rocket(context=context, force=context['dag_run'].conf.get('force', False))
             flow.sram_generator()
         else:
             print("SRAM parameter is False, skipping")
@@ -2064,7 +2080,7 @@ def create_hammer_dag_rocket():
         if (context['dag_run'].conf.get('sram_generator', False) or
          context['dag_run'].conf.get('syn', False)):
             print("Synthesis parameter is True, executing syn")
-            flow = AIRFlow_rocket(context=context)
+            flow = AIRFlow_rocket(context=context, force=context['dag_run'].conf.get('force', False))
             flow.syn()
         else:
             print("Synthesis parameter is False, skipping")
@@ -2076,7 +2092,7 @@ def create_hammer_dag_rocket():
         print("Starting syn-to-par task")
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing syn-to-par")
-            flow = AIRFlow_rocket(context=context)
+            flow = AIRFlow_rocket(context=context, force=context['dag_run'].conf.get('force', False))
             flow.syn_to_par()
         else:
             print("PAR parameter is False, skipping")
@@ -2088,7 +2104,7 @@ def create_hammer_dag_rocket():
         print("Starting par task")
         if context['dag_run'].conf.get('par', False):
             print("PAR parameter is True, executing par")
-            flow = AIRFlow_rocket(context=context)
+            flow = AIRFlow_rocket(context=context, force=context['dag_run'].conf.get('force', False))
             flow.par()
         else:
             print("PAR parameter is False, skipping")
@@ -2285,6 +2301,8 @@ class PatchAwareTriggerOperator(TriggerDagRunOperator):
                             description='Get formal from place and route'),
         'power_par': Param(default=False, type='boolean', title='Power Place and Route',
                            description='Get power from place and route'),
+        'force': Param(default=False, type='boolean', title='Force Rerun',
+                       description='Force rerun of selected stages even if dependency check finds no changes'),
     },
     render_template_as_native_obj=True
 )
