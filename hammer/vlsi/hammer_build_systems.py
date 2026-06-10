@@ -719,6 +719,22 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             if extra_flags and str(extra_flags) != "None":
                 cmd += extra_flags
 
+            # Per-run modifiers (force_local / redo). The 'local' and 'redo' DAG
+            # Params map to hammer's --local (skip the DB cache pull, run the
+            # tool locally) and --force (ignore dependency checks). They apply to
+            # every stage in this run, so selecting e.g. 'par' + 'local' runs par
+            # locally with no per-target flags.
+            _mods = {{}}
+            if context is not None:
+                try:
+                    _mods = context['dag_run'].conf or {{}}
+                except Exception:
+                    _mods = {{}}
+            if _mods.get('local'):
+                cmd += ["--local"]
+            if _mods.get('redo'):
+                cmd += ["--force"]
+
             cmd += ["--obj_dir", obj_dir, action_clean]
 
             print(f"Executing Process Command: {{' '.join(cmd)}}")
@@ -979,6 +995,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         'formal_par': Param(default=False, type='boolean', title='Formal Place and Route'),
         'power_par': Param(default=False, type='boolean', title='Power Place and Route'),
         'tools': Param(default=DEFAULT_TOOLS, type='string', enum=TOOLS_CHOICES, title='Tools config'),
+        'local': Param(default=False, type='boolean', title='Local (skip DB cache pull; run the tool locally)'),
+        'redo': Param(default=False, type='boolean', title='Redo (ignore dependency checks for this run)'),
     }},
     render_template_as_native_obj=True
 )

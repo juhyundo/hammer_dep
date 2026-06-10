@@ -347,6 +347,7 @@ def cache_or_run(
     rundir: str,
     output_filename: str,
     run_fn: Callable[[], Tuple[bool, Dict[str, Any]]],
+    force_local: bool = False,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Cache wrapper around a stage's run function.
@@ -359,6 +360,10 @@ def cache_or_run(
             (e.g. "syn-output.json"). Used to reconstruct the output dict on
             cache hit.
         run_fn: Callable that actually runs the stage and returns (success, output).
+        force_local: If True (the --local flag), skip restoring from the Postgres
+            cache and run the stage locally. The fresh result is still STORED, so
+            a local re-run refreshes the shared cache rather than ignoring it.
+            Dependency checks are unaffected -- that's the separate --force flag.
 
     Returns:
         (success, output) tuple, identical in shape to run_fn's return value.
@@ -384,11 +389,18 @@ def cache_or_run(
 
     short = key[:16]
 
-    try:
-        blob = pd_store.load_stage_blob(key)
-    except Exception as e:
-        _warn(f"PD cache: lookup failed ({e}); running {stage_tag} normally.")
-        return run_fn()
+    if force_local:
+        # --local: skip the DB restore entirely and run the tool locally. We
+        # still computed the key above and STILL store the fresh result below,
+        # so a local re-run refreshes the shared cache instead of bypassing it.
+        _info(f"PD cache: --local set; skipping DB lookup for {stage_tag}, running locally.")
+        blob = None
+    else:
+        try:
+            blob = pd_store.load_stage_blob(key)
+        except Exception as e:
+            _warn(f"PD cache: lookup failed ({e}); running {stage_tag} normally.")
+            return run_fn()
 
     if blob is not None:
         _, data, original_duration, original_cpu = blob

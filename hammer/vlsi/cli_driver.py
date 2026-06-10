@@ -164,6 +164,7 @@ class CLIDriver:
         self.timing_rundir = "" # type: Optional[str]
         self.pcb_rundir = ""  # type: Optional[str]
         self.force_rerun = False  # type: bool
+        self.force_local = False  # type: bool  # --local: skip the DB cache pull
         self.synthesis_action: CLIActionConfigType
         # If a subclass has defined these, don't clobber them in init
         # since the subclass still uses this init function.
@@ -632,6 +633,7 @@ class CLIDriver:
                             driver.syn_tool.get_tool_hooks() + \
                             driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
                             list(extra_hooks or [])),
+                        force_local=self.force_local,
                     )
                     if not success:
                         driver.log.error("Synthesis tool did not succeed")
@@ -692,6 +694,7 @@ class CLIDriver:
                             driver.par_tool.get_tool_hooks() + \
                             driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
                             list(extra_hooks or [])),
+                        force_local=self.force_local,
                     )
                     if not success:
                         driver.log.error("Place-and-route tool did not succeed")
@@ -1779,6 +1782,7 @@ class CLIDriver:
         driver, errors = self.args_to_driver(args)
 
         self.force_rerun = bool(args.get('force', False))
+        self.force_local = bool(args.get('local', False))
 
         # Check for action after creating the driver (e.g. for custom actions like hierarchical actions).
         action = str(args['action'])  # type: str
@@ -1866,6 +1870,9 @@ class CLIDriver:
                             help="Run only the given step. Not compatible with --{start|stop}_{before|after}_step.")
         parser.add_argument("--force", dest="force", default=False, action='store_true',
                             help='Force rerun even if dependency check finds no changes.')
+        parser.add_argument("--local", dest="local", default=False, action='store_true',
+                            help='Run locally: do NOT pull cached results from the PD store (DB). '
+                                 'Dependency checks still apply (use --force to skip those).')
         # Required arguments for CLI hammer driver.
         parser.add_argument("-o", "--output", default="output.json", required=False,
                             help='Output JSON file for results and modular use of hammer-vlsi. Default: output.json.')
