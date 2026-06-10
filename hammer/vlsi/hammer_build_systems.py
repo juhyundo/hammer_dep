@@ -5,7 +5,9 @@
 
 from .driver import HammerDriver
 
+import getpass
 import os
+import re
 import sys
 import textwrap
 from typing import List, Dict, Tuple, Callable, Optional
@@ -560,6 +562,28 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     # workspace resolver uses it to pick <workspace_root>/<design> at run time.
     design_name = os.path.basename(obj_dir.rstrip("/")) or top_module
 
+    # DAG id must be globally unique once DAGs share one Airflow instance (the
+    # SledgeHammer Studio shared-workspace goal; Airflow keeps only ONE DAG per
+    # dag_id). top_module ALONE is not unique: many Chipyard configs share a
+    # top_module (e.g. ChipTop), and two users building the SAME design would
+    # collide. Default format is `sledgehammer_<module>_<user>` (tool_module_user,
+    # where module = design_name); an explicit override via `make-dag --dag-id`
+    # (vlsi.core.airflow_dag_id) wins if set. Sanitize to Airflow's allowed
+    # dag_id charset [A-Za-z0-9_.-].
+    try:
+        gen_user = os.environ.get("USER") or getpass.getuser()
+    except Exception:
+        gen_user = "unknown"
+    try:
+        dag_id_override = driver.database.get_setting("vlsi.core.airflow_dag_id")
+    except Exception:
+        dag_id_override = None
+    unique_dag_id = re.sub(
+        r"[^A-Za-z0-9_.-]", "_",
+        str(dag_id_override) if dag_id_override
+        else f"sledgehammer_{design_name}_{gen_user}",
+    )
+
     # 1. Base DAG Header & Safe Execution Subprocess Wrapper
     output = textwrap.dedent(f"""\
         # Auto-generated Airflow DAG by Hammer Build System
@@ -916,7 +940,7 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     # 3. Parameter Inputs & Unique DAG Skeleton Generation
     output += f"""
 @dag(
-    dag_id='hammer_vlsi_flow_{top_module}',
+    dag_id='{unique_dag_id}',
     default_args=default_args,
     schedule=None,
     catchup=False,
