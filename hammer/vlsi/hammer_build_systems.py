@@ -529,7 +529,8 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
 # 'airflow' build system so 'make' keeps emitting hammer.d).
 # ---------------------------------------------------------------------------
 
-def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], None]) -> dict:
+def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], None],
+                      proj_confs_by_tools=None, default_tools=None) -> dict:
     dependency_graph = driver.get_hierarchical_dependency_graph()
     dag_file = os.path.join(driver.obj_dir, "hammer_dag.py")
     
@@ -557,6 +558,24 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
 
     env_str = ", ".join([f"'{x}'" for x in env_confs])
     proj_str = ", ".join([f"'{x}'" for x in proj_confs])
+
+    # Runtime tools dropdown. make-dag passes {tool: [configs]} (auto-discovered
+    # from configs-tool/*.yml) so the generated DAG offers each tool as a
+    # trigger-time choice; the plain `hammer-vlsi build` path passes nothing, so
+    # fall back to a single 'default' entry from the driver's project_configs.
+    if proj_confs_by_tools:
+        tools_map = {t: [os.path.realpath(p) for p in confs]
+                     for t, confs in proj_confs_by_tools.items()}
+        default_tool = (default_tools if default_tools in tools_map
+                        else sorted(tools_map)[0])
+    else:
+        tools_map = {"default": proj_confs}
+        default_tool = "default"
+    # Python dict literal for the template (repr keeps path quoting correct).
+    proj_by_tools_str = "{" + ", ".join(
+        f"{t!r}: [{', '.join(repr(p) for p in confs)}]"
+        for t, confs in tools_map.items()
+    ) + "}"
 
     # design_name = obj_dir basename (build-<pdk>-<tools>/<design>). The per-user
     # workspace resolver uses it to pick <workspace_root>/<design> at run time.
@@ -607,11 +626,11 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
 
         # Grafted from the sledgehammer (ldap-auth) branch.
         DESIGN_NAME = "{design_name}"
-        # Tools dropdown: for now a single 'default' entry wrapping the configs this
-        # build was invoked with. Multi-tool discovery (configs-tool/*.yml) is a
-        # follow-up in the CLI layer; the runtime resolution path is already wired.
-        PROJ_CONFS_BY_TOOLS = {{"default": [{proj_str}]}}
-        DEFAULT_TOOLS = "default"
+        # Tools dropdown {{tool: [configs]}}: make-dag fills this from
+        # configs-tool/*.yml so each tool is selectable at trigger time via the
+        # 'tools' Param; the plain build path emits a single 'default' entry.
+        PROJ_CONFS_BY_TOOLS = {proj_by_tools_str}
+        DEFAULT_TOOLS = "{default_tool}"
         TOOLS_CHOICES = sorted(PROJ_CONFS_BY_TOOLS.keys())
 
         default_args = {{
