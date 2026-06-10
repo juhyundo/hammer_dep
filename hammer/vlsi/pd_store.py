@@ -55,7 +55,8 @@ except ImportError:
     # the whole run: cache_or_run already falls back to running the stage
     # normally on any pd_store error, so plain hammer keeps working in envs that
     # never installed the cache driver (e.g. a chipyard conda env). Install
-    # psycopg2-binary to turn the cache back on.
+    # psycopg2 (see UV_SETUP.md; `conda install psycopg2` in a conda env) to
+    # turn the cache back on.
     psycopg2 = None  # type: ignore
     Json = None      # type: ignore
 
@@ -226,7 +227,8 @@ def _connect():
     if psycopg2 is None:
         raise RuntimeError(
             "psycopg2 is not installed; the Postgres PD cache is unavailable. "
-            "Install it with `pip install psycopg2-binary` to enable caching."
+            "Install psycopg2 (see UV_SETUP.md, or `conda install psycopg2` in a "
+            "conda env) to enable caching."
         )
     return psycopg2.connect(**_pg_settings())
 
