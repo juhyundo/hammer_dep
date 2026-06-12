@@ -274,9 +274,10 @@ class Genus(HammerSynthesisTool, CadenceTool):
         # Setup power settings from cpf/upf
         # Difference from other tools: apply_power_intent after read
         power_cmds = self.generate_power_spec_commands()
-        power_cmds.insert(1, "apply_power_intent -summary")
-        for l in power_cmds:
-            verbose_append(l)
+        if power_cmds:
+            power_cmds.insert(1, "apply_power_intent -summary")
+            for l in power_cmds:
+                verbose_append(l)
 
         # Prevent floorplanning targets from getting flattened.
         # TODO: is there a way to track instance paths through the synthesis process?

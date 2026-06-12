@@ -339,6 +339,11 @@ if {{ {get_db_str} ne "" }} {{
         power_spec_file = self.create_power_spec()
         power_spec_arg = self.map_power_spec_name()
 
+        # No power specification (For example: vlsi.inputs.power_spec_mode == "empty")
+        # Rather than hanging a tool, just return a blank array
+        if not power_spec_file or not power_spec_arg:
+            return []
+
         return ["read_power_intent -{arg} {path}".format(arg=power_spec_arg, path=power_spec_file),
                 "commit_power_intent"]
 
