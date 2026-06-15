@@ -61,7 +61,7 @@ source .venv/bin/activate
 PYTHON_VERSION="$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
 uv pip uninstall myst-parser mdit-py-plugins markdown-it-py >/dev/null 2>&1 || true
-uv pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINT"
+uv pip install "apache-airflow==${AIRFLOW_VERSION}" apache-airflow-providers-fab --constraint "$CONSTRAINT"
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 airflow version
 
@@ -69,30 +69,13 @@ step "secrets (committed airflow.cfg ships blank; create the encrypted env)"
 if [ -f "$SECRETS_FILE" ]; then
     echo "already present: $SECRETS_FILE"
 else
-    read -rp "  Postgres user [$USER]: " PG_USER; PG_USER="${PG_USER:-$USER}"
-    read -rp "  Postgres db [airflow_$USER]: " PG_DB; PG_DB="${PG_DB:-airflow_$USER}"
-    read -rp "  Postgres host [barney.eecs.berkeley.edu]: " PG_HOST; PG_HOST="${PG_HOST:-barney.eecs.berkeley.edu}"
-    read -rp "  Postgres port [5433]: " PG_PORT; PG_PORT="${PG_PORT:-5433}"
-    read -rsp "  Postgres password: " PG_PASS; echo
-    FERNET="$(python -c 'from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())')"
-    # secret_key must equal internal_api_secret_key or task auth fails
-    APIKEY="$(python -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
-    JWT="$(python -c 'import secrets,base64;print(base64.b64encode(secrets.token_bytes(32)).decode())')"
-    mkdir -p "$SECRETS_DIR"; chmod 700 "$SECRETS_DIR"
-    tmp="$(mktemp -p /dev/shm 2>/dev/null || mktemp)"
-    {
-      echo "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${PG_DB}"
-      echo "AIRFLOW__CORE__FERNET_KEY=${FERNET}"
-      echo "AIRFLOW__CORE__INTERNAL_API_SECRET_KEY=${APIKEY}"
-      echo "AIRFLOW__API__SECRET_KEY=${APIKEY}"
-      echo "AIRFLOW__API_AUTH__JWT_SECRET=${JWT}"
-      echo "HAMMER_PG_PASSWORD=${PG_PASS}"
-    } > "$tmp"
-    echo "  choose a passphrase to encrypt your secrets:"
-    gpg --symmetric --cipher-algo AES256 -o "$SECRETS_FILE" "$tmp"
-    chmod 600 "$SECRETS_FILE"
-    shred -u "$tmp" 2>/dev/null || rm -f "$tmp"
-    echo "  wrote $SECRETS_FILE"
+    read -rp "  set up Postgres secrets now? [Y/n]: " DO_SECRETS
+    if [ "${DO_SECRETS,,}" = "n" ]; then
+        echo "  skipped -- Airflow won't start until these exist."
+        echo "  create them later: ./scripts/sledge-secrets-create.sh"
+    else
+        "$REPO/scripts/sledge-secrets-create.sh"
+    fi
 fi
 
 step "done"

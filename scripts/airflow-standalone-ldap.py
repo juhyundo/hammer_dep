@@ -174,7 +174,7 @@ def _setup_secrets() -> None:
             f"environment.\n"
             f"          airflow.cfg ships with blank secrets, so Airflow cannot "
             f"start without them.\n"
-            f"          Create it once:  ./scripts/sledge-secrets-init.py\n"
+            f"          Create them:  ./scripts/sledge-secrets-create.sh\n"
             f"          (or point SLEDGE_SECRETS_FILE at an existing .gpg file).")
 
     if not shutil.which("gpg"):
