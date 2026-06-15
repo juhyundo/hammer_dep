@@ -154,37 +154,34 @@ def _resolve_workspace_obj_dir(context, design):
     if user:
         os.environ["HAMMER_AIRFLOW_TRIGGERING_USER"] = str(user)
 
-    # The per-user workspace OBJ_DIR override is OPT-IN. By default the DAG each
-    # user generated in their OWN checkout already bakes the correct build dir
-    # (the gen-time OBJ_DIR), so recomputing it from the shared user_workspaces
-    # table is redundant -- and actively wrong when that table holds a stale row
-    # (it pointed one user at another user's build dir). Returning None here
-    # leaves the gen-time OBJ_DIR authoritative. Set HAMMER_PER_USER_WORKSPACE=1
-    # only for a shared-DAG deployment where ONE generated DAG serves many users
-    # (this flag also enables named workspaces via conf["workspace"]).
-    if not os.environ.get("HAMMER_PER_USER_WORKSPACE"):
+    # Route OBJ_DIR into the triggering user's workspace so builds on a shared
+    # Airflow stay separated by who launched the DAG, not who generated it.
+    # On by default; set HAMMER_NO_PER_USER_WORKSPACE=1 to skip this and keep
+    # the DAG's baked OBJ_DIR (single-user setups).
+    if os.environ.get("HAMMER_NO_PER_USER_WORKSPACE"):
         return None
 
-    # Per-run workspace selection. Env var is the fallback for non-Airflow /
-    # direct-CLI runs (set HAMMER_WORKSPACE=<name>); default keeps old behavior.
+    # Look up where this user builds. get_user_workspace returns their stored
+    # path, or registers a default under this checkout's e2e on first use
+    # (build-sky130-cm-<user>). Override per user with `hammer-pd-store
+    # workspace-set <user> <path>`; the path must be writable by the daemon.
+    # A named workspace (conf={"workspace": "<name>"}) lets one user run several.
     if not ws_name:
         ws_name = os.environ.get("HAMMER_WORKSPACE") or "default"
-
     try:
         from hammer.vlsi import pd_store
         workspace_root = pd_store.get_user_workspace(user, ws_name)
     except Exception as e:
         print(f"WARNING: could not resolve per-user workspace for {user!r}: {e}. "
-              f"Falling back to default OBJ_DIR.")
+              f"Falling back to the DAG's baked OBJ_DIR.")
         return None
 
     obj_dir = os.path.join(workspace_root, design)
     os.environ["OBJ_DIR"] = obj_dir
-    # Also clear HAMMER_D_MK since it derives from OBJ_DIR; otherwise a
-    # previous task's value could leak across users in the same worker.
+    # Clear HAMMER_D_MK (derives from OBJ_DIR) so a prior task's value can't leak
+    # across users in the same worker.
     os.environ.pop("HAMMER_D_MK", None)
-    if workspace_root:
-        os.environ["HAMMER_AIRFLOW_WORKSPACE"] = str(workspace_root)
+    os.environ["HAMMER_AIRFLOW_WORKSPACE"] = str(workspace_root)
     if ws_name:
         os.environ["HAMMER_AIRFLOW_WORKSPACE_NAME"] = str(ws_name)
 
