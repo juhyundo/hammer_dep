@@ -60,3 +60,4 @@ e2e/build-sky130-cm-*/
 cache_events/
 
 output.json
+e2e/configs-design/**/*-extras.yml
