@@ -1772,9 +1772,7 @@ class AIRFlow_rocket:
         #self.SRAM_CONF = (f"{self.OBJ_DIR}/sram_generator-output.json") #Point to sram_generator-output.json
         
         print(f"SYN_CONF: {self.SYN_CONF}")
-        #par_input_json = "/bwrcq/C/andre_green/chipyard-sledgehammer/vlsi/hammer/e2e/build-intech22-cm/intel2x2/par-RocketTile-input.json"
         syn_output = f"{self.OBJ_DIR}/syn-RocketTile/syn-output-full.json"
-        #syn_output = "/bwrcq/C/andre_green/chipyard-sledgehammer/vlsi/hammer/e2e/build-intech22-cm/intel2x2/syn-RocketTile/syn-output-full.json"
         
         sys.argv = [
             'hammer-vlsi',

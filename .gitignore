@@ -1,13 +1,14 @@
-# Virtual environment
 .venv/
 venv/
 
-# Airflow config (contains credentials)
-airflow.cfg
 logs/
 airflow.db
 
-# Python cache
+# DO NOT EVER COMMIT
+*.env.gpg
+airflow-secrets.env
+*.bak
+
 __pycache__/
 *.pyc
 *.pyo
@@ -15,48 +16,34 @@ __pycache__/
 .Python
 .pytest_cache/
 
-# Log files
 *.log
 
-# Wheels directory (not needed for from-source builds)
 wheels/
 
-# Chipyard (separate git repo, cloned during setup)
 chipyard/
 
-# Airflow generated files
 simple_auth_manager_passwords.json.generated
 standalone_admin_password.txt
 
-# DAGs: gitignore everything in dags/ except the canonical demo.
-# Auto-generated DAGs (hammer_<design>_dag.py from make-dag) and per-design
-# hand-copies (sledgehammer_<design>_synpar.py) all land here and are not
-# meant to be committed.
 dags/*.py
 !dags/pd_store_demo.py
 
-# Per-design configs: gitignore auto-generated ones from design-register.
-# Only the hand-written canonical templates stay tracked.
 e2e/configs-design/*/
 !e2e/configs-design/gcd/
 !e2e/configs-design/pass/
 !e2e/configs-design/sram_wrapper_sky130/
 
-# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
 .DS_Store
 Thumbs.db
 e2e/build-sky130-cm/
 
-# Per-user workspaces (created by Airflow per LDAP user)
 e2e/build-sky130-cm-*/
 
-# Per-DAG-run cache event logs (consumed and cleaned up by the exit_ task)
 cache_events/
 
 output.json

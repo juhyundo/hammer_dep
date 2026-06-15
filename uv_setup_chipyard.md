@@ -233,7 +233,7 @@ if os.path.isfile(os.path.join(_libnsl_path, "libnsl.so.1")):
 
 ```bash
 # If using a reference copy:
-cp /bwrcq/home/lawrencejrhee/hammer_uv/hammer/shell/hammer_vlsi.py \
+cp <a reference checkout>/hammer/shell/hammer_vlsi.py \
    /bwrcq/home/<username>/hammer_uv/hammer/shell/hammer_vlsi.py
 ```
 

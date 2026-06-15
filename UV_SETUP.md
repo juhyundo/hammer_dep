@@ -624,7 +624,7 @@ self.vlsi_dir = '/bwrcq/C/<username>/hammer/e2e'   # ← your path
 self.specs_abs = '/bwrcq/C/<username>/hammer/specs' # ← your path
 ```
 
-> **Tip**: You can copy the modified `hammer_vlsi.py` from a reference setup (e.g., `/bwrcq/home/lawrencejrhee/hammer_uv/hammer/shell/hammer_vlsi.py`) and only update the absolute paths.
+> **Tip**: You can copy the modified `hammer_vlsi.py` from a reference setup (e.g., `<a reference checkout>/hammer/shell/hammer_vlsi.py`) and only update the absolute paths.
 
 #### 10.3 Comment out QRC tech file in Genus
 

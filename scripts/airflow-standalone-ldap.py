@@ -25,10 +25,7 @@ import sys
 import time
 import urllib.request
 
-# Standalone uses these
-from airflow.cli.commands.standalone_command import StandaloneCommand
-from airflow.executors.executor_loader import ExecutorLoader
-from airflow.executors import executor_constants
+# Airflow is imported further down, after _setup_secrets() runs -- see the note there.
 
 
 def _port_in_use(port: int) -> bool:
@@ -153,6 +150,75 @@ def _start_pgadmin() -> None:
     # quick standalone restart never leaves you with a dead pgAdmin + a broken
     # link, which is exactly what kept happening. Stop it by hand if you must:
     #   pkill -f pgadmin4   (or kill the pid printed above)
+
+
+def _setup_secrets() -> None:
+    """Decrypt the GPG secrets file and load its KEY=VALUE lines as env vars.
+
+    airflow.cfg is committed with its secret fields blank; the real values live
+    in ~/.config/sledgehammer/airflow-secrets.env.gpg and get injected here, in
+    memory, so Airflow reads them instead of the blank cfg. Make the file with
+    scripts/sledge-secrets-init.py.
+    """
+    enc = os.path.expanduser(
+        os.environ.get("SLEDGE_SECRETS_FILE",
+                       "~/.config/sledgehammer/airflow-secrets.env.gpg"))
+
+    if not os.path.exists(enc):
+        # Allow an already-populated environment (e.g. CI exported the vars).
+        if os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"):
+            print(f"[secrets] {enc} not found; using secrets already in the environment.")
+            return
+        sys.exit(
+            f"[secrets] ERROR: no secrets file at {enc}, and no secrets in the "
+            f"environment.\n"
+            f"          airflow.cfg ships with blank secrets, so Airflow cannot "
+            f"start without them.\n"
+            f"          Create it once:  ./scripts/sledge-secrets-init.py\n"
+            f"          (or point SLEDGE_SECRETS_FILE at an existing .gpg file).")
+
+    if not shutil.which("gpg"):
+        sys.exit("[secrets] ERROR: gpg not found on PATH; cannot decrypt secrets.")
+
+    # pinentry needs to know the controlling terminal to prompt over SSH.
+    try:
+        if sys.stdin.isatty():
+            os.environ.setdefault("GPG_TTY", os.ttyname(sys.stdin.fileno()))
+    except Exception:
+        pass
+
+    print(f"[secrets] decrypting {enc} (enter your GPG passphrase) ...")
+    res = subprocess.run(["gpg", "--quiet", "--decrypt", enc], capture_output=True)
+    if res.returncode != 0:
+        sys.stderr.write(res.stderr.decode("utf-8", "ignore"))
+        sys.exit(f"[secrets] ERROR: could not decrypt {enc} "
+                 f"(wrong passphrase or corrupt file). Aborting startup.")
+
+    loaded = 0
+    for raw in res.stdout.decode("utf-8", "ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, val = line.split("=", 1)
+        key, val = key.strip(), val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        os.environ[key] = val
+        loaded += 1
+    if not loaded:
+        sys.exit(f"[secrets] ERROR: {enc} decrypted to no KEY=VALUE lines.")
+    print(f"[secrets] loaded {loaded} secret(s) into the environment.")
+
+
+# Load the secrets, THEN import Airflow: importing it reads sql_alchemy_conn right
+# away, so the environment has to be populated first or it crashes on a blank conn.
+_setup_secrets()
+
+from airflow.cli.commands.standalone_command import StandaloneCommand
+from airflow.executors.executor_loader import ExecutorLoader
+from airflow.executors import executor_constants
 
 
 class HammerStandalone(StandaloneCommand):

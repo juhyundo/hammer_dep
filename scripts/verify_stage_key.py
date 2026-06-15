@@ -2,14 +2,14 @@
 
 import copy
 import json
+import os
 import sys
 
 from hammer.vlsi import pd_store
 
-MASTER_PATH = (
-    "/bwrcq/C/juhyundo/sledgehammer/chipyard-sledgehammer-airflow3/"
-    "chipyard/vlsi/hammer/e2e/build-sky130-cm/gcd/master_database.json"
-)
+MASTER_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "e2e", "master_database.json")
 
 
 def short(h: str) -> str:
