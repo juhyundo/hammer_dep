@@ -8,7 +8,7 @@ cd "$REPO"
 
 PG_LOCAL="$HOME/pg_local"
 LIBNSL_LOCAL="$HOME/libnsl_local"
-SECRETS_DIR="$HOME/.config/sledgehammer"
+SECRETS_DIR="$REPO/.sledgehammer"
 SECRETS_FILE="${SLEDGE_SECRETS_FILE:-$SECRETS_DIR/airflow-secrets.env.gpg}"
 AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.1.0}"
 PYVER="${PYVER:-3.11}"

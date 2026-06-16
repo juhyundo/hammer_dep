@@ -5,7 +5,7 @@ Pull the secret fields out of airflow.cfg, encrypt them with GPG, and blank them
 Run this while airflow.cfg still has its real values. It reads fernet_key,
 secret_key, jwt_secret, internal_api_secret_key and sql_alchemy_conn, writes
 them as env-var lines, and symmetric-encrypts them (you choose the passphrase)
-to ~/.config/sledgehammer/airflow-secrets.env.gpg. The plaintext only ever lives
+to <checkout>/.sledgehammer/airflow-secrets.env.gpg. The plaintext only ever lives
 in a 0600 temp file that gets shredded.
 
 fernet_key has to be captured exactly -- if it changes, the connection passwords
@@ -51,8 +51,9 @@ def _blank_cfg(path: str, keys) -> None:
 
 def main() -> None:
     cfg = _cfg_path()
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = os.path.expanduser(os.environ.get(
-        "SLEDGE_SECRETS_FILE", "~/.config/sledgehammer/airflow-secrets.env.gpg"))
+        "SLEDGE_SECRETS_FILE", os.path.join(repo, ".sledgehammer", "airflow-secrets.env.gpg")))
 
     # gpg needs GPG_TTY to prompt for the passphrase over SSH.
     try:

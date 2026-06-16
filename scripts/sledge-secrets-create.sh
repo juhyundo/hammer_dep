@@ -5,7 +5,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SECRETS_DIR="$HOME/.config/sledgehammer"
+SECRETS_DIR="$REPO/.sledgehammer"
 SECRETS_FILE="${SLEDGE_SECRETS_FILE:-$SECRETS_DIR/airflow-secrets.env.gpg}"
 PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY="$(command -v python3 || command -v python)"
 

@@ -156,13 +156,14 @@ def _setup_secrets() -> None:
     """Decrypt the GPG secrets file and load its KEY=VALUE lines as env vars.
 
     airflow.cfg is committed with its secret fields blank; the real values live
-    in ~/.config/sledgehammer/airflow-secrets.env.gpg and get injected here, in
-    memory, so Airflow reads them instead of the blank cfg. Make the file with
-    scripts/sledge-secrets-init.py.
+    in <checkout>/.sledgehammer/airflow-secrets.env.gpg and get injected here,
+    in memory, so Airflow reads them instead of the blank cfg. Each checkout
+    keeps its own secrets; create them with scripts/sledge-secrets-create.sh.
     """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     enc = os.path.expanduser(
         os.environ.get("SLEDGE_SECRETS_FILE",
-                       "~/.config/sledgehammer/airflow-secrets.env.gpg"))
+                       os.path.join(repo, ".sledgehammer", "airflow-secrets.env.gpg")))
 
     if not os.path.exists(enc):
         # Allow an already-populated environment (e.g. CI exported the vars).
