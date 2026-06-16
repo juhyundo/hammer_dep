@@ -801,6 +801,38 @@ def update_and_expand_meta(config_dict: dict, meta_dict: dict) -> dict:
     return newdict
 
 
+def relative_paths(db_dict: dict, hammer_dir: str) -> dict:
+    """Replace path values prefixed by hammer_dir with $(hammer_dir) token and record vlsi.hammer_dir."""
+    def _rel(v: str) -> str:
+        return "$(hammer_dir)" + v[len(hammer_dir):] if v.startswith(hammer_dir) else v
+    result: dict = {"vlsi.hammer_dir": hammer_dir}
+    for key, value in db_dict.items():
+        if key == "vlsi.hammer_dir":
+            continue
+        elif isinstance(value, str):
+            result[key] = _rel(value)
+        elif isinstance(value, list):
+            result[key] = [_rel(v) if isinstance(v, str) else v for v in value]
+        else:
+            result[key] = value
+    return result
+
+
+def expand_paths(db_dict: dict, hammer_dir: str) -> dict:
+    """Expand $(hammer_dir) tokens back to the absolute hammer_dir."""
+    def _exp(v: str) -> str:
+        return v.replace("$(hammer_dir)", hammer_dir)
+    result: dict = {}
+    for key, value in db_dict.items():
+        if isinstance(value, str):
+            result[key] = _exp(value)
+        elif isinstance(value, list):
+            result[key] = [_exp(v) if isinstance(v, str) else v for v in value]
+        else:
+            result[key] = value
+    return result
+
+
 class HammerDatabase:
     """
     Define a database which is composed of a set of overridable configs.
@@ -843,6 +875,8 @@ class HammerDatabase:
         self.stageGraph = StageGraph()
 
         self._pending_master_db: Optional[Tuple[Path, str]] = None
+
+        self._hammer_dir: Optional[str] = None
 
     @property
     def runtime(self) -> List[dict]:
@@ -1173,6 +1207,7 @@ class HammerDatabase:
 
         # Load or initialize master DB
         master_path = Path(filename)
+        _MASTER_DB_SKIP_KEYS = {"vlsi.hammer_dir"}
         master_db_contents: Optional[dict]
         try:
             text = master_path.read_text()
@@ -1192,6 +1227,8 @@ class HammerDatabase:
             keyChangeFlag = False
             # affectedSettings = []
             for setting, value in new_db_contents.items():
+                if setting in _MASTER_DB_SKIP_KEYS:
+                    continue
                 if(setting.startswith(tag + ".") and not (setting.startswith(tag + ".outputs"))):
                     if(setting not in master_db_contents):
                         keyChangeFlag = True
@@ -1225,6 +1262,8 @@ class HammerDatabase:
                         for stageNode in self.stageGraph.stageList:
                             affectedStages.add(stageNode.name)
             for setting, value in master_db_contents.items():
+                if setting in _MASTER_DB_SKIP_KEYS:
+                    continue
                 if ".needsToRerun" in setting:    
                     if setting.startswith(stage) and value:
                         keyChangeFlag = True
@@ -1282,6 +1321,8 @@ class HammerDatabase:
                     print("setting NeedsToReRun False for " + str(affectedStage))
                     master_db_contents[affectedStage + ".needsToRerun"] = False
             print(f"Database changed, stages affected are {affectedStages}")
+            if self._hammer_dir is not None:
+                master_db_contents["vlsi.hammer_dir"] = self._hammer_dir
             master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
             self._pending_master_db = (master_path, master_db_contents_str)
         else:
