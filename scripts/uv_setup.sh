@@ -12,6 +12,7 @@ SECRETS_DIR="$REPO/.sledgehammer"
 SECRETS_FILE="${SLEDGE_SECRETS_FILE:-$SECRETS_DIR/airflow-secrets.env.gpg}"
 AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.1.0}"
 FAB_VERSION="${FAB_VERSION:-3.6.3}"
+LDAP_VERSION="${LDAP_VERSION:-3.4.7}"
 PYVER="${PYVER:-3.11}"
 
 step() { printf '\n=== %s ===\n' "$1"; }
@@ -64,6 +65,7 @@ CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFL
 uv pip uninstall myst-parser mdit-py-plugins markdown-it-py >/dev/null 2>&1 || true
 uv pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINT"
 uv pip install "apache-airflow-providers-fab==${FAB_VERSION}"
+uv pip install "python-ldap==${LDAP_VERSION}"
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 AIRFLOW_HOME="$(mktemp -d)" airflow version
 
