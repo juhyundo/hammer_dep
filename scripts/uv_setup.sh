@@ -63,7 +63,7 @@ CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFL
 uv pip uninstall myst-parser mdit-py-plugins markdown-it-py >/dev/null 2>&1 || true
 uv pip install "apache-airflow==${AIRFLOW_VERSION}" apache-airflow-providers-fab --constraint "$CONSTRAINT"
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
-airflow version
+AIRFLOW_HOME="$(mktemp -d)" airflow version
 
 step "secrets (committed airflow.cfg ships blank; create the encrypted env)"
 if [ -f "$SECRETS_FILE" ]; then
