@@ -52,6 +52,16 @@ step "persist PATH in ~/.bashrc"
 grep -q 'pg_local/usr/bin' "$HOME/.bashrc" 2>/dev/null || \
     printf '\nexport PATH="$HOME/.local/bin:$HOME/pg_local/usr/bin:$PATH"\n' >> "$HOME/.bashrc"
 
+step "install 'sledgehammer' launch command in ~/.bashrc"
+grep -q 'sledgehammer()' "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'EOF'
+
+sledgehammer() {
+    local repo; repo="$(git rev-parse --show-toplevel 2>/dev/null)"
+    [ -n "$repo" ] && [ -f "$repo/scripts/airflow-standalone-ldap.py" ] || { echo "sledgehammer: cd into a hammer checkout first"; return 1; }
+    ( cd "$repo" && source ./venv.sh && export PATH="$repo/.venv/bin:$PATH" && exec ./scripts/airflow-standalone-ldap.py "$@" )
+}
+EOF
+
 step "virtual environment + dependencies"
 uv python install "$PYVER"
 [ -d .venv ] || uv venv --python "$PYVER"
