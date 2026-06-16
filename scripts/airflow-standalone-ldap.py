@@ -251,6 +251,32 @@ class HammerStandalone(StandaloneCommand):
             "Log in via your configured auth backend (e.g. LDAP).",
         )
 
+    def print_ready(self):
+        # Upstream just prints "Airflow is ready" with no URL; tack on the actual
+        # web UI + pgAdmin addresses and a tunnel command so it's not a guessing game.
+        super().print_ready()
+        host = socket.getfqdn()
+        user = os.environ.get("USER", "<you>")
+        # Same source Airflow's own --port default uses, so it tracks airflow.cfg + env.
+        try:
+            from airflow.configuration import conf
+            api_port = str(conf.get("api", "port", fallback="8080"))
+        except Exception:
+            api_port = os.environ.get("AIRFLOW__API__PORT", "8080")
+        pg_url, pg_port = "", ""
+        try:
+            with open(PGADMIN_URL_FILE) as f:
+                pg_url = f.read().strip()
+            m = re.search(r":(\d+)", pg_url)
+            pg_port = m.group(1) if m else ""
+        except OSError:
+            pass
+        self.print_output("standalone", f"Web UI  : http://localhost:{api_port}   (running on {host})")
+        if pg_url:
+            self.print_output("standalone", f"pgAdmin : {pg_url}")
+        fwd = f"-L {api_port}:localhost:{api_port}" + (f" -L {pg_port}:localhost:{pg_port}" if pg_port else "")
+        self.print_output("standalone", f"Tunnel from your laptop: ssh {fwd} {user}@{host}")
+
 
 def _refuse_if_scheduler_running() -> None:
     """Refuse to start if another scheduler is already live on this metadata DB.
