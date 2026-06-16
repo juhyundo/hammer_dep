@@ -252,7 +252,45 @@ class HammerStandalone(StandaloneCommand):
         )
 
 
+def _refuse_if_scheduler_running() -> None:
+    """Refuse to start if another scheduler is already live on this metadata DB.
+
+    Two deployments on one DB (a second checkout, a half-finished takeover) means
+    duelling schedulers. We check the job table for a recent SchedulerJob
+    heartbeat -- cross-host, since every scheduler heartbeats to the shared DB --
+    and bail rather than pile on. SLEDGE_ALLOW_MULTI_SCHEDULER=1 to override (HA).
+    """
+    conn_uri = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")
+    if os.environ.get("SLEDGE_ALLOW_MULTI_SCHEDULER") or not conn_uri.startswith("postgresql"):
+        return  # opt-out, or sqlite/local where there's nothing to race
+    try:
+        import psycopg2
+        conn = psycopg2.connect(conn_uri.replace("+psycopg2", ""), connect_timeout=8)
+    except Exception:
+        return  # no driver or DB unreachable -- Airflow's own startup will report it
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT hostname, latest_heartbeat FROM job "
+                "WHERE job_type = 'SchedulerJob' AND state = 'running' "
+                "AND latest_heartbeat > now() - interval '60 seconds' "
+                "ORDER BY latest_heartbeat DESC")
+            rows = cur.fetchall()
+    except Exception:
+        return  # no job table yet (fresh DB) or a schema we don't recognise
+    finally:
+        conn.close()
+    if rows:
+        where = "; ".join(f"{host} (heartbeat {ts:%Y-%m-%d %H:%M:%S})" for host, ts in rows)
+        sys.exit(
+            f"[guard] ERROR: a scheduler is already running against this database:\n"
+            f"          {where}\n"
+            f"        Refusing to start a second one on the same metadata DB. Stop that\n"
+            f"        instance first, or set SLEDGE_ALLOW_MULTI_SCHEDULER=1 to override.")
+
+
 def main():
+    _refuse_if_scheduler_running()
     _start_pgadmin()
     HammerStandalone().run()
 
