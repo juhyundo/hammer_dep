@@ -11,6 +11,7 @@ LIBNSL_LOCAL="$HOME/libnsl_local"
 SECRETS_DIR="$REPO/.sledgehammer"
 SECRETS_FILE="${SLEDGE_SECRETS_FILE:-$SECRETS_DIR/airflow-secrets.env.gpg}"
 AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.1.0}"
+FAB_VERSION="${FAB_VERSION:-3.6.3}"
 PYVER="${PYVER:-3.11}"
 
 step() { printf '\n=== %s ===\n' "$1"; }
@@ -61,7 +62,8 @@ source .venv/bin/activate
 PYTHON_VERSION="$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
 uv pip uninstall myst-parser mdit-py-plugins markdown-it-py >/dev/null 2>&1 || true
-uv pip install "apache-airflow==${AIRFLOW_VERSION}" apache-airflow-providers-fab --constraint "$CONSTRAINT"
+uv pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINT"
+uv pip install "apache-airflow-providers-fab==${FAB_VERSION}"
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 AIRFLOW_HOME="$(mktemp -d)" airflow version
 
