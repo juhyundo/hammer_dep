@@ -75,6 +75,7 @@ class HammerDriver:
         self.log.info("Loading hammer-vlsi libraries and reading settings")
         # Store the run dir (this should already be canonicalized by the CLI driver).
         self.obj_dir = options.obj_dir  # type: str
+        self.database._hammer_dir = str(Path(__file__).resolve().parent.parent.parent)
 
         # Also store the options
         self.options = options
