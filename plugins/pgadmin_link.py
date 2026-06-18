@@ -1,19 +1,14 @@
 """
 Airflow plugin: add a "pgAdmin" entry to the nav / sidebar.
 
-Works on Airflow 3.1 AND 3.2+ (verified against both compiled UIs). The React
-UI only shows a plugin nav item when it has BOTH ``destination="nav"`` and a
-truthy ``url_route`` -- the nav is built from
-``plugins.filter(v => v.destination === "nav" && !!v.url_route)`` in *both*
-versions. The item is then rendered as
-``to = isExternal ? href : ("plugin/" + url_route)``; since our ``href``
-(PGADMIN_URL) is an absolute, cross-origin URL, ``isExternal`` is true, so it
-renders as an external **new-tab** ``<a href>`` link. The internal
-``plugin/pgadmin`` route (an iframe, which pgAdmin's ``X-Frame-Options:
-SAMEORIGIN`` would blank out) is therefore never used.
-
-=> we MUST set both ``href`` and ``url_route``. href alone (no url_route) gets
-filtered out of the nav; url_route alone would iframe and get blocked.
+A nav item with ``destination="nav"``, an absolute ``href``, and NO ``url_route``
+renders as a plain new-tab link (``<a href target="_blank">``): the React UI
+computes ``isExternal = (url_route is None)`` and only iframes items that DO have
+a ``url_route`` (the ``plugin/<route>`` route). The backend keeps it too --
+get_plugin_info dumps ``plugin.external_views``, which retains url_route-less
+items. So clicking "pgAdmin" opens pgAdmin directly in a new tab, never touching
+the iframe route (which pgAdmin's ``X-Frame-Options: SAMEORIGIN`` would blank
+out anyway).
 
 pgAdmin listens on port 5050 (see PGADMIN_SETUP.md). The link is rendered in
 your browser, which reaches pgAdmin through the same SSH tunnel you use for
@@ -96,11 +91,10 @@ class PgAdminLinkPlugin(AirflowPlugin):
         {
             "name": "pgAdmin",
             "href": PGADMIN_URL,
-            # REQUIRED on both 3.1 and 3.2: the nav only shows items with a
-            # truthy url_route. The cross-origin href makes the UI render this
-            # as an external new-tab link (isExternal ? href : plugin/route),
-            # so the internal "plugin/pgadmin" iframe route is never hit.
-            "url_route": "pgadmin",
+            # No url_route: the UI computes isExternal = (url_route is None) and
+            # renders this as a plain <a href target="_blank"> new-tab link
+            # straight to pgAdmin, instead of the "plugin/<route>" iframe that
+            # pgAdmin's X-Frame-Options: SAMEORIGIN blanks out.
             "destination": "nav",
             "icon": _PGADMIN_ICON,
         }
