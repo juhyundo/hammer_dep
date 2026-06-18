@@ -8,6 +8,7 @@ cd "$REPO"
 
 PG_LOCAL="$HOME/pg_local"
 LIBNSL_LOCAL="$HOME/libnsl_local"
+LDAP_LOCAL="$HOME/ldap_local"
 SECRETS_DIR="$REPO/.sledgehammer"
 SECRETS_FILE="${SLEDGE_SECRETS_FILE:-$SECRETS_DIR/airflow-secrets.env.gpg}"
 AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.1.0}"
@@ -48,6 +49,22 @@ if [ ! -f "$LIBNSL_LOCAL/usr/lib64/libnsl.so.1" ]; then
 fi
 ls "$LIBNSL_LOCAL/usr/lib64/libnsl.so.1"
 
+step "OpenLDAP headers (python-ldap builds from source)"
+if [ ! -f "$LDAP_LOCAL/usr/include/lber.h" ]; then
+    tmp="$(mktemp -d)"
+    ( cd "$tmp"
+      dnf download openldap-devel
+      mkdir -p "$LDAP_LOCAL"
+      rpm2cpio openldap-devel-*x86_64.rpm | ( cd "$LDAP_LOCAL" && cpio -idmv ) )
+    # openldap-devel ships libldap.so/liblber.so symlinks to .so.2 files that
+    # live in the runtime 'openldap' package (already in /lib64); repoint them
+    # so the linker resolves -lldap/-llber against the system libs.
+    ln -sf /lib64/libldap.so.2 "$LDAP_LOCAL/usr/lib64/libldap.so"
+    ln -sf /lib64/liblber.so.2 "$LDAP_LOCAL/usr/lib64/liblber.so"
+    rm -rf "$tmp"
+fi
+ls "$LDAP_LOCAL/usr/include/lber.h"
+
 step "persist PATH in ~/.bashrc"
 grep -q 'pg_local/usr/bin' "$HOME/.bashrc" 2>/dev/null || \
     printf '\nexport PATH="$HOME/.local/bin:$HOME/pg_local/usr/bin:$PATH"\n' >> "$HOME/.bashrc"
@@ -75,7 +92,9 @@ CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFL
 uv pip uninstall myst-parser mdit-py-plugins markdown-it-py >/dev/null 2>&1 || true
 uv pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINT"
 uv pip install "apache-airflow-providers-fab==${FAB_VERSION}"
-uv pip install "python-ldap==${LDAP_VERSION}"
+CPPFLAGS="-I$LDAP_LOCAL/usr/include -I/usr/include ${CPPFLAGS:-}" \
+LDFLAGS="-L$LDAP_LOCAL/usr/lib64 -L/lib64 ${LDFLAGS:-}" \
+    uv pip install "python-ldap==${LDAP_VERSION}" --no-binary python-ldap
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 AIRFLOW_HOME="$(mktemp -d)" airflow version
 
