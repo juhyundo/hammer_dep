@@ -1,5 +1,7 @@
 # SledgeHammer Studio: Postgres-backed cache for Hammer PD runs
 
+> **Renamed:** this CLI is now **`studio`** (formerly `hammer-pd-store`) — same commands, shorter name. If you have `hammer-pd-store` in muscle memory, just type `studio` instead.
+
 A storage layer for Hammer that caches per stage build directories in
 Postgres, keyed by a content hash of the inputs that determine each stage's
 output. When the same inputs come up again, on the same machine or a
