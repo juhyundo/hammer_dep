@@ -98,6 +98,8 @@ WORKSPACE_TABLE = "user_workspaces"
 FQ_MASTER = f"{SCHEMA_NAME}.{MASTER_TABLE}"
 FQ_BLOB = f"{SCHEMA_NAME}.{BLOB_TABLE}"
 FQ_WORKSPACE = f"{SCHEMA_NAME}.{WORKSPACE_TABLE}"
+WHITELIST_TABLE = "login_whitelist"
+FQ_WHITELIST = f"{SCHEMA_NAME}.{WHITELIST_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -350,6 +352,12 @@ CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_stage ON {FQ_BLOB} (stage);
 CREATE INDEX IF NOT EXISTS idx_{BLOB_TABLE}_owner ON {FQ_BLOB} (owner);
 CREATE INDEX IF NOT EXISTS idx_{MASTER_TABLE}_owner ON {FQ_MASTER} (owner);
 
+CREATE TABLE IF NOT EXISTS {FQ_WHITELIST} (
+    uid      TEXT PRIMARY KEY,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    added_by TEXT NOT NULL DEFAULT current_user
+);
+
 -- Nobody gets access by default. The group role is the only way in.
 REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA {SCHEMA_NAME} FROM PUBLIC;
@@ -420,6 +428,60 @@ def revoke_access(role: str) -> None:
         with conn.cursor() as cur:
             cur.execute(f"REVOKE {SLEDGEHAMMER_GROUP} FROM {role}")
         conn.commit()
+    finally:
+        conn.close()
+
+
+def whitelist_add(uid: str) -> None:
+    """Add an LDAP uid to the Airflow login whitelist (idempotent)."""
+    uid = (uid or "").strip().lower()
+    conn = _connect()
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {FQ_WHITELIST} (uid) VALUES (%s) ON CONFLICT (uid) DO NOTHING",
+                (uid,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def whitelist_remove(uid: str) -> None:
+    """Remove an LDAP uid from the Airflow login whitelist."""
+    uid = (uid or "").strip().lower()
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {FQ_WHITELIST} WHERE uid = %s", (uid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def whitelist_list() -> list:
+    """Return [(uid, added_at, added_by), ...] for everyone on the login whitelist."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT uid, added_at, added_by FROM {FQ_WHITELIST} ORDER BY uid")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def is_whitelisted(uid: str) -> bool:
+    """True iff uid is on the login whitelist. The Airflow auth gate calls this."""
+    uid = (uid or "").strip().lower()
+    if not uid:
+        return False
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {FQ_WHITELIST} WHERE uid = %s", (uid,))
+            return cur.fetchone() is not None
     finally:
         conn.close()
 

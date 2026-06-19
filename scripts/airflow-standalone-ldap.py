@@ -315,8 +315,35 @@ def _refuse_if_scheduler_running() -> None:
             f"        instance first, or set SLEDGE_ALLOW_MULTI_SCHEDULER=1 to override.")
 
 
+def _refuse_if_whitelist_empty() -> None:
+    """Refuse to start if nobody is on the login whitelist.
+
+    webserver_config.py rejects any LDAP login not on the
+    hammer_poc.login_whitelist table. An empty whitelist (and no
+    AIRFLOW_ALLOWED_UIDS bootstrap) means NOBODY could log in -- a dead server.
+    Bail with instructions instead. Manage the list with ``studio whitelist``.
+    """
+    if any(u.strip() for u in os.environ.get("AIRFLOW_ALLOWED_UIDS", "").split(",")):
+        return  # env-var bootstrap means at least the owner can get in
+    try:
+        from hammer.vlsi import pd_store
+        allowed = pd_store.whitelist_list()
+    except Exception as e:
+        print(f"[whitelist] WARNING: couldn't check the login whitelist ({e}).\n"
+              f"            If its DB is unreachable, nobody will be able to log in.")
+        return  # fail-open: a transient DB hiccup shouldn't block startup
+    if not allowed:
+        sys.exit(
+            "[whitelist] ERROR: the login whitelist is empty -- nobody could log in.\n"
+            "        Add at least one EECS uid first:\n"
+            "            studio whitelist <your-eecs-uid>\n"
+            "        (or set AIRFLOW_ALLOWED_UIDS=<uid> as an emergency bootstrap).")
+    print(f"[whitelist] {len(allowed)} user(s) allowed to log in.")
+
+
 def main():
     _refuse_if_scheduler_running()
+    _refuse_if_whitelist_empty()
     _start_pgadmin()
     HammerStandalone().run()
 

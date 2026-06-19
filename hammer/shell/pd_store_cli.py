@@ -205,6 +205,26 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_whitelist(args: argparse.Namespace) -> int:
+    if args.remove:
+        pd_store.whitelist_remove(args.remove)
+        print(f"Removed '{args.remove.strip().lower()}' from the login whitelist.")
+        return 0
+    if args.uid:
+        pd_store.whitelist_add(args.uid)
+        print(f"Whitelisted '{args.uid.strip().lower()}' for Airflow login.")
+        return 0
+    rows = pd_store.whitelist_list()
+    if not rows:
+        print("(login whitelist is empty -- nobody can log in)")
+        return 0
+    print(f"Login whitelist ({len(rows)}):")
+    for uid, added_at, added_by in rows:
+        when = added_at.strftime("%Y-%m-%d") if added_at else "?"
+        print(f"  {uid:20} added {when} by {added_by}")
+    return 0
+
+
 def _confirm(prompt: str, assume_yes: bool) -> bool:
     """Prompt the user to confirm a destructive op. Returns True to proceed."""
     if assume_yes:
@@ -777,6 +797,13 @@ def _build_parser() -> argparse.ArgumentParser:
                               help=f"Remove a role from the {pd_store.SLEDGEHAMMER_GROUP} group.")
     p_revoke.add_argument("role")
     p_revoke.set_defaults(func=_cmd_revoke)
+
+    p_whitelist = sub.add_parser("whitelist",
+        help="Manage the Airflow login whitelist (DB-backed, no restart). "
+             "'whitelist <uid>' adds, 'whitelist' lists, 'whitelist --remove <uid>' removes.")
+    p_whitelist.add_argument("uid", nargs="?", help="EECS uid to allow (omit to list).")
+    p_whitelist.add_argument("--remove", metavar="UID", help="Remove this uid from the whitelist.")
+    p_whitelist.set_defaults(func=_cmd_whitelist)
 
     p_ws_list = sub.add_parser(
         "workspace-list",

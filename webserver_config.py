@@ -47,6 +47,44 @@ FabAirflowSecurityManagerOverride._ldap_bind_indirect = _anonymous_bind
 AUTH_LDAP_BIND_USER = "anonymous"
 AUTH_LDAP_BIND_PASSWORD = ""
 
+# --- Login whitelist (DB-backed) -------------------------------------------
+# HARD gate: only uids in hammer_poc.login_whitelist may authenticate. Everyone
+# else is rejected at login -- a valid EECS password is NOT enough; no bind, no
+# session, no account. Manage it live with `studio whitelist <uid>` /
+# `studio whitelist --remove <uid>` -- no restart, nothing committed to git.
+#
+# AIRFLOW_ALLOWED_UIDS (comma-separated env var) is an optional emergency
+# bootstrap so the owner can still get in if the whitelist DB is unreachable.
+import logging as _logging
+_wl_log = _logging.getLogger("airflow.webserver_config")
+
+_BOOTSTRAP_UIDS = {
+    u.strip().lower()
+    for u in os.environ.get("AIRFLOW_ALLOWED_UIDS", "").split(",")
+    if u.strip()
+}
+
+def _uid_allowed(username):
+    uid = (username or "").strip().lower()
+    if not uid:
+        return False
+    if uid in _BOOTSTRAP_UIDS:
+        return True
+    try:
+        from hammer.vlsi import pd_store
+        return pd_store.is_whitelisted(uid)
+    except Exception as e:
+        _wl_log.warning("whitelist DB check failed for %r (%s) -- denying.", uid, e)
+        return False
+
+_orig_auth_user_ldap = FabAirflowSecurityManagerOverride.auth_user_ldap
+def _whitelisted_auth_user_ldap(self, username, password, rotate_session_id=True):
+    if not _uid_allowed(username):
+        _wl_log.warning("LOGIN REJECTED (not whitelisted): %r", username)
+        return None
+    return _orig_auth_user_ldap(self, username, password, rotate_session_id=rotate_session_id)
+FabAirflowSecurityManagerOverride.auth_user_ldap = _whitelisted_auth_user_ldap
+
 AUTH_LDAP_SERVER = "ldaps://ldap.eecs.berkeley.edu"
 AUTH_LDAP_SEARCH = "dc=eecs,dc=berkeley,dc=edu"
 AUTH_LDAP_UID_FIELD = "uid"

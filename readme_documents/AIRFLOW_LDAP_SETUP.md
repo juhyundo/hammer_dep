@@ -136,6 +136,32 @@ For reference if you're debugging:
 5. On first successful login, FAB creates an `ab_user` row from the LDAP attributes (uid, first/last/email) with the `AUTH_USER_REGISTRATION_ROLE` role (default `User`).
 6. Airflow signs a JWT with `iss=airflow-sledgehammer` (or whatever you set), sets a session cookie, redirects to the UI.
 
+## Login whitelist (who can log in)
+
+LDAP lets *anyone* with an EECS account reach the login page, so a **whitelist**
+decides who is actually allowed in. Anyone not on it is rejected at login -- a
+valid EECS password is not enough: no bind, no session, no account.
+
+The list lives in Postgres (`hammer_poc.login_whitelist`), **not** in git, and
+you manage it live with one command -- no restart, no commit:
+
+```bash
+studio whitelist <eecs-uid>           # allow someone (in on their next login)
+studio whitelist                      # list everyone allowed
+studio whitelist --remove <eecs-uid>  # revoke
+```
+
+### First-time rollout (do not lock yourself out)
+
+1. **Add yourself first:** `studio whitelist <your-eecs-uid>` (also creates the table).
+2. **Safety net (optional):** `export AIRFLOW_ALLOWED_UIDS=<your-uid>` -- an emergency
+   bootstrap so you can still get in if the whitelist DB is ever unreachable.
+3. **Then** start Airflow.
+
+The launcher guards this for you: if the whitelist is empty and no
+`AIRFLOW_ALLOWED_UIDS` is set, it **refuses to start** and tells you to add
+someone -- so you cannot bring up a server nobody can log into.
+
 ## Promoting a user to admin
 
 By default, new users get the `User` role: view DAGs, trigger runs, but can't manage connections, variables, or other users.
