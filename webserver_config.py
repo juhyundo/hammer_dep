@@ -47,21 +47,20 @@ FabAirflowSecurityManagerOverride._ldap_bind_indirect = _anonymous_bind
 AUTH_LDAP_BIND_USER = "anonymous"
 AUTH_LDAP_BIND_PASSWORD = ""
 
-# --- Login whitelist (DB-backed) -------------------------------------------
-# HARD gate: only uids in hammer_poc.login_whitelist may authenticate. Everyone
-# else is rejected at login -- a valid EECS password is NOT enough; no bind, no
-# session, no account. Manage it live with `studio whitelist <uid>` /
-# `studio whitelist --remove <uid>` -- no restart, nothing committed to git.
+# Login whitelist (DB-backed). Only uids in hammer_poc.login_whitelist may log
+# in; anyone else is rejected before the bind, so a valid EECS password isn't
+# enough on its own. It's a Postgres table managed with `studio whitelist`, so
+# nothing about who's allowed lives in git.
 #
-# AIRFLOW_ALLOWED_UIDS (comma-separated env var) is an optional emergency
-# bootstrap so the owner can still get in if the whitelist DB is unreachable.
+# AIRFLOW_ALLOWED_UIDS (comma-separated) is a fallback: those uids get in even
+# if the whitelist table can't be reached.
 import logging as _logging
 import getpass as _getpass
 _wl_log = _logging.getLogger("airflow.webserver_config")
 
-# The OS user running this server is ALWAYS allowed -- they own the instance, so
-# they can never lock themselves out (no env var needed). Plus anyone listed in
-# the AIRFLOW_ALLOWED_UIDS env var. Everyone else is governed by the DB whitelist.
+# Whoever launched the server (the OS user) is always allowed -- they own it and
+# shouldn't be able to lock themselves out -- as is anyone in AIRFLOW_ALLOWED_UIDS.
+# Everyone else goes through the DB whitelist.
 try:
     _owner_uid = {_getpass.getuser().strip().lower()}
 except Exception:

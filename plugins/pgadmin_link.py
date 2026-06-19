@@ -1,14 +1,13 @@
 """
 Airflow plugin: add a "pgAdmin" entry to the nav / sidebar.
 
-A nav item with ``destination="nav"``, an absolute ``href``, and NO ``url_route``
+A nav item with ``destination="nav"``, an absolute ``href``, and no ``url_route``
 renders as a plain new-tab link (``<a href target="_blank">``): the React UI
-computes ``isExternal = (url_route is None)`` and only iframes items that DO have
-a ``url_route`` (the ``plugin/<route>`` route). The backend keeps it too --
+computes ``isExternal = (url_route is None)`` and only iframes items that have a
+``url_route`` (the ``plugin/<route>`` route). The backend keeps it too --
 get_plugin_info dumps ``plugin.external_views``, which retains url_route-less
-items. So clicking "pgAdmin" opens pgAdmin directly in a new tab, never touching
-the iframe route (which pgAdmin's ``X-Frame-Options: SAMEORIGIN`` would blank
-out anyway).
+items. So clicking "pgAdmin" opens it directly in a new tab, never hitting the
+iframe route (which pgAdmin's ``X-Frame-Options: SAMEORIGIN`` would blank out).
 
 pgAdmin listens on port 5050 (see PGADMIN_SETUP.md). The link is rendered in
 your browser, which reaches pgAdmin through the same SSH tunnel you use for

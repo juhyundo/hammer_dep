@@ -318,10 +318,10 @@ def _refuse_if_scheduler_running() -> None:
 def _refuse_if_whitelist_empty() -> None:
     """Refuse to start if nobody is on the login whitelist.
 
-    webserver_config.py rejects any LDAP login not on the
-    hammer_poc.login_whitelist table. An empty whitelist (and no
-    AIRFLOW_ALLOWED_UIDS bootstrap) means NOBODY could log in -- a dead server.
-    Bail with instructions instead. Manage the list with ``studio whitelist``.
+    webserver_config.py rejects any LDAP login that isn't on the
+    hammer_poc.login_whitelist table, so an empty whitelist with no
+    AIRFLOW_ALLOWED_UIDS bootstrap would be a server nobody can log into. Bail
+    with instructions instead. Manage the list with ``studio whitelist``.
     """
     import getpass
     try:
@@ -344,11 +344,11 @@ def _refuse_if_whitelist_empty() -> None:
             "[whitelist] ERROR: nobody can log in -- whitelist empty, no owner, no "
             "AIRFLOW_ALLOWED_UIDS.\n        Add someone: studio whitelist <uid>")
     if not allowed:
-        print(f"[whitelist] DB whitelist is empty -- only the owner ({owner or chr(63)}) "
+        print(f"[whitelist] DB whitelist is empty -- only the owner ({owner or '?'}) "
               f"can log in. Add teammates with: studio whitelist <uid>")
     else:
         print(f"[whitelist] {len(allowed)} user(s) on the whitelist; "
-              f"owner ({owner or chr(63)}) always allowed.")
+              f"owner ({owner or '?'}) always allowed.")
 
 
 def main():

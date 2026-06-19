@@ -372,7 +372,7 @@ BEGIN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {SCHEMA_NAME} TO {SLEDGEHAMMER_GROUP}';
         EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA_NAME} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {SLEDGEHAMMER_GROUP}';
         -- login_whitelist is admin-only: cache users keep SELECT (the login
-        -- gate reads it) but only the table OWNER may change who can log in.
+        -- gate reads it) but only the table owner can change who can log in.
         EXECUTE 'REVOKE INSERT, UPDATE, DELETE ON {FQ_WHITELIST} FROM {SLEDGEHAMMER_GROUP}';
     END IF;
 END $$;
@@ -476,7 +476,7 @@ def whitelist_list() -> list:
 
 
 def is_whitelisted(uid: str) -> bool:
-    """True iff uid is on the login whitelist. The Airflow auth gate calls this."""
+    """True if uid is on the login whitelist -- the Airflow auth gate calls this."""
     uid = (uid or "").strip().lower()
     if not uid:
         return False
