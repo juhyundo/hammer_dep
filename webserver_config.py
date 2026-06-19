@@ -56,9 +56,17 @@ AUTH_LDAP_BIND_PASSWORD = ""
 # AIRFLOW_ALLOWED_UIDS (comma-separated env var) is an optional emergency
 # bootstrap so the owner can still get in if the whitelist DB is unreachable.
 import logging as _logging
+import getpass as _getpass
 _wl_log = _logging.getLogger("airflow.webserver_config")
 
-_BOOTSTRAP_UIDS = {
+# The OS user running this server is ALWAYS allowed -- they own the instance, so
+# they can never lock themselves out (no env var needed). Plus anyone listed in
+# the AIRFLOW_ALLOWED_UIDS env var. Everyone else is governed by the DB whitelist.
+try:
+    _owner_uid = {_getpass.getuser().strip().lower()}
+except Exception:
+    _owner_uid = set()
+_BOOTSTRAP_UIDS = _owner_uid | {
     u.strip().lower()
     for u in os.environ.get("AIRFLOW_ALLOWED_UIDS", "").split(",")
     if u.strip()

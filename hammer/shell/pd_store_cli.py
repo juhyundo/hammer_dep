@@ -206,14 +206,21 @@ def _cmd_revoke(args: argparse.Namespace) -> int:
 
 
 def _cmd_whitelist(args: argparse.Namespace) -> int:
-    if args.remove:
-        pd_store.whitelist_remove(args.remove)
-        print(f"Removed '{args.remove.strip().lower()}' from the login whitelist.")
-        return 0
-    if args.uid:
-        pd_store.whitelist_add(args.uid)
-        print(f"Whitelisted '{args.uid.strip().lower()}' for Airflow login.")
-        return 0
+    try:
+        if args.remove:
+            pd_store.whitelist_remove(args.remove)
+            print(f"Removed '{args.remove.strip().lower()}' from the login whitelist.")
+            return 0
+        if args.uid:
+            pd_store.whitelist_add(args.uid)
+            print(f"Whitelisted '{args.uid.strip().lower()}' for Airflow login.")
+            return 0
+    except Exception as e:
+        if getattr(e, "pgcode", None) == "42501":  # insufficient_privilege
+            print("permission denied: only an admin (the database owner) can "
+                  "manage the login whitelist.")
+            return 1
+        raise
     rows = pd_store.whitelist_list()
     if not rows:
         print("(login whitelist is empty -- nobody can log in)")

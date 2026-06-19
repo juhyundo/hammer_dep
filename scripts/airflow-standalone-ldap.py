@@ -323,22 +323,32 @@ def _refuse_if_whitelist_empty() -> None:
     AIRFLOW_ALLOWED_UIDS bootstrap) means NOBODY could log in -- a dead server.
     Bail with instructions instead. Manage the list with ``studio whitelist``.
     """
-    if any(u.strip() for u in os.environ.get("AIRFLOW_ALLOWED_UIDS", "").split(",")):
-        return  # env-var bootstrap means at least the owner can get in
+    import getpass
+    try:
+        owner = getpass.getuser().strip().lower()
+    except Exception:
+        owner = ""
+    bootstrap = ({owner} if owner else set()) | {
+        u.strip().lower()
+        for u in os.environ.get("AIRFLOW_ALLOWED_UIDS", "").split(",")
+        if u.strip()
+    }
     try:
         from hammer.vlsi import pd_store
         allowed = pd_store.whitelist_list()
     except Exception as e:
-        print(f"[whitelist] WARNING: couldn't check the login whitelist ({e}).\n"
-              f"            If its DB is unreachable, nobody will be able to log in.")
+        print(f"[whitelist] WARNING: couldn't check the login whitelist ({e}).")
         return  # fail-open: a transient DB hiccup shouldn't block startup
-    if not allowed:
+    if not allowed and not bootstrap:
         sys.exit(
-            "[whitelist] ERROR: the login whitelist is empty -- nobody could log in.\n"
-            "        Add at least one EECS uid first:\n"
-            "            studio whitelist <your-eecs-uid>\n"
-            "        (or set AIRFLOW_ALLOWED_UIDS=<uid> as an emergency bootstrap).")
-    print(f"[whitelist] {len(allowed)} user(s) allowed to log in.")
+            "[whitelist] ERROR: nobody can log in -- whitelist empty, no owner, no "
+            "AIRFLOW_ALLOWED_UIDS.\n        Add someone: studio whitelist <uid>")
+    if not allowed:
+        print(f"[whitelist] DB whitelist is empty -- only the owner ({owner or chr(63)}) "
+              f"can log in. Add teammates with: studio whitelist <uid>")
+    else:
+        print(f"[whitelist] {len(allowed)} user(s) on the whitelist; "
+              f"owner ({owner or chr(63)}) always allowed.")
 
 
 def main():
