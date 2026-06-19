@@ -19,7 +19,7 @@ decision on theirs.
 * A `compute_stage_key` function that hashes the slice of a master_database
   that actually determines a stage's output. Matches the comparison surface
   of the dependency team's `stage_change_check`.
-* A CLI (`hammer-pd-store`) covering manual push, pull, listing, and access
+* A CLI (`studio`) covering manual push, pull, listing, and access
   management.
 * An opt-in cache wrapper around `driver.run_synthesis` and `driver.run_par`
   in `cli_driver.py`. With `HAMMER_PD_CACHE=1`, syn or par will skip the
@@ -75,9 +75,9 @@ anything.
 ### Setup and access
 
 ```bash
-hammer-pd-store init              # create schema, tables, indexes, default deny
-hammer-pd-store grant <role>      # add a Postgres role to sledgehammer_users
-hammer-pd-store revoke <role>     # remove them
+studio init              # create schema, tables, indexes, default deny
+studio grant <role>      # add a Postgres role to sledgehammer_users
+studio revoke <role>     # remove them
 ```
 
 `init` is idempotent. Run it any number of times; it creates what's missing
@@ -88,8 +88,8 @@ prerequisite below).
 ### Master_database
 
 ```bash
-hammer-pd-store master-push <design> [--master path]
-hammer-pd-store master-pull <design> [--out path]
+studio master-push <design> [--master path]
+studio master-pull <design> [--out path]
 ```
 
 The master_database is keyed by design name (e.g. `gcd`). Latest write
@@ -98,10 +98,10 @@ wins. `--master` defaults to `./master_database.json`.
 ### Per stage tarballs
 
 ```bash
-hammer-pd-store stage-key   <stage> [--master path]            # debug helper
-hammer-pd-store stage-push  <stage> --rundir <path> [--master path]
-hammer-pd-store stage-pull  <stage> --rundir <path> [--master path] [--overwrite]
-hammer-pd-store blob-list   [--stage <tag>] [-n N]
+studio stage-key   <stage> [--master path]            # debug helper
+studio stage-push  <stage> --rundir <path> [--master path]
+studio stage-pull  <stage> --rundir <path> [--master path] [--overwrite]
+studio blob-list   [--stage <tag>] [-n N]
 ```
 
 `<stage>` is the stage tag, e.g. `synthesis`, `par`, `drc`, `lvs`. The
@@ -112,9 +112,9 @@ long as the inputs match.
 ### Legacy par-input JSON store
 
 ```bash
-hammer-pd-store list
-hammer-pd-store get <sha256>
-hammer-pd-store put <path> [--kind <label>]
+studio list
+studio get <sha256>
+studio put <path> [--kind <label>]
 ```
 
 These still exist for the original par-input round trip POC. New work
@@ -186,13 +186,13 @@ tables added under `hammer_poc` automatically pick up the same grants).
 Onboarding a user is one line:
 
 ```bash
-hammer-pd-store grant colin
+studio grant colin
 ```
 
 That runs `GRANT sledgehammer_users TO colin`. Offboarding is:
 
 ```bash
-hammer-pd-store revoke colin
+studio revoke colin
 ```
 
 A user without group membership trying to read or write `pd_blobs` gets a
@@ -201,7 +201,7 @@ no per row gating yet; that's a future RLS policy on the `owner` column.
 
 ## One time DBA prerequisite
 
-`hammer-pd-store grant` and `revoke` only work if the group role exists
+`studio grant` and `revoke` only work if the group role exists
 and the calling role has `ADMIN OPTION` on it. We can't do this ourselves
 on barney because `lawrencejrhee` does not have `CREATEROLE`. A DBA needs
 to run:
@@ -211,7 +211,7 @@ CREATE ROLE sledgehammer_users NOLOGIN;
 GRANT sledgehammer_users TO lawrencejrhee WITH ADMIN OPTION;
 ```
 
-After that, re run `hammer-pd-store init` so the conditional grant block
+After that, re run `studio init` so the conditional grant block
 in the DDL picks up the now existing role and applies the table grants to
 it.
 
@@ -237,16 +237,16 @@ root is usually enough to make path 2 work.
 | `hammer/vlsi/pd_store.py` | Schema, library, cache key derivation, RTL fingerprint, tar helpers, access management |
 | `hammer/vlsi/pd_cache.py` | `cache_or_run` wrapper used by `cli_driver.py` for automatic caching |
 | `hammer/vlsi/cli_driver.py` | Synthesis and par actions wrap their run calls in `cache_or_run` |
-| `hammer/shell/pd_store_cli.py` | The `hammer-pd-store` CLI |
+| `hammer/shell/pd_store_cli.py` | The `studio` CLI |
 | `scripts/verify_stage_key.py` | Standalone correctness check for `compute_stage_key` |
-| `pyproject.toml` | Registers `hammer-pd-store` as a console script |
+| `pyproject.toml` | Registers `studio` as a console script |
 
 ## What's verified
 
 * `compute_stage_key` against the real gcd `master_database.json`:
   stable, sensitive to syn changes, selective (par hash unchanged when
   syn inputs change).
-* `hammer-pd-store` parser builds and all subcommands wire up.
+* `studio` parser builds and all subcommands wire up.
 * `cli_driver.py` still imports with the cache wrapper in place.
 * Live round trip of the original par-input JSON store against barney
   (from the earlier POC).

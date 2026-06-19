@@ -2,7 +2,7 @@
 
 Optional setup for replacing Airflow's default "shared admin password" login with proper per-user LDAP authentication. After this, each person logs into the Airflow webserver with their own institutional credentials (at Berkeley EECS, that's their EECS account). No shared accounts, separate sessions per user.
 
-Skip this if you're only using the cache CLI (`hammer-pd-store`) and don't run the Airflow webserver. The cache layer doesn't care about LDAP.
+Skip this if you're only using the cache CLI (`studio`) and don't run the Airflow webserver. The cache layer doesn't care about LDAP.
 
 ## What you need before starting
 
@@ -163,19 +163,19 @@ The isolation works through a `hammer_poc.user_workspaces` table keyed by LDAP u
 Defaults are auto-created on first login. To see what's registered:
 
 ```bash
-hammer-pd-store workspace-list
+studio workspace-list
 ```
 
 To set or change a user's workspace explicitly:
 
 ```bash
-hammer-pd-store workspace-set <username> /path/to/their/workspace_root
+studio workspace-set <username> /path/to/their/workspace_root
 ```
 
 The daemon user has to have write permission to that path. Auto-registration uses a per-user subdirectory under the daemon user's `hammer` checkout, e.g. `~/hammer/e2e/build-sky130-cm-<username>`. To remove a registration (next call for that user re-auto-registers a fresh default):
 
 ```bash
-hammer-pd-store workspace-unset <username>
+studio workspace-unset <username>
 ```
 
 ### Verifying the isolation

@@ -1,5 +1,5 @@
 """
-hammer-pd-store: CLI for the Postgres-backed PD store.
+studio: CLI for the Postgres-backed PD store.
 
 Roughly grouped by what each subcommand is for:
 
@@ -641,7 +641,7 @@ def _cmd_blob_reassign(args: argparse.Namespace) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hammer-pd-store",
+        prog="studio",
         description="Postgres PD artifact store (POC).",
     )
     sub = parser.add_subparsers(dest="command", required=True)

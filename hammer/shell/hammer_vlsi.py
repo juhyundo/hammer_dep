@@ -163,7 +163,7 @@ def _resolve_workspace_obj_dir(context, design):
 
     # Look up where this user builds. get_user_workspace returns their stored
     # path, or registers a default under this checkout's e2e on first use
-    # (build-sky130-cm-<user>). Override per user with `hammer-pd-store
+    # (build-sky130-cm-<user>). Override per user with `studio
     # workspace-set <user> <path>`; the path must be writable by the daemon.
     # A named workspace (conf={"workspace": "<name>"}) lets one user run several.
     if not ws_name:

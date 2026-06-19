@@ -7,7 +7,7 @@ home directory that gets loaded into the environment at launch.
 This only concerns you if you *run* an Airflow instance. If you just log into
 someone else's running instance through the web UI, you need none of this — use
 your EECS LDAP credentials and you're done. (The one exception is running
-`hammer-pd-store` against the cache DB directly, which needs your own Postgres
+`studio` against the cache DB directly, which needs your own Postgres
 password via `HAMMER_PG_PASSWORD` or a `~/.pgpass` entry.)
 
 ## How it works

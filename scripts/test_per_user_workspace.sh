@@ -38,15 +38,15 @@ ROOT_A="/tmp/sledgehammer_test/${USER_A}"
 ROOT_B="/tmp/sledgehammer_test/${USER_B}"
 
 cleanup() {
-    .venv/bin/hammer-pd-store workspace-unset "$USER_A" > /dev/null 2>&1 || true
-    .venv/bin/hammer-pd-store workspace-unset "$USER_B" > /dev/null 2>&1 || true
+    .venv/bin/studio workspace-unset "$USER_A" > /dev/null 2>&1 || true
+    .venv/bin/studio workspace-unset "$USER_B" > /dev/null 2>&1 || true
     rm -rf "/tmp/sledgehammer_test"
 }
 trap cleanup EXIT
 
 # Register sandbox workspaces.
-.venv/bin/hammer-pd-store workspace-set "$USER_A" "$ROOT_A" > /dev/null
-.venv/bin/hammer-pd-store workspace-set "$USER_B" "$ROOT_B" > /dev/null
+.venv/bin/studio workspace-set "$USER_A" "$ROOT_A" > /dev/null
+.venv/bin/studio workspace-set "$USER_B" "$ROOT_B" > /dev/null
 
 # Seed each workspace.
 mkdir -p "${ROOT_A}/gcd" "${ROOT_B}/gcd"

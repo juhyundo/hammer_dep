@@ -162,7 +162,7 @@ For BWRC team deployment (cache on `barney`):
 | Password | the password for that Postgres role (from your `airflow.cfg`) |
 | Save password? | ✓ (so you don't retype every time) |
 
-For your own deployment: whatever you configured during `hammer-pd-store
+For your own deployment: whatever you configured during `studio
 init`. The Postgres role is whatever you used to create the DB; the
 password is the one you set on that role.
 
@@ -231,7 +231,7 @@ Wrong Postgres role password. Same one as in your
 
 **`FATAL: permission denied for database sledgehammer_studio`**
 You aren't in the `sledgehammer_users` group yet. Someone with admin on
-that role needs to run `hammer-pd-store grant <your_role>` on the host.
+that role needs to run `studio grant <your_role>` on the host.
 
 ## Stopping pgAdmin
 

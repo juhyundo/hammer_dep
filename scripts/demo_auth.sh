@@ -52,7 +52,7 @@ CREATE ROLE colin         LOGIN PASSWORD 'demo';
 CREATE ROLE juhyun        LOGIN PASSWORD 'demo';
 SQL
 
-# Point hammer-pd-store at the sandbox
+# Point studio at the sandbox
 export HAMMER_PG_HOST=127.0.0.1
 export HAMMER_PG_PORT=$PGPORT
 export HAMMER_PG_DB=postgres
@@ -60,15 +60,15 @@ export HAMMER_PG_USER=postgres
 export HAMMER_PG_PASSWORD=" "
 cd "$REPO_ROOT"
 
-echo "=== Running hammer-pd-store init (creates schema, default-deny, group grants) ==="
-.venv/bin/hammer-pd-store init
+echo "=== Running studio init (creates schema, default-deny, group grants) ==="
+.venv/bin/studio init
 
 echo
 echo "=== Step 1: Lawrence pushes a master_database for 'gcd' ==="
 echo '{"design":"gcd","note":"test row, only Lawrence pushed this"}' > /tmp/demo_mdb.json
-HAMMER_PG_USER=lawrencejrhee .venv/bin/hammer-pd-store grant lawrencejrhee 2>/dev/null || \
-  .venv/bin/hammer-pd-store grant lawrencejrhee
-HAMMER_PG_USER=lawrencejrhee .venv/bin/hammer-pd-store master-push gcd --master /tmp/demo_mdb.json
+HAMMER_PG_USER=lawrencejrhee .venv/bin/studio grant lawrencejrhee 2>/dev/null || \
+  .venv/bin/studio grant lawrencejrhee
+HAMMER_PG_USER=lawrencejrhee .venv/bin/studio master-push gcd --master /tmp/demo_mdb.json
 
 pass_fail() {
     local label=$1 expected=$2 actual=$3
@@ -82,7 +82,7 @@ pass_fail() {
 try_read_as() {
     # Prints "ALLOWED" if the read succeeded, "DENIED" otherwise. Never errors out.
     local user=$1
-    HAMMER_PG_USER="$user" .venv/bin/hammer-pd-store master-pull gcd >/dev/null 2>&1
+    HAMMER_PG_USER="$user" .venv/bin/studio master-pull gcd >/dev/null 2>&1
     if [ $? -eq 0 ]; then
         echo "ALLOWED"
     else
@@ -97,7 +97,7 @@ pass_fail "Colin denied" "DENIED" "$result"
 
 echo
 echo "=== Step 3: Lawrence adds Colin to sledgehammer_users ==="
-.venv/bin/hammer-pd-store grant colin
+.venv/bin/studio grant colin
 
 echo
 echo "=== Step 4: Colin reads again — expect ALLOWED ==="
@@ -111,7 +111,7 @@ pass_fail "Juhyun denied" "DENIED" "$result"
 
 echo
 echo "=== Step 6: Lawrence revokes Colin from sledgehammer_users ==="
-.venv/bin/hammer-pd-store revoke colin
+.venv/bin/studio revoke colin
 
 echo
 echo "=== Step 7: Colin reads again — expect DENIED ==="
