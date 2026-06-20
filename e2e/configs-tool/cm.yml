@@ -9,5 +9,16 @@ vlsi.core.sim_tool: "hammer.sim.vcs"
 vlsi.core.timing_tool: "hammer.timing.tempus"
 vlsi.core.formal_tool: "hammer.formal.conformal"
 vlsi.core.power_tool: "hammer.power.voltus"
-vlsi.core.drc_tool: "hammer.drc.calibre"
-vlsi.core.lvs_tool: "hammer.lvs.calibre"
+#vlsi.core.drc_tool: "hammer.drc.calibre"
+#vlsi.core.lvs_tool: "hammer.lvs.calibre"
+
+vlsi.core.drc_tool: "hammer.drc.pegasus"
+vlsi.core.lvs_tool: "hammer.lvs.pegasus"
+drc_deck_sources: # DRC decks, one element for each deck
+  - "/tools/commercial/skywater/sky130_cds/sky130_prelim_release_091123/pegasus/sky130_rev0006.drc.pvl"
+lvs_deck_sources: 
+  - "/tools/commercial/skywater/sky130_cds/sky130_prelim_release_091123/pegasus/sky130_rev0001.lvs.pvl"
+lvs_deck_sources_meta: lazysubst
+
+drc_blackbox_srams: false
+lvs_blackbox_srams: false

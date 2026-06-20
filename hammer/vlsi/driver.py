@@ -156,18 +156,17 @@ class HammerDriver:
             cache_dir = os.path.join(self.obj_dir, "tech-%s-cache" % tech_name)
 
         self.log.info("Loading technology '{0}'".format(tech_module))
-        tech_opt = hammer_tech.HammerTechnology.load_from_module(tech_module)
-        if tech_opt is None:
-            self.log.fatal("Technology {0} not found or missing .tech.[json/yml]!".format(tech_module))
-            return
-        else:
-            tech: hammer_tech.HammerTechnology = tech_opt
-        # Update database as soon as possible since e.g. extract_technology_files could use those settings
+        tech = hammer_tech.HammerTechnology.load_from_module(tech_module)
         self.database.update_technology(*tech.get_config())
         tech.logger = self.log.context("tech")
         tech.set_database(self.database)
         tech.cache_dir = cache_dir
+        tech.gen_config()
+        if tech.config is None:
+            self.log.fatal("Technology {0} config not generated or missing .tech.[json/yml]!".format(tech_module))
+            return
         tech.extract_technology_files()
+        tech.override_tech_libraries()
         tech.get_lib_units()
 
         self.tech = tech
@@ -927,6 +926,7 @@ class HammerDriver:
 
         # TODO: think about artifact storage?
         self.log.info("Starting synthesis with tool '%s'" % (self.syn_tool.name))
+        self.log.info("Starting synthesis with hooks '%s'" % (hook_actions))
         if hook_actions is None:
             hooks_to_use = self.post_custom_syn_tool_hooks
         else:

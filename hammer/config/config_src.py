@@ -1338,6 +1338,31 @@ class HammerDatabase:
             print(f"Updated Database exported to {master_path}")
             self._pending_master_db = None
 
+    def revert_rerun(self, stage: str, filename: str = "master_database.json"):
+        """
+        reset NeedsToReRun True for stage after stage attempt fails
+
+        :param filename: Output filename for master database json
+        :param stage: Which stage's database is being checked
+        :return: none
+        """
+        master_path = Path(filename)
+        master_db_contents: Optional[dict]
+        try:
+            text = master_path.read_text()
+            if text.strip() == "":
+                raise ValueError("master database file is empty")
+            loaded = json.loads(text)
+            master_db_contents = loaded if isinstance(loaded, dict) else None
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            master_db_contents = dict()
+
+        print("setting NeedsToReRun True for " + str(stage))
+        master_db_contents[stage + ".needsToRerun"] = True
+        print(f"STAGE FAILED, REQUIRING RERUN")
+        master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
+        master_path.write_text(master_db_contents_str)
+        print(f"Updated Database exported to {master_path}")
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:
     """

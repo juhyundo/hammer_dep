@@ -199,6 +199,8 @@ class Genus(HammerSynthesisTool, CadenceTool):
             verbose_append("set_db lp_clock_gating_prefix  {CLKGATE}")
             verbose_append("set_db lp_insert_clock_gating  true")
             verbose_append("set_db lp_clock_gating_register_aware true")
+        else:
+            verbose_append("set_db lp_clock_gating_infer_enable false")
 
         # Set up libraries.
         # Read timing libraries.
@@ -228,16 +230,15 @@ class Genus(HammerSynthesisTool, CadenceTool):
         qrc_files = self.technology.read_libs([
             hammer_tech.filters.qrc_tech_filter
         ], hammer_tech.HammerTechnologyUtils.to_plain_item)
-        # Commented out QRC tech file setting - may cause issues if QRC is needed in the future
-        # if len(qrc_files) > 0:
-        #     verbose_append("set_db qrc_tech_file {{ {files} }}".format(
-        #         files=qrc_files[0]
-        #     ))
+        if qrc_files:
+            verbose_append("set_db qrc_tech_file {{ {files} }}".format(
+                files=qrc_files[0]
+            ))
 
-        # Quit when ispatial is used with sky130
-        if(not qrc_files and self.get_setting("synthesis.genus.phys_flow_effort").lower() == "high"):
-            self.logger.warning("Sky130 does not support ISpatial due to missing of qrc tech files.")
-            verbose_append("quit")
+        # # Quit when ispatial is used with sky130
+        # if(not qrc_files and self.get_setting("synthesis.genus.phys_flow_effort").lower() == "high"):
+        #     self.logger.warning("Sky130 does not support ISpatial due to missing of qrc tech files.")
+        #     verbose_append("quit")
 
         # Load input files and check that they are all Verilog.
         if not self.check_input_files([".v", ".sv", "vh"]):
@@ -256,9 +257,7 @@ class Genus(HammerSynthesisTool, CadenceTool):
         ], hammer_tech.HammerTechnologyUtils.to_plain_item)
 
         # Read the RTL.
-        verbose_append("read_hdl {DEFINES} -sv {{ {FILES} }}".format(
-            DEFINES=" ".join(["-define "+define for define in self.get_setting("synthesis.inputs.defines",[])]),
-            FILES=" ".join(abspath_input_files)))
+        verbose_append("read_hdl -sv {{ {} }}".format(" ".join(abspath_input_files)))
 
         # Elaborate/parse the RTL.
         verbose_append("elaborate {}".format(self.top_module))
@@ -274,10 +273,9 @@ class Genus(HammerSynthesisTool, CadenceTool):
         # Setup power settings from cpf/upf
         # Difference from other tools: apply_power_intent after read
         power_cmds = self.generate_power_spec_commands()
-        if power_cmds:
-            power_cmds.insert(1, "apply_power_intent -summary")
-            for l in power_cmds:
-                verbose_append(l)
+        power_cmds.insert(1, "apply_power_intent -summary")
+        for l in power_cmds:
+            verbose_append(l)
 
         # Prevent floorplanning targets from getting flattened.
         # TODO: is there a way to track instance paths through the synthesis process?
