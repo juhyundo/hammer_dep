@@ -100,6 +100,8 @@ FQ_BLOB = f"{SCHEMA_NAME}.{BLOB_TABLE}"
 FQ_WORKSPACE = f"{SCHEMA_NAME}.{WORKSPACE_TABLE}"
 WHITELIST_TABLE = "login_whitelist"
 FQ_WHITELIST = f"{SCHEMA_NAME}.{WHITELIST_TABLE}"
+NOTIFY_EMAIL_TABLE = "user_notify_email"
+FQ_NOTIFY_EMAIL = f"{SCHEMA_NAME}.{NOTIFY_EMAIL_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -127,24 +129,13 @@ def _find_airflow_cfg() -> Optional[Path]:
     return None
 
 
-def _parse_airflow_cfg_conn() -> Dict[str, Any]:
-    """
-    Pull host/port/db/user/password from ``sql_alchemy_conn`` in airflow.cfg.
+def _parse_conn_uri(conn_str: str) -> Dict[str, Any]:
+    """Parse a SQLAlchemy/libpq Postgres URI into psycopg2 connect kwargs.
 
-    Returns an empty dict on any failure - this is a best-effort fallback,
-    not a required source.
+    Returns an empty dict for anything that isn't a usable postgres URI.
     """
-    cfg_path = _find_airflow_cfg()
-    if cfg_path is None:
+    if not conn_str:
         return {}
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        parser.read(cfg_path)
-    except Exception:
-        return {}
-    if not parser.has_option("database", "sql_alchemy_conn"):
-        return {}
-    conn_str = parser.get("database", "sql_alchemy_conn")
     # Strip SQLAlchemy driver prefix (e.g. "postgresql+psycopg2://") so
     # urlparse sees a recognized scheme.
     if "+" in conn_str.split("://", 1)[0]:
@@ -169,6 +160,91 @@ def _parse_airflow_cfg_conn() -> Dict[str, Any]:
     if dbname:
         out["dbname"] = dbname
     return out
+
+
+def _parse_airflow_cfg_conn() -> Dict[str, Any]:
+    """
+    Pull host/port/db/user/password from ``sql_alchemy_conn`` in airflow.cfg.
+
+    Returns an empty dict on any failure - this is a best-effort fallback,
+    not a required source.
+    """
+    cfg_path = _find_airflow_cfg()
+    if cfg_path is None:
+        return {}
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(cfg_path)
+    except Exception:
+        return {}
+    if not parser.has_option("database", "sql_alchemy_conn"):
+        return {}
+    return _parse_conn_uri(parser.get("database", "sql_alchemy_conn"))
+
+
+def _read_conn_file(path: str) -> Dict[str, Any]:
+    """Parse a Postgres URI stored on its own line in a locked file.
+
+    Empty dict if the file is missing or doesn't hold a usable URI.
+    """
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            return _parse_conn_uri(f.read().strip())
+    except Exception:
+        return {}
+
+
+def airflow_metadata_conn_settings() -> Dict[str, Any]:
+    """psycopg2 connect kwargs for the Airflow METADATA db (not the cache db).
+
+    Airflow 3 deliberately denies tasks and DAG callbacks access to the metadata
+    DB: the callback subprocess is handed a decoy
+    ``AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`` (the non-postgres sqlite default), not
+    the real URI. The completion-notification callback still has to read the
+    dag_run row to learn who triggered the run, so we also accept the connection
+    through ``SLEDGE_``-prefixed channels, which Airflow doesn't touch -- the same
+    reason ``SLEDGE_SMTP_*`` survives into the callback.
+
+    Sources, in order:
+
+    1. ``AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`` -- the real URI in a normal Airflow
+       process (scheduler, CLI). Parsed only if it's a postgres URI, so the
+       sandbox decoy is ignored.
+    2. ``SLEDGE_METADATA_CONN`` -- an inline non-AIRFLOW mirror of the URI.
+    3. A conn file: ``SLEDGE_METADATA_CONN_FILE`` if set, otherwise a
+       ``.sledge_metadata_conn`` file kept beside ``SLEDGE_SMTP_PASSWORD_FILE``.
+       This keeps the credential in a chmod-600 file rather than the environment,
+       matching how the SMTP password is handled, and is the channel the callback
+       actually uses (the file path survives the sandbox via the SMTP env var).
+    4. Airflow's resolved config, for forked callers that still carry it.
+    5. A direct read of airflow.cfg, for callers outside Airflow entirely.
+
+    Empty dict if none is usable.
+    """
+    for var in ("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "SLEDGE_METADATA_CONN"):
+        settings = _parse_conn_uri(os.environ.get(var, ""))
+        if settings:
+            return settings
+
+    conn_file = os.environ.get("SLEDGE_METADATA_CONN_FILE")
+    if not conn_file:
+        smtp_pw = os.environ.get("SLEDGE_SMTP_PASSWORD_FILE")
+        if smtp_pw:
+            conn_file = os.path.join(os.path.dirname(smtp_pw), ".sledge_metadata_conn")
+    settings = _read_conn_file(conn_file)
+    if settings:
+        return settings
+
+    try:
+        from airflow.configuration import conf
+        settings = _parse_conn_uri(conf.get("database", "sql_alchemy_conn"))
+        if settings:
+            return settings
+    except Exception:
+        pass
+    return _parse_airflow_cfg_conn()
 
 
 def _pg_settings() -> Dict[str, Any]:
@@ -358,6 +434,16 @@ CREATE TABLE IF NOT EXISTS {FQ_WHITELIST} (
     added_by TEXT NOT NULL DEFAULT current_user
 );
 
+-- Addresses users opted into for flow-completion emails. Unlike the whitelist
+-- this one is user-writable: each person sets their own through the
+-- self-service web form, which scopes the write to their logged-in identity.
+-- So it keeps the normal group grant and gets no admin-only REVOKE below.
+CREATE TABLE IF NOT EXISTS {FQ_NOTIFY_EMAIL} (
+    uid        TEXT PRIMARY KEY,
+    email      TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Nobody gets access by default. The group role is the only way in.
 REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA {SCHEMA_NAME} FROM PUBLIC;
@@ -485,6 +571,86 @@ def is_whitelisted(uid: str) -> bool:
         with conn.cursor() as cur:
             cur.execute(f"SELECT 1 FROM {FQ_WHITELIST} WHERE uid = %s", (uid,))
             return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _valid_email(email: str) -> bool:
+    """Conservative address check: one @, a dotted domain, and none of the
+    whitespace or separators that could smuggle extra recipients into a header.
+    """
+    email = (email or "").strip()
+    if not email or any(c in email for c in " \t\r\n,;<>"):
+        return False
+    local, _, domain = email.partition("@")
+    return bool(local) and "@" not in domain and "." in domain \
+        and not domain.startswith(".") and not domain.endswith(".")
+
+
+def set_notify_email(uid: str, email: str) -> None:
+    """Register or update the address a user opted into for completion emails.
+
+    Upsert keyed on uid. The caller is responsible for making sure uid is the
+    person setting their own address -- the self-service web form takes it from
+    the logged-in session, never from request input.
+    """
+    uid = (uid or "").strip().lower()
+    email = (email or "").strip()
+    if not uid:
+        raise ValueError("no uid given for notify-email registration")
+    if not _valid_email(email):
+        raise ValueError(f"not a valid email address: {email!r}")
+    conn = _connect()
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {FQ_NOTIFY_EMAIL} (uid, email) VALUES (%s, %s) "
+                f"ON CONFLICT (uid) DO UPDATE SET email = EXCLUDED.email, updated_at = NOW()",
+                (uid, email),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_notify_email(uid: str) -> Optional[str]:
+    """Return the address a user opted into, or None if they haven't set one."""
+    uid = (uid or "").strip().lower()
+    if not uid:
+        return None
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT email FROM {FQ_NOTIFY_EMAIL} WHERE uid = %s", (uid,))
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+    finally:
+        conn.close()
+
+
+def delete_notify_email(uid: str) -> bool:
+    """Drop a user's opted-in address (opt back out). True if a row was removed."""
+    uid = (uid or "").strip().lower()
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {FQ_NOTIFY_EMAIL} WHERE uid = %s", (uid,))
+            removed = cur.rowcount > 0
+        conn.commit()
+        return removed
+    finally:
+        conn.close()
+
+
+def list_notify_emails() -> list:
+    """Return [(uid, email, updated_at), ...] for everyone who opted in."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT uid, email, updated_at FROM {FQ_NOTIFY_EMAIL} ORDER BY uid")
+            return cur.fetchall()
     finally:
         conn.close()
 

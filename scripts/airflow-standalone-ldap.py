@@ -213,9 +213,41 @@ def _setup_secrets() -> None:
     print(f"[secrets] loaded {loaded} secret(s) into the environment.")
 
 
+def _mirror_metadata_conn_for_callbacks() -> None:
+    """Stage the metadata-DB connection where DAG callbacks can read it.
+
+    Airflow 3 runs DAG callbacks in a sandbox that strips metadata access: the
+    callback subprocess is handed a decoy sqlite connection, not the real one,
+    and the triggering user isn't in the callback context. The flow-completion
+    notifier still has to read the dag_run row to learn who triggered a run, so
+    we mirror the real connection into a chmod-600 file that survives into the
+    callback through the SLEDGE_ environment (the path is derived from
+    SLEDGE_SMTP_PASSWORD_FILE; see pd_store.airflow_metadata_conn_settings).
+    Rewritten on every startup so it always matches the current secrets.
+    """
+    conn = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")
+    if not conn.startswith("postgres"):
+        return
+    target = os.environ.get("SLEDGE_METADATA_CONN_FILE")
+    if not target:
+        smtp_pw = os.environ.get("SLEDGE_SMTP_PASSWORD_FILE")
+        if not smtp_pw:
+            return
+        target = os.path.join(os.path.dirname(smtp_pw), ".sledge_metadata_conn")
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(conn + "\n")
+        os.chmod(target, 0o600)
+        print(f"[secrets] mirrored metadata conn for callbacks -> {target}")
+    except Exception as e:
+        print(f"[secrets] WARNING: could not stage metadata conn for callbacks: {e}")
+
+
 # Load the secrets, THEN import Airflow: importing it reads sql_alchemy_conn right
 # away, so the environment has to be populated first or it crashes on a blank conn.
 _setup_secrets()
+_mirror_metadata_conn_for_callbacks()
 
 from airflow.cli.commands.standalone_command import StandaloneCommand
 from airflow.executors.executor_loader import ExecutorLoader
