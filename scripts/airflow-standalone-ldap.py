@@ -244,9 +244,44 @@ def _mirror_metadata_conn_for_callbacks() -> None:
         print(f"[secrets] WARNING: could not stage metadata conn for callbacks: {e}")
 
 
+def _load_smtp_settings() -> None:
+    """Load SMTP settings from .sledgehammer/smtp.env if present.
+
+    The sender address and the path to the password file aren't secrets -- the
+    password itself stays in its own chmod-600 file -- so they live in a plain
+    chmod-600 file beside the encrypted secrets, not in git or a manual export.
+    This is what lets `sledgehammer` send completion emails with no per-launch
+    setup. Anything already in the environment wins, so an explicit export still
+    overrides the file.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, ".sledgehammer", "smtp.env")
+    if not os.path.exists(path):
+        return
+    loaded = 0
+    try:
+        with open(path) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
+                key, val = line.split("=", 1)
+                key, val = key.strip(), val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                    val = val[1:-1]
+                os.environ.setdefault(key, val)
+                loaded += 1
+        print(f"[secrets] loaded {loaded} SMTP setting(s) from {path}")
+    except Exception as e:
+        print(f"[secrets] WARNING: could not load {path}: {e}")
+
+
 # Load the secrets, THEN import Airflow: importing it reads sql_alchemy_conn right
 # away, so the environment has to be populated first or it crashes on a blank conn.
 _setup_secrets()
+_load_smtp_settings()
 _mirror_metadata_conn_for_callbacks()
 
 from airflow.cli.commands.standalone_command import StandaloneCommand
