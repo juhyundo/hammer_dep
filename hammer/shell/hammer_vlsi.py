@@ -56,42 +56,11 @@ def run_cli_driver():
             raise RuntimeError(f"CLIDriver.main() failed with exit code {e.code}")
 
 
-def _lookup_triggering_user_from_db(dag_id, run_id):
-    """
-    Query the Airflow metadata DB for the triggering_user_name of a dag_run.
-
-    Airflow 3's runtime ``DagRun`` proxy (see ``airflow.sdk.types.DagRunProtocol``)
-    does NOT expose ``triggering_user_name`` to tasks - it's only available on
-    the database model. So we look it up directly from the ``dag_run`` SQL row
-    using the ``dag_id`` + ``run_id`` we DO have access to in the proxy.
-
-    Returns the username string, or None if anything goes wrong.
-    """
-    if not dag_id or not run_id:
-        return None
-    try:
-        import psycopg2
-        from hammer.vlsi import pd_store
-        settings = pd_store.airflow_metadata_conn_settings()
-        if not settings:
-            print("[notify] db lookup: no metadata conn resolved "
-                  "(env/SLEDGE_METADATA_CONN/conf/cfg all empty)")
-            return None
-        conn = psycopg2.connect(**settings)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT triggering_user_name FROM dag_run "
-                    "WHERE dag_id = %s AND run_id = %s",
-                    (dag_id, run_id),
-                )
-                row = cur.fetchone()
-                return row[0] if row and row[0] else None
-        finally:
-            conn.close()
-    except Exception as e:
-        print(f"[notify] db lookup error: {e}")
-        return None
+# The completion-email callback lives in pd_notify, which has no Airflow imports
+# so the cluster policy can import it without building DAGs. Imported here too so
+# the @dag decorators below can wire it as their on_success/on_failure callback.
+# The metadata-DB lookup it relied on now lives in pd_store.lookup_triggering_user.
+from hammer.vlsi.pd_notify import notify_flow_complete as _notify_flow_complete
 
 
 def _resolve_workspace_obj_dir(context, design):
@@ -141,7 +110,8 @@ def _resolve_workspace_obj_dir(context, design):
     # Airflow 3 SDK proxy hides triggering_user_name. Fall back to a SQL
     # lookup keyed by (dag_id, run_id) - that always works.
     if not user:
-        user = _lookup_triggering_user_from_db(dag_id, run_id)
+        from hammer.vlsi import pd_store
+        user = pd_store.lookup_triggering_user(dag_id, run_id)
 
     if not user:
         user = os.environ.get("USER", "default")
@@ -191,125 +161,6 @@ def _resolve_workspace_obj_dir(context, design):
     print(f"[user-workspace] triggering_user={user!r} workspace={ws_name!r} "
           f"dag_id={dag_id!r} run_id={run_id!r} -> OBJ_DIR={obj_dir}")
     return obj_dir
-
-
-# Flow-completion email notifications.
-#
-# When a DAG run finishes, email the person who triggered it. The wiring lives
-# here; who actually gets mailed is decided in _resolve_notify_email, so the
-# recipient policy can change without touching the DAGs. Nothing is sent unless
-# a recipient comes back, and anything that goes wrong in here is logged and
-# dropped, so a notification can never break or stall a run.
-
-def _resolve_notify_email(context):
-    """Return the address to notify about a finished run, or None to stay quiet.
-
-    Looks up the address the triggering user opted into through the self-service
-    page (the user_notify_email table). Notifications are opt-in: if the user
-    hasn't registered an address the run is not notified. We never guess one from
-    the username, and there is deliberately no per-run recipient override -- that
-    would let anyone who can trigger a DAG send mail to an arbitrary address.
-    """
-    dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
-    dag_id = getattr(dag_run, "dag_id", None)
-    run_id = getattr(dag_run, "run_id", None)
-    # Resolve the triggering user. The plain attribute is set in some contexts;
-    # where it isn't (Airflow 3 hides it on the runtime proxy, and the callback
-    # sandbox forbids ORM access), fall back to a direct SQL read of the dag_run
-    # row keyed by (dag_id, run_id) over the SLEDGE_-channel connection.
-    uid = getattr(dag_run, "triggering_user_name", None)
-    if not uid:
-        uid = _lookup_triggering_user_from_db(dag_id, run_id)
-    if not uid or uid == "default":
-        print(f"[notify] resolve: no triggering user for {dag_id} {run_id}")
-        return None
-    try:
-        from hammer.vlsi import pd_store
-        addr = pd_store.get_notify_email(uid)
-        if not addr:
-            print(f"[notify] resolve: {uid} has no registered email")
-        return addr
-    except Exception as e:
-        print(f"[notify] resolve: email lookup failed for {uid}: {e}")
-        return None
-
-
-def _send_completion_email(to, subject, html):
-    """Send one notification over SMTP, authenticating with a password kept in a
-    locked file (never in airflow.cfg or the metadata DB).
-
-    Server and sender come from SLEDGE_SMTP_* env vars; the password is read from
-    the file named by SLEDGE_SMTP_PASSWORD_FILE. If no sender is configured this
-    is a no-op, so a run is never held up by mail setup. We send this ourselves
-    rather than through airflow's send_email because that path only authenticates
-    when an smtp_default Connection exists, and keeping the credential in the file
-    is cleaner than putting it in the database.
-    """
-    import smtplib
-    import ssl
-    from email.message import EmailMessage
-
-    user = os.environ.get("SLEDGE_SMTP_USER")
-    pw_file = os.environ.get("SLEDGE_SMTP_PASSWORD_FILE")
-    if not user or not pw_file:
-        print("[notify] no SMTP sender configured (SLEDGE_SMTP_* unset); not sending")
-        return
-    host = os.environ.get("SLEDGE_SMTP_HOST", "smtp.gmail.com")
-    port = int(os.environ.get("SLEDGE_SMTP_PORT", "587"))
-    sender = os.environ.get("SLEDGE_SMTP_FROM") or user
-    with open(pw_file) as f:
-        password = f.read().strip()
-
-    msg = EmailMessage()
-    msg["From"] = sender
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content("Your physical-design flow has finished. See the HTML version of this message for details.")
-    msg.add_alternative(html, subtype="html")
-
-    server = smtplib.SMTP(host, port, timeout=30)
-    try:
-        server.ehlo()
-        server.starttls(context=ssl.create_default_context())
-        server.ehlo()
-        server.login(user, password)
-        server.send_message(msg)
-    finally:
-        server.quit()
-
-
-def _notify_flow_complete(context):
-    """DAG-level callback that emails the triggering user when their flow ends.
-
-    Wired as both on_success_callback and on_failure_callback, so it fires once
-    per run on either outcome. This is a DAG-level callback rather than logic in
-    the exit_ task because exit_ uses a NONE_FAILED trigger rule and is skipped
-    when an upstream fails, so it would miss failed runs. If no recipient is
-    resolved, this does nothing.
-    """
-    try:
-        dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
-        dag_id = getattr(dag_run, "dag_id", None) or "unknown"
-        run_id = getattr(dag_run, "run_id", None) or "unknown"
-        state = getattr(dag_run, "state", None) or "finished"
-        conf = getattr(dag_run, "conf", None)
-        if isinstance(conf, dict) and conf.get("notify") is False:
-            return
-        to = _resolve_notify_email(context)
-        if not to:
-            print(f"[notify] {dag_id} {run_id} ({state}): no recipient resolved, skipping")
-            return
-        subject = f"[Sledgehammer] {dag_id} {state}"
-        html = (
-            "Your physical-design flow has finished.<br><br>"
-            f"DAG: {dag_id}<br>"
-            f"Run: {run_id}<br>"
-            f"Status: {state}"
-        )
-        _send_completion_email(to, subject, html)
-        print(f"[notify] emailed {to} about {dag_id} {run_id} ({state})")
-    except Exception as e:
-        print(f"[notify] notification failed, ignoring: {e}")
 
 
 class AIRFlow:
