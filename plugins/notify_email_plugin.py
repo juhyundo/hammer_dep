@@ -1,19 +1,14 @@
-"""
-Airflow plugin: a self-service "My Notification Email" page.
+"""Airflow plugin: a self-service "My Notification Email" page.
 
 A logged-in user sets the one address they want completion emails at, or clears
-it to opt out entirely. Whether a given run emails is decided per-run by the
-"Email me when this finishes" toggle on the trigger form (and the Trigger a Flow
-page); this page only holds the address. The address is keyed to the logged-in
-identity, so a user can only set their own.
+it to opt out. Whether a run actually emails is decided per-run by the toggle on
+the trigger form; this page only holds the address.
 
-Auth note (Airflow 3.1.0): the api-server's GetUserDep authenticates only from
-the Authorization: Bearer header -- it does not read cookies. A plain iframe
-document load can't attach that header, so the page itself is served WITHOUT auth
-and its JS reads the SPA's token (same-origin localStorage["token"], the same JWT
-the Airflow UI sends as a bearer header) and calls the auth-guarded /whoami and
-/save routes with it. The save stays validated server-side: the uid comes from
-the verified token, never from the browser, so a user can only ever set their own.
+Auth (Airflow 3.1): GetUserDep reads only the Authorization: Bearer header, not
+cookies, and an iframe document load can't attach that header. So the page is
+served without auth and its JS reads the SPA token from same-origin localStorage
+and calls the guarded /whoami and /save with it. /save takes the uid from the
+verified token, never the request body, so a user can only set their own.
 """
 
 from __future__ import annotations

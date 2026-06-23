@@ -102,8 +102,6 @@ WHITELIST_TABLE = "login_whitelist"
 FQ_WHITELIST = f"{SCHEMA_NAME}.{WHITELIST_TABLE}"
 NOTIFY_EMAIL_TABLE = "user_notify_email"
 FQ_NOTIFY_EMAIL = f"{SCHEMA_NAME}.{NOTIFY_EMAIL_TABLE}"
-NOTIFY_DAG_TABLE = "user_notify_dag"
-FQ_NOTIFY_DAG = f"{SCHEMA_NAME}.{NOTIFY_DAG_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -199,31 +197,16 @@ def _read_conn_file(path: str) -> Dict[str, Any]:
 
 
 def airflow_metadata_conn_settings() -> Dict[str, Any]:
-    """psycopg2 connect kwargs for the Airflow METADATA db (not the cache db).
+    """psycopg2 connect kwargs for the Airflow metadata DB (not the cache DB).
 
-    Airflow 3 deliberately denies tasks and DAG callbacks access to the metadata
-    DB: the callback subprocess is handed a decoy
-    ``AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`` (the non-postgres sqlite default), not
-    the real URI. The completion-notification callback still has to read the
-    dag_run row to learn who triggered the run, so we also accept the connection
-    through ``SLEDGE_``-prefixed channels, which Airflow doesn't touch -- the same
-    reason ``SLEDGE_SMTP_*`` survives into the callback.
-
-    Sources, in order:
-
-    1. ``AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`` -- the real URI in a normal Airflow
-       process (scheduler, CLI). Parsed only if it's a postgres URI, so the
-       sandbox decoy is ignored.
-    2. ``SLEDGE_METADATA_CONN`` -- an inline non-AIRFLOW mirror of the URI.
-    3. A conn file: ``SLEDGE_METADATA_CONN_FILE`` if set, otherwise a
-       ``.sledge_metadata_conn`` file kept beside ``SLEDGE_SMTP_PASSWORD_FILE``.
-       This keeps the credential in a chmod-600 file rather than the environment,
-       matching how the SMTP password is handled, and is the channel the callback
-       actually uses (the file path survives the sandbox via the SMTP env var).
-    4. Airflow's resolved config, for forked callers that still carry it.
-    5. A direct read of airflow.cfg, for callers outside Airflow entirely.
-
-    Empty dict if none is usable.
+    A normal Airflow process (scheduler, CLI) has the real URI in
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN. Tasks and callbacks don't: Airflow 3
+    hands them a decoy sqlite conn instead. The completion callback still needs
+    the dag_run row, so we fall back to a SLEDGE_-prefixed channel the sandbox
+    leaves alone -- an inline SLEDGE_METADATA_CONN, or a .sledge_metadata_conn
+    file kept beside the SMTP password file (the launcher writes it; the SMTP env
+    var carries the path through). Falls back to airflow's config / airflow.cfg
+    for callers outside Airflow. Empty dict if nothing usable turns up.
     """
     for var in ("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "SLEDGE_METADATA_CONN"):
         settings = _parse_conn_uri(os.environ.get(var, ""))
@@ -446,17 +429,6 @@ CREATE TABLE IF NOT EXISTS {FQ_NOTIFY_EMAIL} (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Per-user, per-DAG notification opt-in. A row means "email me when this DAG
--- finishes"; no row means stay quiet for it. The email itself lives once in
--- user_notify_email (one address per person); this table only decides which
--- DAGs use it. Same self-service write path, so it keeps the group grant.
-CREATE TABLE IF NOT EXISTS {FQ_NOTIFY_DAG} (
-    uid        TEXT NOT NULL,
-    dag_id     TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (uid, dag_id)
-);
-
 -- Nobody gets access by default. The group role is the only way in.
 REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA {SCHEMA_NAME} FROM PUBLIC;
@@ -668,82 +640,12 @@ def list_notify_emails() -> list:
         conn.close()
 
 
-def is_dag_notify_enabled(uid: str, dag_id: str) -> bool:
-    """True if the user opted into completion emails for this specific DAG.
-
-    Per-DAG and independent: enabling one DAG never enables another. The
-    address to send to still comes from user_notify_email; this only gates
-    which DAGs use it.
-    """
-    uid = (uid or "").strip().lower()
-    dag_id = (dag_id or "").strip()
-    if not uid or not dag_id:
-        return False
-    conn = _connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT 1 FROM {FQ_NOTIFY_DAG} WHERE uid = %s AND dag_id = %s",
-                (uid, dag_id),
-            )
-            return cur.fetchone() is not None
-    finally:
-        conn.close()
-
-
-def list_enabled_dags(uid: str) -> list:
-    """Return the dag_ids a user has toggled on, as a sorted list."""
-    uid = (uid or "").strip().lower()
-    if not uid:
-        return []
-    conn = _connect()
-    try:
-        _ensure_schema(conn, quiet=True)
-        with conn.cursor() as cur:
-            cur.execute(f"SELECT dag_id FROM {FQ_NOTIFY_DAG} WHERE uid = %s ORDER BY dag_id", (uid,))
-            return [r[0] for r in cur.fetchall()]
-    finally:
-        conn.close()
-
-
-def set_enabled_dags(uid: str, dag_ids) -> None:
-    """Replace a user's whole set of toggled-on DAGs in one transaction.
-
-    This is what the self-service page saves: it posts the full set of checked
-    DAGs, so we clear what's stored and insert the new set atomically. 'Select
-    all' is just every box checked; unchecking everything clears the set (and
-    leaves the user's saved email untouched, so they can re-enable later).
-    """
-    uid = (uid or "").strip().lower()
-    if not uid:
-        raise ValueError("no uid given for dag-notify update")
-    wanted = sorted({(d or "").strip() for d in (dag_ids or []) if (d or "").strip()})
-    conn = _connect()
-    try:
-        _ensure_schema(conn, quiet=True)
-        with conn.cursor() as cur:
-            cur.execute(f"DELETE FROM {FQ_NOTIFY_DAG} WHERE uid = %s", (uid,))
-            if wanted:
-                from psycopg2.extras import execute_values
-                execute_values(
-                    cur,
-                    f"INSERT INTO {FQ_NOTIFY_DAG} (uid, dag_id) VALUES %s",
-                    [(uid, d) for d in wanted],
-                )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def lookup_triggering_user(dag_id: str, run_id: str) -> Optional[str]:
-    """Read the triggering_user_name of a dag_run straight from the metadata DB.
+    """Read a dag_run's triggering_user_name from the metadata DB.
 
-    Airflow 3's runtime proxy hides triggering_user_name from tasks/callbacks,
-    so we read the dag_run row by (dag_id, run_id) over the connection from
-    airflow_metadata_conn_settings (which on the callback path comes from the
-    SLEDGE_ conn file, since the sandbox hands callbacks a decoy conn).
-
-    Returns the username, or None if anything goes wrong.
+    Airflow 3 hides triggering_user_name from tasks and callbacks, so we read the
+    row directly over the metadata connection (the SLEDGE_ conn file on the
+    callback path, since the sandbox conn is a decoy). None on any error.
     """
     if not dag_id or not run_id:
         return None

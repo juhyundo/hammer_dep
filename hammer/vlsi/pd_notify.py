@@ -1,13 +1,9 @@
 """Flow-completion email notifications.
 
-This lives in its own module, with no Airflow imports, so importing it never
-constructs DAGs. That lets both the DAGs in hammer_vlsi.py and the cluster
-policy in config/airflow_local_settings.py attach the same callback without the
-policy accidentally building DAGs during Airflow's settings initialisation.
-
-Airflow 3 runs DAG callbacks in a sandbox with no metadata-DB access and no
-triggering user in the context, so the resolve path reads the dag_run row over
-the SLEDGE_ connection channel (see pd_store.airflow_metadata_conn_settings).
+Kept free of Airflow imports so the cluster policy can pull in the callback
+without building any DAGs while settings load. Airflow 3 runs DAG callbacks in a
+sandbox with no metadata-DB access and no triggering user in the context, so we
+read the dag_run row over the SLEDGE_ channel (see pd_store).
 """
 
 import os
@@ -16,31 +12,25 @@ from hammer.vlsi import pd_store
 
 
 def _resolve_notify_email(context):
-    """Return the address to notify about a finished run, or None to stay quiet.
+    """The address to notify for a finished run, or None to stay quiet.
 
-    Notifications are opt-in per run: the run must have been triggered with the
-    "Email me when this finishes" toggle on (``conf["notify"]`` is True), and the
-    triggering user must have registered an address (user_notify_email). We never
-    guess an address from the username, and the toggle only decides whether to
-    send, never to whom -- so it can't be used to mail an arbitrary address.
+    Opt-in per run: the run's "Email me when this finishes" toggle has to be on
+    and the user has to have registered an address. The toggle only decides
+    whether to send, never to whom.
     """
     dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
     dag_id = getattr(dag_run, "dag_id", None)
     run_id = getattr(dag_run, "run_id", None)
-    # Per-run opt-in: only notify when this run was triggered with notify on.
     conf = getattr(dag_run, "conf", None)
     if not (isinstance(conf, dict) and conf.get("notify") is True):
         return None
-    # Resolve the triggering user. The runtime proxy hides triggering_user_name
-    # and the callback sandbox forbids ORM access, so fall back to a direct read
-    # of the dag_run row keyed by (dag_id, run_id) over the SLEDGE_ channel.
+    # triggering_user_name is hidden on the runtime proxy, so read it from the row
     uid = getattr(dag_run, "triggering_user_name", None)
     if not uid:
         uid = pd_store.lookup_triggering_user(dag_id, run_id)
     if not uid or uid == "default":
         print(f"[notify] resolve: no triggering user for {dag_id} {run_id}")
         return None
-    # The address (one per user). Registered on the self-service page.
     try:
         addr = pd_store.get_notify_email(uid)
         if not addr:
@@ -52,15 +42,12 @@ def _resolve_notify_email(context):
 
 
 def _send_completion_email(to, subject, html):
-    """Send one notification over SMTP, authenticating with a password kept in a
-    locked file (never in airflow.cfg or the metadata DB).
+    """Send one notification over SMTP, with the password read from a locked file.
 
-    Server and sender come from SLEDGE_SMTP_* env vars; the password is read from
-    the file named by SLEDGE_SMTP_PASSWORD_FILE. If no sender is configured this
-    is a no-op, so a run is never held up by mail setup. We send this ourselves
-    rather than through airflow's send_email because that path only authenticates
-    when an smtp_default Connection exists, and keeping the credential in the file
-    is cleaner than putting it in the database.
+    Host and sender come from SLEDGE_SMTP_* env vars; the password from the file
+    at SLEDGE_SMTP_PASSWORD_FILE. A no-op if no sender is configured. We use
+    smtplib directly because airflow's send_email only authenticates when an
+    smtp_default Connection exists.
     """
     import smtplib
     import ssl
@@ -96,14 +83,11 @@ def _send_completion_email(to, subject, html):
 
 
 def notify_flow_complete(context):
-    """DAG-level callback that emails the triggering user when their flow ends.
+    """Email the triggering user when their flow ends.
 
-    Wired as both on_success_callback and on_failure_callback, so it fires once
-    per run on either outcome. This is a DAG-level callback rather than logic in
-    the exit_ task because exit_ uses a NONE_FAILED trigger rule and is skipped
-    when an upstream fails, so it would miss failed runs. If no recipient is
-    resolved (no triggering user, this DAG toggled off, or no registered
-    address), this does nothing.
+    Wired as both on_success and on_failure so it fires on either outcome. It's
+    a DAG-level callback rather than an exit_ task because exit_ uses a
+    NONE_FAILED trigger rule and would be skipped on failures.
     """
     try:
         dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)

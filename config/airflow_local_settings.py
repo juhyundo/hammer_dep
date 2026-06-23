@@ -1,37 +1,21 @@
-"""Airflow cluster policy: completion-email notifications for every DAG.
+"""Airflow cluster policy: wire completion-email notifications into every DAG.
 
-Airflow imports this file once at startup (``settings.import_local_settings``,
-from ``$AIRFLOW_HOME/config`` on ``sys.path``) and then calls ``dag_policy`` for
-every DAG as it loads. Setting the callbacks here means every DAG -- current and
-future -- notifies its triggering user when it finishes, without wiring the
-callback into each ``@dag`` decorator by hand.
-
-The callback lives in ``hammer.vlsi.pd_notify``, which has no Airflow imports, so
-importing it here does not construct any DAGs during settings initialisation
-(importing ``hammer_vlsi`` would, since it builds its demo DAGs at import time).
-
-Applying this to every DAG is safe because the callback decides per user and per
-DAG whether to actually send: it only emails when the triggering user has both
-registered an address and toggled that specific DAG on (see the user_notify_email
-and user_notify_dag tables and the "My Notification Email" page). A DAG nobody
-opted into simply sends nothing.
-
-We assign the callback unconditionally. The few demo DAGs that also set it inline
-end up with the same single function, so there is no double send; every other DAG
-gains it. Activating a change here requires an Airflow restart, since local
-settings are imported only at process startup.
+Airflow imports this once at startup (from $AIRFLOW_HOME/config) and runs
+dag_policy for each DAG as it loads, so every DAG -- current and future -- gets
+the callback and the per-run notify toggle without touching each @dag decorator.
+The callback lives in pd_notify, which has no Airflow imports, so pulling it in
+here doesn't build any DAGs while settings load. Changes take effect on restart.
 """
 
 from hammer.vlsi.pd_notify import notify_flow_complete
 
 
 def dag_policy(dag):
-    """Email the triggering user when any DAG run finishes (success or failure).
+    """Add the completion callback and the "Email me when this finishes" toggle.
 
-    Also adds a per-run "Email me when this finishes" toggle to every DAG's
-    trigger form. Whether a run actually emails is decided in the callback from
-    that toggle (conf["notify"]) plus the user's registered address, so the
-    toggle on its own is harmless on DAGs nobody opted an address into.
+    Setting the callback on every DAG is safe: it only emails when the run's
+    toggle is on and the user has a registered address, so a DAG nobody opted
+    into sends nothing.
     """
     dag.on_success_callback = notify_flow_complete
     dag.on_failure_callback = notify_flow_complete

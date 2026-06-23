@@ -214,16 +214,13 @@ def _setup_secrets() -> None:
 
 
 def _mirror_metadata_conn_for_callbacks() -> None:
-    """Stage the metadata-DB connection where DAG callbacks can read it.
+    """Stage the metadata-DB connection in a file DAG callbacks can read.
 
-    Airflow 3 runs DAG callbacks in a sandbox that strips metadata access: the
-    callback subprocess is handed a decoy sqlite connection, not the real one,
-    and the triggering user isn't in the callback context. The flow-completion
-    notifier still has to read the dag_run row to learn who triggered a run, so
-    we mirror the real connection into a chmod-600 file that survives into the
-    callback through the SLEDGE_ environment (the path is derived from
-    SLEDGE_SMTP_PASSWORD_FILE; see pd_store.airflow_metadata_conn_settings).
-    Rewritten on every startup so it always matches the current secrets.
+    Airflow 3 hands callbacks a decoy sqlite conn, not the real one, so the
+    completion notifier can't reach the dag_run row the usual way. We mirror the
+    real conn into a chmod-600 file beside the SMTP password file, which survives
+    into the callback through the SLEDGE_ env (see
+    pd_store.airflow_metadata_conn_settings). Rewritten on every startup.
     """
     conn = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")
     if not conn.startswith("postgres"):
@@ -247,12 +244,10 @@ def _mirror_metadata_conn_for_callbacks() -> None:
 def _load_smtp_settings() -> None:
     """Load SMTP settings from .sledgehammer/smtp.env if present.
 
-    The sender address and the path to the password file aren't secrets -- the
-    password itself stays in its own chmod-600 file -- so they live in a plain
-    chmod-600 file beside the encrypted secrets, not in git or a manual export.
-    This is what lets `sledgehammer` send completion emails with no per-launch
-    setup. Anything already in the environment wins, so an explicit export still
-    overrides the file.
+    The sender address and password-file path aren't secrets (the password stays
+    in its own chmod-600 file), so they sit in a plain file beside the encrypted
+    secrets rather than in git or a manual export -- which is what lets
+    `sledgehammer` send mail with no per-launch setup. Existing env vars win.
     """
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     path = os.path.join(repo, ".sledgehammer", "smtp.env")

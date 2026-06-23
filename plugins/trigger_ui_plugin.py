@@ -1,19 +1,15 @@
-"""
-Airflow plugin: a custom "Trigger a Flow" page.
+"""Airflow plugin: a custom "Trigger a Flow" page (hidden for now; see the TODO
+on the plugin class).
 
-Airflow's built-in trigger form is generated from a DAG's parameters and gives no
-way for one toggle to flip the others. This page replicates that form for the
-boolean parameters and adds the two things it can't do: a "Run all steps" switch
-that actually ticks/unticks every step at once, and an "Email me when this
-finishes" toggle whose status line shows the address it will mail (or warns if
-none is registered). It triggers the run through Airflow's own REST API using the
-signed-in user's token, so the run is recorded as triggered by that user -- the
-same as the native button.
+Airflow's built-in trigger form can't make one toggle flip the others, so this
+page rebuilds it for the boolean params and adds a "Run all steps" switch that
+ticks them all at once, plus an "Email me when this finishes" toggle with a
+status line. It triggers through Airflow's REST API with the signed-in user's
+token, so the run is attributed to that user like the native button.
 
-Auth note (Airflow 3.1.0): GetUserDep authenticates only from the Authorization:
-Bearer header, never cookies, so the page itself is served without auth and its
-JS reads the SPA token from same-origin localStorage and attaches it to every
-call (the /trigger-ui data routes and Airflow's /api/v2 trigger endpoint).
+Auth (Airflow 3.1): same approach as the notification-email plugin -- GetUserDep
+reads only the Bearer header, so the page is served without auth and its JS
+attaches the SPA token to the data routes and the /api/v2 trigger call.
 """
 
 from __future__ import annotations
