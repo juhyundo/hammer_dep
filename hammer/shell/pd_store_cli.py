@@ -666,6 +666,145 @@ def _cmd_blob_reassign(args: argparse.Namespace) -> int:
     return 0
 
 
+# EDA tools a PD run launches; matched by process name for `studio reap`.
+_EDA_TOOLS_DEFAULT = (
+    "genus", "innovus", "tempus", "joules", "openroad",
+    "vcs", "simv", "dc_shell", "pt_shell", "calibre",
+    "magic", "netgen", "klayout",
+)
+
+
+def _fmt_dur(secs: float) -> str:
+    secs = int(secs)
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+def _cmd_reap(args: argparse.Namespace) -> int:
+    """List, and with --kill terminate, EDA-tool processes left over from dead or
+    idle PD runs. Dry run by default. A process is flagged stale when it's been
+    orphaned (reparented to init after its task died), or -- with --include-idle
+    -- when it has sat near-idle past the threshold."""
+    import os
+    import time
+    try:
+        import psutil
+    except ImportError:
+        print("reap needs psutil.", file=sys.stderr)
+        return 1
+
+    tools = tuple(
+        t.strip().lower()
+        for t in (args.tools.split(",") if args.tools else _EDA_TOOLS_DEFAULT)
+        if t.strip()
+    )
+    me = args.user or psutil.Process().username()
+    idle_secs = max(0, args.idle_mins) * 60
+
+    matched = []
+    for proc in psutil.process_iter(["pid", "ppid", "name", "username", "create_time", "cmdline"]):
+        try:
+            info = proc.info
+            name = (info.get("name") or "").lower()
+            cmd = info.get("cmdline") or []
+            base = os.path.basename(cmd[0]).lower() if cmd else ""
+            if not any(name == t or base == t for t in tools):
+                continue
+            if me != "ALL" and (info.get("username") or "") != me:
+                continue
+            matched.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    # prime then read CPU over one short window for the matched processes
+    for p in matched:
+        try:
+            p.cpu_percent(None)
+        except Exception:
+            pass
+    if matched:
+        time.sleep(0.4)
+
+    rows = []
+    for p in matched:
+        try:
+            info = p.info
+            ppid = info.get("ppid")
+            runtime = time.time() - (info.get("create_time") or time.time())
+            try:
+                cpu = p.cpu_percent(None)
+            except Exception:
+                cpu = 0.0
+            try:
+                cwd = p.cwd()
+            except Exception:
+                cwd = "?"
+            orphaned = ppid == 1
+            idle = args.include_idle and cpu < args.cpu and runtime > idle_secs
+            reason = "orphaned" if orphaned else ("idle" if idle else "")
+            rows.append({
+                "pid": info.get("pid"), "ppid": ppid,
+                "user": info.get("username") or "?",
+                "runtime": runtime, "cpu": cpu, "reason": reason,
+                "tool": (info.get("name") or "?"), "cwd": cwd,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    if not rows:
+        print("No matching EDA-tool processes found.")
+        return 0
+
+    rows.sort(key=lambda r: (r["reason"] == "", -r["runtime"]))
+    print(f"{'PID':>7} {'PPID':>7} {'USER':<12} {'RUNTIME':>8} {'CPU%':>6}  "
+          f"{'STALE':<9} {'TOOL':<10} CWD")
+    for r in rows:
+        print(f"{r['pid']:>7} {r['ppid']:>7} {r['user']:<12} "
+              f"{_fmt_dur(r['runtime']):>8} {r['cpu']:>6.1f}  "
+              f"{(r['reason'] or '-'):<9} {r['tool'][:10]:<10} {r['cwd']}")
+
+    targets = rows if args.all else [r for r in rows if r["reason"]]
+    if not targets:
+        print("\nNothing flagged stale. Use --include-idle to also flag idle "
+              "processes, or --all to target everything listed.")
+        return 0
+
+    if not args.kill:
+        print(f"\n(dry run) {len(targets)} process(es) would be killed. "
+              f"Re-run with --kill to terminate them.")
+        return 0
+
+    if not args.yes:
+        if input(f"\nKill {len(targets)} process(es)? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+
+    procs = []
+    for r in targets:
+        try:
+            procs.append(psutil.Process(r["pid"]))
+        except psutil.NoSuchProcess:
+            pass
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=5)
+    for p in alive:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    print(f"Killed {len(procs)} process(es) ({len(alive)} needed SIGKILL).")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="studio",
@@ -997,6 +1136,29 @@ def _build_parser() -> argparse.ArgumentParser:
                             "and sky130-extras.yml up to date before "
                             "generating the DAG.")
     p_dag.set_defaults(func=_cmd_make_dag)
+
+    p_reap = sub.add_parser(
+        "reap",
+        help="List (and with --kill, terminate) EDA-tool processes left by dead "
+             "or idle PD runs. Dry run by default.",
+    )
+    p_reap.add_argument("--kill", action="store_true",
+                        help="Terminate the flagged processes (default: just list them).")
+    p_reap.add_argument("--all", action="store_true",
+                        help="Target every matched EDA process, not just the stale ones.")
+    p_reap.add_argument("--include-idle", action="store_true",
+                        help="Also flag long-running near-idle processes, not just orphaned ones.")
+    p_reap.add_argument("--idle-mins", type=int, default=30,
+                        help="Runtime, in minutes, before an idle process counts (default 30).")
+    p_reap.add_argument("--cpu", type=float, default=1.0,
+                        help="CPU%% below which a long-running process counts as idle (default 1.0).")
+    p_reap.add_argument("--user", default=None,
+                        help="Only your processes by default; pass a username, or ALL for everyone.")
+    p_reap.add_argument("--tools", default=None,
+                        help="Comma-separated tool names to match (default: the standard EDA set).")
+    p_reap.add_argument("--yes", action="store_true",
+                        help="Skip the confirmation prompt when killing.")
+    p_reap.set_defaults(func=_cmd_reap)
 
     return parser
 
