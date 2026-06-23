@@ -1,10 +1,11 @@
 """
 Airflow plugin: a self-service "My Notification Email" page.
 
-A logged-in user opens it from the nav, sets the one address they want a note at
-when a flow finishes, and ticks which DAGs should email them (each DAG is an
-independent toggle; "Select all" flips them all at once). The address is keyed to
-the logged-in identity, so a user can only set their own.
+A logged-in user sets the one address they want completion emails at, or clears
+it to opt out entirely. Whether a given run emails is decided per-run by the
+"Email me when this finishes" toggle on the trigger form (and the Trigger a Flow
+page); this page only holds the address. The address is keyed to the logged-in
+identity, so a user can only set their own.
 
 Auth note (Airflow 3.1.0): the api-server's GetUserDep authenticates only from
 the Authorization: Bearer header -- it does not read cookies. A plain iframe
@@ -18,16 +19,12 @@ the verified token, never from the browser, so a user can only ever set their ow
 from __future__ import annotations
 
 import base64
-import json
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from airflow.plugins_manager import AirflowPlugin
-# GetUserDep guards the JSON routes (/whoami, /save), NOT the page load. On 3.1.0
-# it authenticates only from the Authorization: Bearer header, so those routes are
-# called by the page's JS with the SPA's token; the iframe document load is served
-# unauthenticated on purpose.
 from airflow.api_fastapi.core_api.security import GetUserDep
 
 
@@ -38,66 +35,27 @@ def _uid_and_default(user) -> tuple[str, str]:
     return uid, ldap_email
 
 
-def _list_all_dag_ids() -> list[str]:
-    """Every DAG id from the metadata DB, so the page can offer a toggle per DAG.
-
-    The api-server (where this plugin runs) is a normal Airflow process with the
-    real metadata connection, so a direct read is fine here -- this is not the
-    sandboxed callback path. Returns [] on any error so the page still loads with
-    just the email field.
-    """
-    try:
-        import psycopg2
-        from hammer.vlsi import pd_store
-        settings = pd_store.airflow_metadata_conn_settings()
-        if not settings:
-            return []
-        conn = psycopg2.connect(**settings)
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT dag_id FROM dag ORDER BY dag_id")
-                return [r[0] for r in cur.fetchall()]
-        finally:
-            conn.close()
-    except Exception:
-        return []
-
-
 _PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Notification email</title><style>
  body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem; color: #1f2328; }
  h2 { margin: 0 0 .5rem; }
  input[type=email] { width: 22rem; padding: .45rem; font-size: 1rem; }
- button { padding: .4rem 1rem; font-size: .95rem; cursor: pointer; }
+ button { padding: .5rem 1.1rem; font-size: 1rem; margin-left: .4rem; cursor: pointer; }
  .muted { color: #656d76; font-size: .9rem; }
  .ok { color: #1a7f37; }
  .err { color: #cf222e; }
  #form { display: none; }
- .row { margin: .9rem 0; }
- .dagsbar { display: flex; align-items: center; gap: .5rem; margin: 1rem 0 .4rem; }
- .dagsbar b { margin-right: auto; }
- #dags { border: 1px solid #d0d7de; border-radius: 6px; max-height: 18rem;
-         overflow-y: auto; padding: .4rem .6rem; }
- .dagrow { display: block; padding: .2rem 0; }
- .dagrow input { margin-right: .5rem; }
- #save { margin-top: 1rem; padding: .5rem 1.3rem; font-size: 1rem; }
 </style></head><body>
-<h2>Email me when my flows finish</h2>
-<p class="muted">Signed in as <b id="who">&hellip;</b>. Set your address, then tick
-the flows you want a note about when a run you triggered completes. Each flow is
-its own toggle.</p>
+<h2>My notification email</h2>
+<p class="muted">Signed in as <b id="who">&hellip;</b>. Set the address you want a
+note at when a flow finishes. Turn the email on or off <b>per run</b> with the
+"Email me when this finishes" toggle on the trigger form. Clear the box to opt out
+entirely.</p>
 <p id="note"></p>
-<div id="form">
-  <div class="row"><label>Email &nbsp;<input type="email" id="email" placeholder="you@berkeley.edu"></label></div>
-  <div class="dagsbar">
-    <b>Notify me for these flows</b>
-    <button type="button" id="selall">Select all</button>
-    <button type="button" id="clrall">Clear all</button>
-  </div>
-  <div id="dags"></div>
-  <button type="button" id="save">Save</button>
-  <p class="muted">Clear the email box (or untick everything) and Save to stop emails.</p>
-</div>
+<form id="form">
+  <input type="email" id="email" placeholder="you@berkeley.edu">
+  <button type="submit">Save</button>
+</form>
 <script>
 (function () {
   function token() {
@@ -112,12 +70,8 @@ its own toggle.</p>
   var who = document.getElementById('who'),
       note = document.getElementById('note'),
       form = document.getElementById('form'),
-      email = document.getElementById('email'),
-      dagsBox = document.getElementById('dags');
+      email = document.getElementById('email');
   function setNote(msg, cls) { note.textContent = msg; note.className = cls || ''; }
-  function checks() { return Array.prototype.slice.call(dagsBox.querySelectorAll('.dagcb')); }
-  function setAll(v) { checks().forEach(function (c) { c.checked = v; }); }
-
   var T = token();
   if (!T) {
     who.textContent = '(unknown)';
@@ -125,21 +79,6 @@ its own toggle.</p>
     return;
   }
   var auth = { 'Authorization': 'Bearer ' + T };
-
-  function renderDags(dags) {
-    dagsBox.innerHTML = '';
-    if (!dags || !dags.length) { dagsBox.textContent = 'No DAGs found.'; return; }
-    dags.forEach(function (d) {
-      var row = document.createElement('label');
-      row.className = 'dagrow';
-      var cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.className = 'dagcb'; cb.value = d.id; cb.checked = !!d.enabled;
-      row.appendChild(cb);
-      row.appendChild(document.createTextNode(d.id));
-      dagsBox.appendChild(row);
-    });
-  }
-
   fetch('whoami', { headers: auth }).then(function (r) {
     if (r.status === 401 || r.status === 403) {
       throw new Error('Your Airflow session expired -- reload the Airflow UI and try again.');
@@ -149,30 +88,22 @@ its own toggle.</p>
   }).then(function (d) {
     who.textContent = d.uid || '(unknown)';
     email.value = d.current || d.email || '';
-    renderDags(d.dags);
     form.style.display = 'block';
   }).catch(function (e) { who.textContent = '(unknown)'; setNote(e.message, 'err'); });
-
-  document.getElementById('selall').addEventListener('click', function () { setAll(true); });
-  document.getElementById('clrall').addEventListener('click', function () { setAll(false); });
-
-  document.getElementById('save').addEventListener('click', function () {
-    var chosen = checks().filter(function (c) { return c.checked; }).map(function (c) { return c.value; });
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var body = 'email=' + encodeURIComponent(email.value.trim());
     fetch('save', {
       method: 'POST',
-      headers: Object.assign({ 'Content-Type': 'application/json' }, auth),
-      body: JSON.stringify({ email: email.value.trim(), dags: chosen })
+      headers: Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded' }, auth),
+      body: body
     }).then(function (r) {
       return r.json().then(function (j) { return { ok: r.ok, j: j }; });
     }).then(function (res) {
       if (res.ok && res.j.ok) {
-        if (!res.j.current) {
-          setNote('Saved. No email set, so you will not get completion emails.', 'ok');
-        } else if (!res.j.count) {
-          setNote('Saved. No flows ticked, so you will not get completion emails.', 'ok');
-        } else {
-          setNote('Saved. ' + res.j.current + ' will be emailed for ' + res.j.count + ' flow(s).', 'ok');
-        }
+        setNote(res.j.current
+          ? 'Saved. Completion emails will go to ' + res.j.current + ' (when the per-run toggle is on).'
+          : 'Opted out. You will not get completion emails.', 'ok');
       } else {
         setNote('Could not save: ' + (res.j.error || 'unknown error'), 'err');
       }
@@ -202,35 +133,23 @@ def whoami(user: GetUserDep):
         current = pd_store.get_notify_email(uid) or ""
     except Exception:
         current = ""
-    try:
-        enabled = set(pd_store.list_enabled_dags(uid))
-    except Exception:
-        enabled = set()
-    dags = [{"id": d, "enabled": d in enabled} for d in _list_all_dag_ids()]
-    return {"uid": uid, "email": ldap_email, "current": current, "dags": dags}
+    return {"uid": uid, "email": ldap_email, "current": current}
 
 
 @app.post("/save")
 async def save(request: Request, user: GetUserDep):
     from hammer.vlsi import pd_store
     uid, _ = _uid_and_default(user)  # identity from the validated token, never the body
-    try:
-        payload = json.loads((await request.body()).decode("utf-8", "ignore") or "{}")
-    except Exception:
-        payload = {}
-    email = (payload.get("email") or "").strip()
-    dags = payload.get("dags") or []
-    if not isinstance(dags, list):
-        dags = []
+    body = (await request.body()).decode("utf-8", "ignore")
+    email = (parse_qs(body).get("email", [""])[0] or "").strip()
     try:
         if email:
             pd_store.set_notify_email(uid, email)
         else:
             pd_store.delete_notify_email(uid)
-        pd_store.set_enabled_dags(uid, [str(d) for d in dags])
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
-    return JSONResponse({"ok": True, "current": email, "count": len(dags)})
+    return JSONResponse({"ok": True, "current": email})
 
 
 _SVG = (

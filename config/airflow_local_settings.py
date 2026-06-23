@@ -26,6 +26,23 @@ from hammer.vlsi.pd_notify import notify_flow_complete
 
 
 def dag_policy(dag):
-    """Email the triggering user when any DAG run finishes (success or failure)."""
+    """Email the triggering user when any DAG run finishes (success or failure).
+
+    Also adds a per-run "Email me when this finishes" toggle to every DAG's
+    trigger form. Whether a run actually emails is decided in the callback from
+    that toggle (conf["notify"]) plus the user's registered address, so the
+    toggle on its own is harmless on DAGs nobody opted an address into.
+    """
     dag.on_success_callback = notify_flow_complete
     dag.on_failure_callback = notify_flow_complete
+    try:
+        if "notify" not in dag.params:
+            from airflow.sdk import Param
+            dag.params["notify"] = Param(
+                True,
+                type="boolean",
+                title="Email me when this finishes",
+                description="Send a note to your registered address when this run completes.",
+            )
+    except Exception:
+        pass

@@ -18,15 +18,19 @@ from hammer.vlsi import pd_store
 def _resolve_notify_email(context):
     """Return the address to notify about a finished run, or None to stay quiet.
 
-    Two opt-ins must both hold: the user registered an address (one per person,
-    in user_notify_email) AND toggled this specific DAG on (user_notify_dag).
-    We never guess an address from the username, and there is deliberately no
-    per-run recipient override -- that would let anyone who can trigger a DAG
-    send mail to an arbitrary address.
+    Notifications are opt-in per run: the run must have been triggered with the
+    "Email me when this finishes" toggle on (``conf["notify"]`` is True), and the
+    triggering user must have registered an address (user_notify_email). We never
+    guess an address from the username, and the toggle only decides whether to
+    send, never to whom -- so it can't be used to mail an arbitrary address.
     """
     dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
     dag_id = getattr(dag_run, "dag_id", None)
     run_id = getattr(dag_run, "run_id", None)
+    # Per-run opt-in: only notify when this run was triggered with notify on.
+    conf = getattr(dag_run, "conf", None)
+    if not (isinstance(conf, dict) and conf.get("notify") is True):
+        return None
     # Resolve the triggering user. The runtime proxy hides triggering_user_name
     # and the callback sandbox forbids ORM access, so fall back to a direct read
     # of the dag_run row keyed by (dag_id, run_id) over the SLEDGE_ channel.
@@ -36,20 +40,11 @@ def _resolve_notify_email(context):
     if not uid or uid == "default":
         print(f"[notify] resolve: no triggering user for {dag_id} {run_id}")
         return None
-    # Per-DAG opt-in: only notify if this user toggled THIS dag on. Independent
-    # per dag -- enabling one never enables another.
-    try:
-        if not pd_store.is_dag_notify_enabled(uid, dag_id):
-            print(f"[notify] resolve: {uid} has notifications off for {dag_id}")
-            return None
-    except Exception as e:
-        print(f"[notify] resolve: dag-enable check failed for {uid}/{dag_id}: {e}")
-        return None
-    # The address itself -- one per user, shared across all their enabled DAGs.
+    # The address (one per user). Registered on the self-service page.
     try:
         addr = pd_store.get_notify_email(uid)
         if not addr:
-            print(f"[notify] resolve: {uid} has no registered email")
+            print(f"[notify] resolve: {uid} asked for notify but has no registered email")
         return addr
     except Exception as e:
         print(f"[notify] resolve: email lookup failed for {uid}: {e}")
@@ -115,9 +110,6 @@ def notify_flow_complete(context):
         dag_id = getattr(dag_run, "dag_id", None) or "unknown"
         run_id = getattr(dag_run, "run_id", None) or "unknown"
         state = getattr(dag_run, "state", None) or "finished"
-        conf = getattr(dag_run, "conf", None)
-        if isinstance(conf, dict) and conf.get("notify") is False:
-            return
         to = _resolve_notify_email(context)
         if not to:
             print(f"[notify] {dag_id} {run_id} ({state}): no recipient resolved, skipping")
