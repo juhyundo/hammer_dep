@@ -273,11 +273,24 @@ def _load_smtp_settings() -> None:
         print(f"[secrets] WARNING: could not load {path}: {e}")
 
 
+def _default_dags_folder() -> None:
+    """Point Airflow at this checkout's dags/ folder unless the user set one.
+
+    Airflow otherwise defaults to $AIRFLOW_HOME/dags, which quietly misses the
+    DAGs whenever AIRFLOW_HOME isn't the checkout root. Deriving it from this
+    file's location works no matter where the launch happens; an explicit
+    AIRFLOW__CORE__DAGS_FOLDER still wins.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.environ.setdefault("AIRFLOW__CORE__DAGS_FOLDER", os.path.join(repo, "dags"))
+
+
 # Load the secrets, THEN import Airflow: importing it reads sql_alchemy_conn right
 # away, so the environment has to be populated first or it crashes on a blank conn.
 _setup_secrets()
 _load_smtp_settings()
 _mirror_metadata_conn_for_callbacks()
+_default_dags_folder()
 
 from airflow.cli.commands.standalone_command import StandaloneCommand
 from airflow.executors.executor_loader import ExecutorLoader

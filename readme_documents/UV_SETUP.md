@@ -441,8 +441,9 @@ Edit `airflow.cfg` with these critical settings:
 executor = LocalExecutor
 parallelism = 30
 max_active_tasks_per_dag = 30
-# For basic setup, use a dags/ directory. For chipyard integration (Part 2), change to hammer/shell
-dags_folder = /bwrcq/C/<username>/hammer/dags
+load_examples = False    # off by default so Airflow's built-in example DAGs don't clutter the list
+# dags_folder is optional: the launcher auto-points it at this checkout's dags/
+# folder. Add a line here only to send Airflow to a different directory.
 
 [api]
 # Uncomment and set base_url (required for task execution in Airflow 3.x)
@@ -467,6 +468,13 @@ airflow config get-value database sql_alchemy_conn
 airflow config get-value core executor
 airflow config get-value core dags_folder
 ```
+
+> **Defaults the launcher handles for you**
+>
+> - **DAGs folder** — you don't need to set `dags_folder` by hand. `scripts/airflow-standalone-ldap.py` derives it from the checkout location and exports `AIRFLOW__CORE__DAGS_FOLDER=<repo>/dags` at launch, so the DAGs are found no matter where you start it from. Setting `dags_folder` in `airflow.cfg` (or exporting `AIRFLOW__CORE__DAGS_FOLDER` yourself) still wins. Airflow's own default is `$AIRFLOW_HOME/dags`, which quietly misses your DAGs whenever `AIRFLOW_HOME` isn't the checkout root — that's why the launcher pins it.
+> - **Example DAGs** — `load_examples = False` ships in `airflow.cfg`, so Airflow's built-in example DAGs stay out of the list. Flip it back to `True` if you want them.
+>
+> Both apply only when you launch through `scripts/airflow-standalone-ldap.py`. A bare `airflow` command doesn't load the launcher's defaults (and doesn't decrypt your secrets either).
 
 ### Step 6: Initialize Database
 
