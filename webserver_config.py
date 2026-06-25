@@ -117,3 +117,20 @@ SESSION_COOKIE_SAMESITE = "Lax"
 # If TLS verification ever gets in the way (self-signed certs, etc.), set
 # this. Default is "demand" which is strict.
 # AUTH_LDAP_TLS_DEMAND = False
+
+# Optional TOTP second factor. install_2fa() swaps the LDAP login view for one
+# that also asks for an authenticator code, but only when SLEDGE_2FA=1 -- with
+# the flag unset it does nothing and login is exactly as configured above. The
+# auth2fa package sits at the checkout root next to this file, which isn't always
+# on sys.path when FAB loads this config, so add it. Any failure here must not
+# break login, hence the guard.
+import sys as _sys
+_repo_root = os.path.dirname(os.path.abspath(__file__))
+if _repo_root not in _sys.path:
+    _sys.path.insert(0, _repo_root)
+try:
+    from auth2fa.fab_integration import install_2fa
+    if install_2fa():
+        _wl_log.warning("two-factor (TOTP) second factor is ON")
+except Exception as _e:
+    _wl_log.warning("two-factor second factor not installed (%s); LDAP login unchanged", _e)

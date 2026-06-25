@@ -232,6 +232,58 @@ def _cmd_whitelist(args: argparse.Namespace) -> int:
     return 0
 
 
+def _twofa_store():
+    """The Postgres-backed TOTP store. auth2fa lives at the repo root, which
+    isn't always on sys.path when the installed `studio` script runs, so add it.
+    """
+    import sys
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    from auth2fa.store import get_store
+    return get_store("postgres")
+
+
+def _cmd_twofa(args: argparse.Namespace) -> int:
+    try:
+        store = _twofa_store()
+        if args.reset:
+            uid = args.reset.strip().lower()
+            if not _confirm(
+                f"Reset 2FA for '{uid}'? They'll enroll a new authenticator on next login.",
+                args.yes,
+            ):
+                print("aborted.")
+                return 1
+            store.delete(uid)
+            print(f"Reset 2FA for '{uid}'.")
+            return 0
+        if args.uid:
+            uid = args.uid.strip().lower()
+            enr = store.get(uid)
+            if not enr:
+                print(f"'{uid}': not enrolled.")
+            elif enr.confirmed:
+                print(f"'{uid}': enrolled (active).")
+            else:
+                print(f"'{uid}': enrollment started but not confirmed.")
+            return 0
+        rows = store.list_enrolled()
+        if not rows:
+            print("(nobody has set up two-factor yet)")
+            return 0
+        print(f"Two-factor enrollments ({len(rows)}):")
+        for enr in rows:
+            print(f"  {enr.uid:20} {'active' if enr.confirmed else 'pending'}")
+        return 0
+    except Exception as e:
+        if getattr(e, "pgcode", None) == "42501":  # insufficient_privilege
+            print("permission denied: only an admin (the database owner) can "
+                  "manage 2FA enrollments.")
+            return 1
+        raise
+
+
 def _confirm(prompt: str, assume_yes: bool) -> bool:
     """Prompt the user to confirm a destructive op. Returns True to proceed."""
     if assume_yes:
@@ -950,6 +1002,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_whitelist.add_argument("uid", nargs="?", help="EECS uid to allow (omit to list).")
     p_whitelist.add_argument("--remove", metavar="UID", help="Remove this uid from the whitelist.")
     p_whitelist.set_defaults(func=_cmd_whitelist)
+
+    p_2fa = sub.add_parser("2fa",
+        help="Inspect or reset Airflow two-factor (TOTP) enrollments. "
+             "'2fa' lists everyone, '2fa <uid>' shows one, '2fa --reset <uid>' clears one.")
+    p_2fa.add_argument("uid", nargs="?", help="EECS uid to show status for (omit to list all).")
+    p_2fa.add_argument("--reset", metavar="UID",
+                       help="Clear this uid's enrollment so they set up a new device on next login.")
+    p_2fa.add_argument("--yes", action="store_true", help="Skip the confirmation prompt on --reset.")
+    p_2fa.set_defaults(func=_cmd_twofa)
 
     p_ws_list = sub.add_parser(
         "workspace-list",

@@ -273,6 +273,18 @@ def _load_smtp_settings() -> None:
         print(f"[secrets] WARNING: could not load {path}: {e}")
 
 
+def _pin_airflow_home() -> None:
+    """Point AIRFLOW_HOME at this checkout before Airflow is imported.
+
+    Airflow finds airflow.cfg and webserver_config.py via AIRFLOW_HOME. Launch
+    from a shell that never ran ``export AIRFLOW_HOME=$(pwd)`` and it falls back
+    to ~/airflow -- the stock defaults: SimpleAuthManager on port 8080, with the
+    LDAP login and webserver_config.py silently ignored. This launcher only ever
+    runs this checkout, so pin it and remove that footgun.
+    """
+    os.environ["AIRFLOW_HOME"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _default_dags_folder() -> None:
     """Point Airflow at this checkout's dags/ folder unless the user set one.
 
@@ -285,8 +297,11 @@ def _default_dags_folder() -> None:
     os.environ.setdefault("AIRFLOW__CORE__DAGS_FOLDER", os.path.join(repo, "dags"))
 
 
-# Load the secrets, THEN import Airflow: importing it reads sql_alchemy_conn right
-# away, so the environment has to be populated first or it crashes on a blank conn.
+# Pin AIRFLOW_HOME first so the right airflow.cfg/webserver_config.py are read,
+# then load secrets, THEN import Airflow: importing it reads sql_alchemy_conn
+# right away, so the environment has to be populated first or it crashes on a
+# blank conn.
+_pin_airflow_home()
 _setup_secrets()
 _load_smtp_settings()
 _mirror_metadata_conn_for_callbacks()
