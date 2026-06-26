@@ -189,11 +189,23 @@ def _setup_secrets() -> None:
         pass
 
     print(f"[secrets] decrypting {enc} (enter your GPG passphrase) ...")
-    res = subprocess.run(["gpg", "--quiet", "--decrypt", enc], capture_output=True)
-    if res.returncode != 0:
-        sys.stderr.write(res.stderr.decode("utf-8", "ignore"))
-        sys.exit(f"[secrets] ERROR: could not decrypt {enc} "
-                 f"(wrong passphrase or corrupt file). Aborting startup.")
+    attempts = 3
+    res = None
+    for attempt in range(1, attempts + 1):
+        # --no-symkey-cache so a wrong passphrase isn't cached and silently reused
+        # on the next try -- that would burn through the retries without re-asking.
+        res = subprocess.run(
+            ["gpg", "--quiet", "--no-symkey-cache", "--decrypt", enc],
+            capture_output=True)
+        if res.returncode == 0:
+            break
+        if attempt < attempts:
+            print(f"[secrets] that passphrase didn't work "
+                  f"(attempt {attempt}/{attempts}) -- try again, or Ctrl-C to quit.")
+        else:
+            sys.stderr.write(res.stderr.decode("utf-8", "ignore"))
+            sys.exit(f"[secrets] ERROR: could not decrypt {enc} after {attempts} "
+                     f"tries (wrong passphrase or corrupt file). Aborting startup.")
 
     loaded = 0
     for raw in res.stdout.decode("utf-8", "ignore").splitlines():
@@ -285,6 +297,17 @@ def _pin_airflow_home() -> None:
     os.environ["AIRFLOW_HOME"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _default_2fa() -> None:
+    """Turn the TOTP second factor on by default for this deployment.
+
+    The login enforces 2FA only when SLEDGE_2FA=1 (webserver_config.install_2fa).
+    Default it on here so every launch requires it -- including the `sledgehammer`
+    shell helper that just sources venv.sh and execs this script, which otherwise
+    wouldn't set the flag. Launch with SLEDGE_2FA=0 to fall back to plain LDAP.
+    """
+    os.environ.setdefault("SLEDGE_2FA", "1")
+
+
 def _default_dags_folder() -> None:
     """Point Airflow at this checkout's dags/ folder unless the user set one.
 
@@ -302,6 +325,7 @@ def _default_dags_folder() -> None:
 # right away, so the environment has to be populated first or it crashes on a
 # blank conn.
 _pin_airflow_home()
+_default_2fa()
 _setup_secrets()
 _load_smtp_settings()
 _mirror_metadata_conn_for_callbacks()

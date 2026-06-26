@@ -41,10 +41,20 @@ def _load_secrets() -> None:
     except Exception:
         pass
     print(f"[2fa-test] decrypting {enc} (enter your GPG passphrase) ...")
-    res = subprocess.run(["gpg", "--quiet", "--decrypt", enc], capture_output=True)
-    if res.returncode != 0:
-        sys.stderr.write(res.stderr.decode("utf-8", "ignore"))
-        sys.exit("[2fa-test] ERROR: could not decrypt secrets (wrong passphrase?).")
+    attempts = 3
+    res = None
+    for attempt in range(1, attempts + 1):
+        res = subprocess.run(
+            ["gpg", "--quiet", "--no-symkey-cache", "--decrypt", enc],
+            capture_output=True)
+        if res.returncode == 0:
+            break
+        if attempt < attempts:
+            print(f"[2fa-test] that passphrase didn't work "
+                  f"(attempt {attempt}/{attempts}) -- try again, or Ctrl-C to quit.")
+        else:
+            sys.stderr.write(res.stderr.decode("utf-8", "ignore"))
+            sys.exit(f"[2fa-test] ERROR: could not decrypt secrets after {attempts} tries.")
     loaded = 0
     for raw in res.stdout.decode("utf-8", "ignore").splitlines():
         line = raw.strip()
