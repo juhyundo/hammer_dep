@@ -325,6 +325,17 @@ def _default_2fa() -> None:
     os.environ.setdefault("SLEDGE_2FA", "1")
 
 
+def _default_pd_cache() -> None:
+    """Turn the PD build cache on by default for this deployment.
+
+    hammer's cache_or_run is a no-op unless HAMMER_PD_CACHE=1 -- without it the
+    flows never store or restore stage tarballs, so there are no cache hits and
+    no time-saved summary. Default it on so every task run caches; launch with
+    HAMMER_PD_CACHE=0 to opt out.
+    """
+    os.environ.setdefault("HAMMER_PD_CACHE", "1")
+
+
 def _default_dags_folder() -> None:
     """Point Airflow at this checkout's dags/ folder unless the user set one.
 
@@ -343,6 +354,7 @@ def _default_dags_folder() -> None:
 # blank conn.
 _pin_airflow_home()
 _default_2fa()
+_default_pd_cache()
 _setup_secrets()
 _load_smtp_settings()
 _mirror_metadata_conn_for_callbacks()
