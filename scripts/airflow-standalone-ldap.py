@@ -336,18 +336,6 @@ def _default_pd_cache() -> None:
     os.environ.setdefault("HAMMER_PD_CACHE", "1")
 
 
-def _default_dags_folder() -> None:
-    """Point Airflow at this checkout's dags/ folder unless the user set one.
-
-    Airflow otherwise defaults to $AIRFLOW_HOME/dags, which quietly misses the
-    DAGs whenever AIRFLOW_HOME isn't the checkout root. Deriving it from this
-    file's location works no matter where the launch happens; an explicit
-    AIRFLOW__CORE__DAGS_FOLDER still wins.
-    """
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    os.environ.setdefault("AIRFLOW__CORE__DAGS_FOLDER", os.path.join(repo, "dags"))
-
-
 # Pin AIRFLOW_HOME first so the right airflow.cfg/webserver_config.py are read,
 # then load secrets, THEN import Airflow: importing it reads sql_alchemy_conn
 # right away, so the environment has to be populated first or it crashes on a
@@ -358,7 +346,6 @@ _default_pd_cache()
 _setup_secrets()
 _load_smtp_settings()
 _mirror_metadata_conn_for_callbacks()
-_default_dags_folder()
 
 from airflow.cli.commands.standalone_command import StandaloneCommand
 from airflow.executors.executor_loader import ExecutorLoader

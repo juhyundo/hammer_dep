@@ -78,7 +78,6 @@ def main() -> None:
     os.environ["SLEDGE_2FA"] = "1"
     # This test must read THIS checkout's airflow.cfg + webserver_config.py.
     os.environ["AIRFLOW_HOME"] = REPO
-    os.environ.setdefault("AIRFLOW__CORE__DAGS_FOLDER", os.path.join(REPO, "dags"))
     port = os.environ.get("SLEDGE_2FA_TEST_PORT", "8082")
     print(f"[2fa-test] AIRFLOW_HOME={REPO}")
     print(f"[2fa-test] starting api-server with 2FA ON -> http://0.0.0.0:{port}/auth/login")
