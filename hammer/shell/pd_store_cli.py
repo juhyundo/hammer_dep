@@ -284,6 +284,100 @@ def _cmd_twofa(args: argparse.Namespace) -> int:
         raise
 
 
+def _admin_metadata_settings(explicit_conn=None):
+    """psycopg2 connect kwargs for the Airflow metadata DB (where the FAB Admin
+    role lives -- a different DB from the studio cache). Tries an explicit
+    --conn, then the normal resolver (env / SLEDGE_ file / airflow.cfg), then
+    reads the conn straight out of a running airflow process, so it works in a
+    plain shell as long as the stack is up.
+    """
+    if explicit_conn:
+        s = pd_store._parse_conn_uri(explicit_conn)
+        if s:
+            return s
+    s = pd_store.airflow_metadata_conn_settings()
+    if s:
+        return s
+    import glob
+    for environ in glob.glob("/proc/[0-9]*/environ"):
+        try:
+            blob = open(environ, "rb").read()
+        except Exception:
+            continue
+        for kv in blob.split(b"\x00"):
+            if kv.startswith(b"AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="):
+                s = pd_store._parse_conn_uri(kv.split(b"=", 1)[1].decode("utf-8", "ignore"))
+                if s:
+                    return s
+    return {}
+
+
+def _cmd_admin(args: argparse.Namespace) -> int:
+    """Grant/list/revoke the Airflow (FAB) Admin role. Replaces the Airflow 2.x
+    `airflow users add-role`, which was removed in Airflow 3.
+    """
+    settings = _admin_metadata_settings(args.conn)
+    if not settings:
+        print("admin: couldn't find the Airflow metadata DB connection.\n"
+              "  Run it while the server is up, or with the secrets loaded, or pass it:\n"
+              "  studio admin <uid> --conn postgresql://USER:PW@HOST:PORT/DBNAME")
+        return 1
+    import psycopg2
+    conn = psycopg2.connect(**settings)
+    try:
+        with conn.cursor() as cur:
+            if args.remove:
+                uid = args.remove.strip()
+                cur.execute(
+                    "DELETE FROM ab_user_role ur USING ab_user u, ab_role r "
+                    "WHERE ur.user_id = u.id AND ur.role_id = r.id "
+                    "AND lower(u.username) = lower(%s) AND r.name = 'Admin'", (uid,))
+                conn.commit()
+                print(f"Removed Admin from '{uid}'." if cur.rowcount
+                      else f"'{uid}' wasn't an Admin (or no such user).")
+                return 0
+            if args.uid:
+                uid = args.uid.strip()
+                cur.execute("SELECT 1 FROM ab_user WHERE lower(username) = lower(%s)", (uid,))
+                if not cur.fetchone():
+                    print(f"No Airflow user '{uid}' yet -- they have to log in once first "
+                          f"(LDAP auto-registers the account on first login).")
+                    return 1
+                cur.execute("SELECT setval('ab_user_role_id_seq', "
+                            "COALESCE((SELECT MAX(id) FROM ab_user_role), 0) + 1, false)")
+                cur.execute(
+                    "INSERT INTO ab_user_role (id, user_id, role_id) "
+                    "SELECT nextval('ab_user_role_id_seq'), u.id, r.id FROM ab_user u, ab_role r "
+                    "WHERE lower(u.username) = lower(%s) AND r.name = 'Admin' "
+                    "AND NOT EXISTS (SELECT 1 FROM ab_user_role x "
+                    "                WHERE x.user_id = u.id AND x.role_id = r.id)", (uid,))
+                conn.commit()
+                print(f"Granted Admin to '{uid}'. Log out and back in to pick it up."
+                      if cur.rowcount else f"'{uid}' is already an Admin.")
+                return 0
+            cur.execute(
+                "SELECT u.username FROM ab_user u "
+                "JOIN ab_user_role ur ON ur.user_id = u.id "
+                "JOIN ab_role r ON r.id = ur.role_id "
+                "WHERE r.name = 'Admin' ORDER BY u.username")
+            admins = [r[0] for r in cur.fetchall()]
+            if not admins:
+                print("(no Admin users yet)")
+            else:
+                print(f"Airflow Admins ({len(admins)}):")
+                for a in admins:
+                    print(f"  {a}")
+            return 0
+    except Exception as e:
+        if getattr(e, "pgcode", None) == "42P01":  # undefined_table
+            print("admin: ab_user/ab_role not found -- is that the Airflow metadata DB, "
+                  "and has it been migrated?")
+            return 1
+        raise
+    finally:
+        conn.close()
+
+
 def _confirm(prompt: str, assume_yes: bool) -> bool:
     """Prompt the user to confirm a destructive op. Returns True to proceed."""
     if assume_yes:
@@ -1011,6 +1105,16 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Clear this uid's enrollment so they set up a new device on next login.")
     p_2fa.add_argument("--yes", action="store_true", help="Skip the confirmation prompt on --reset.")
     p_2fa.set_defaults(func=_cmd_twofa)
+
+    p_admin = sub.add_parser("admin",
+        help="Grant/list/revoke the Airflow Admin role (the FAB Admin that unlocks "
+             "Browse/Admin/Security). Replaces the removed `airflow users add-role`. "
+             "'admin <uid>' grants, 'admin' lists, 'admin --remove <uid>' revokes.")
+    p_admin.add_argument("uid", nargs="?", help="Airflow username to make Admin (omit to list).")
+    p_admin.add_argument("--remove", metavar="UID", help="Revoke Admin from this user.")
+    p_admin.add_argument("--conn", metavar="URI",
+                         help="Metadata DB URI override, e.g. postgresql://USER:PW@HOST:PORT/DBNAME.")
+    p_admin.set_defaults(func=_cmd_admin)
 
     p_ws_list = sub.add_parser(
         "workspace-list",
