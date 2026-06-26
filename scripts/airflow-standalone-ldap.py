@@ -17,11 +17,28 @@ Usage:
 """
 
 import os
+import sys
+
+# Re-exec under this checkout's venv python if we're not already using it, so
+# running the script directly (./scripts/airflow-standalone-ldap.py) works even
+# when the venv isn't activated. Otherwise it runs under whatever python3 is on
+# PATH (e.g. conda base), which has no airflow -> ModuleNotFoundError. This runs
+# before anything else, so nothing (like the GPG decrypt) happens twice.
+_venv_py = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "bin", "python")
+if os.path.exists(_venv_py) and os.path.realpath(_venv_py) != os.path.realpath(sys.executable):
+    os.execv(_venv_py, [_venv_py] + sys.argv)
+
+# Put this checkout's venv bin first on PATH so the component subprocesses the
+# standalone command spawns (it runs `airflow ...` by name) resolve to the venv
+# instead of failing with "No such file or directory: 'airflow'".
+if os.path.isdir(os.path.dirname(_venv_py)):
+    os.environ["PATH"] = os.path.dirname(_venv_py) + os.pathsep + os.environ.get("PATH", "")
+
 import re
 import shutil
 import socket
 import subprocess
-import sys
 import time
 import urllib.request
 
