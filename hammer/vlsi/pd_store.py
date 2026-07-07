@@ -85,6 +85,11 @@ __all__ = [
     "tar_directory",
     "untar_to_directory",
     "KNOWN_STAGE_TAGS",
+    "record_cache_event",
+    "fetch_cache_events",
+    "count_cache_events",
+    "clear_cache_events",
+    "set_cache_event_project",
 ]
 
 
@@ -102,6 +107,14 @@ WHITELIST_TABLE = "login_whitelist"
 FQ_WHITELIST = f"{SCHEMA_NAME}.{WHITELIST_TABLE}"
 NOTIFY_EMAIL_TABLE = "user_notify_email"
 FQ_NOTIFY_EMAIL = f"{SCHEMA_NAME}.{NOTIFY_EMAIL_TABLE}"
+
+# Durable cache-event ledger. Mirrors the per-run JSONL events that pd_cache
+# writes to $AIRFLOW_HOME/cache_events, but survives clear_run_cache_events
+# (the exit_ task deletes the JSONL after summarizing one run). This is the
+# table the time-saved tracker reads to total savings across every run of a
+# tapeout, since the JSONL files are ephemeral.
+CACHE_EVENT_TABLE = "pd_cache_events"
+FQ_CACHE_EVENT = f"{SCHEMA_NAME}.{CACHE_EVENT_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -428,6 +441,43 @@ CREATE TABLE IF NOT EXISTS {FQ_NOTIFY_EMAIL} (
     email      TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Durable PD-cache event ledger: one row per cache decision (HIT / MISS_STORE /
+-- SKIP_*). The per-run JSONL log under $AIRFLOW_HOME/cache_events feeds the
+-- exit_ task's one-run summary and is then deleted; this table keeps every
+-- event so the time-saved tracker can total savings across all runs of a
+-- tapeout. Append-only; one INSERT per event. All provenance columns nullable
+-- so direct (non-Airflow) hammer runs can record too.
+CREATE TABLE IF NOT EXISTS {FQ_CACHE_EVENT} (
+    id                BIGSERIAL PRIMARY KEY,
+    ts                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    stage             TEXT NOT NULL,
+    outcome           TEXT NOT NULL,
+    saved_seconds     REAL,
+    tool_seconds      REAL,
+    restore_seconds   REAL,
+    saved_cpu_seconds REAL,
+    tool_cpu_seconds  REAL,
+    owner             TEXT NOT NULL DEFAULT current_user,
+    triggering_user   TEXT,
+    dag_id            TEXT,
+    dag_run_id        TEXT,
+    workspace         TEXT,
+    design            TEXT,
+    -- Optional human-assigned grouping (e.g. "ee290_tapeout"). Unlike dag_id /
+    -- design (auto-derived from the build dir), project lets you bucket several
+    -- designs/dags under one tapeout. Set it via HAMMER_PD_PROJECT, the
+    -- vlsi.pd_cache.project config key, the DAG trigger conf 'project' key,
+    -- or relabel existing rows with `studio project-set`.
+    project           TEXT,
+    sha256            TEXT
+);
+ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS project TEXT;
+CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_stage   ON {FQ_CACHE_EVENT} (stage);
+CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_dag     ON {FQ_CACHE_EVENT} (dag_id);
+CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_design  ON {FQ_CACHE_EVENT} (design);
+CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_project ON {FQ_CACHE_EVENT} (project);
+CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_ts      ON {FQ_CACHE_EVENT} (ts);
 
 -- Nobody gets access by default. The group role is the only way in.
 REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
@@ -1439,6 +1489,224 @@ def load_stage_blob(
         return None
     stage, data, duration_seconds, cpu_seconds = row
     return stage, bytes(data), duration_seconds, cpu_seconds
+
+
+# --- Durable cache-event ledger (powers the time-saved tracker) ---------------
+
+# Columns selected/returned by fetch_cache_events, in order. Kept as a module
+# constant so the SELECT and the row->dict mapping can't drift apart.
+_CACHE_EVENT_COLS = (
+    "ts", "stage", "outcome",
+    "saved_seconds", "tool_seconds", "restore_seconds",
+    "saved_cpu_seconds", "tool_cpu_seconds",
+    "owner", "triggering_user", "dag_id", "dag_run_id", "workspace", "design",
+    "project",
+    "sha256",
+)
+
+
+def _cache_event_where(
+    *,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    dag: Optional[str] = None,
+    design: Optional[str] = None,
+    stage: Optional[str] = None,
+    user: Optional[str] = None,
+    project: Optional[str] = None,
+    outcome: Optional[str] = None,
+) -> Tuple[str, List[Any], int]:
+    """Build the shared WHERE clause for cache-event queries.
+
+    Returns ``(where_sql, params, n_filters)``. ``n_filters`` lets destructive
+    callers (clear_cache_events) refuse to run unfiltered unless told to.
+    """
+    clauses: List[str] = []
+    params: List[Any] = []
+    if since is not None:
+        clauses.append("ts >= to_timestamp(%s)")
+        params.append(float(since))
+    if until is not None:
+        clauses.append("ts <= to_timestamp(%s)")
+        params.append(float(until))
+    if dag:
+        clauses.append("dag_id ILIKE %s")
+        params.append(f"%{dag}%")
+    if design:
+        clauses.append("design ILIKE %s")
+        params.append(f"%{design}%")
+    if stage:
+        clauses.append("stage ILIKE %s")
+        params.append(f"%{stage}%")
+    if project:
+        clauses.append("project ILIKE %s")
+        params.append(f"%{project}%")
+    if outcome:
+        clauses.append("outcome = %s")
+        params.append(outcome)
+    if user:
+        clauses.append("(triggering_user ILIKE %s OR owner ILIKE %s)")
+        params.extend([f"%{user}%", f"%{user}%"])
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params, len(clauses)
+
+
+def record_cache_event(
+    stage: str,
+    outcome: str,
+    *,
+    saved_seconds: Optional[float] = None,
+    tool_seconds: Optional[float] = None,
+    restore_seconds: Optional[float] = None,
+    saved_cpu_seconds: Optional[float] = None,
+    tool_cpu_seconds: Optional[float] = None,
+    triggering_user: Optional[str] = None,
+    dag_id: Optional[str] = None,
+    dag_run_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    design: Optional[str] = None,
+    project: Optional[str] = None,
+    sha256: Optional[str] = None,
+) -> None:
+    """Append one cache event to the durable Postgres ledger ({FQ_CACHE_EVENT}).
+
+    Mirrors the JSONL event pd_cache writes per run, but persists past the
+    exit_ task's cleanup so savings can be totalled across every run of a
+    tapeout. Append-only. Callers should treat this as best-effort telemetry
+    and wrap it -- it must never fail a flow (the DB may be unreachable, or the
+    caller may have no Postgres password configured).
+    """
+    conn = _connect()
+    try:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {FQ_CACHE_EVENT} (
+                    stage, outcome, saved_seconds, tool_seconds, restore_seconds,
+                    saved_cpu_seconds, tool_cpu_seconds,
+                    triggering_user, dag_id, dag_run_id, workspace, design,
+                    project, sha256
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (stage, outcome, saved_seconds, tool_seconds, restore_seconds,
+                 saved_cpu_seconds, tool_cpu_seconds,
+                 triggering_user, dag_id, dag_run_id, workspace, design,
+                 project, sha256),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def fetch_cache_events(
+    *,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    dag: Optional[str] = None,
+    design: Optional[str] = None,
+    stage: Optional[str] = None,
+    user: Optional[str] = None,
+    project: Optional[str] = None,
+    outcome: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Read events from the durable ledger as a list of dicts.
+
+    Each dict uses the same keys as the JSONL events pd_cache writes (``ts`` as
+    an epoch float, ``stage_tag``, ``outcome``, ``saved_seconds`` ...) so the
+    aggregator in pd_cache can treat DB and JSONL rows identically.
+
+    Filters (all optional, ANDed): ``since``/``until`` are epoch seconds;
+    ``dag``/``design``/``stage``/``user`` match a substring (ILIKE); ``outcome``
+    matches exactly. ``user`` checks both triggering_user and owner.
+    """
+    where, params, _ = _cache_event_where(
+        since=since, until=until, dag=dag, design=design,
+        stage=stage, user=user, project=project, outcome=outcome)
+    # extract(epoch ...) so the caller gets a plain float ts like the JSONL events
+    select_cols = "extract(epoch from ts) AS ts, " + ", ".join(_CACHE_EVENT_COLS[1:])
+    sql = f"SELECT {select_cols} FROM {FQ_CACHE_EVENT}{where} ORDER BY ts"
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(zip(_CACHE_EVENT_COLS, r))
+        # match the JSONL event shape so pd_cache aggregation is source-agnostic
+        d["stage_tag"] = d.pop("stage")
+        d["run_id"] = d.get("dag_run_id")
+        out.append(d)
+    return out
+
+
+def count_cache_events(**filters: Any) -> int:
+    """Return the number of ledger rows matching the filters (no filter = all)."""
+    where, params, _ = _cache_event_where(**filters)
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {FQ_CACHE_EVENT}{where}", params)
+            return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def clear_cache_events(*, all_rows: bool = False, **filters: Any) -> int:
+    """Delete ledger rows. Returns the number deleted.
+
+    Refuses to run with no filter unless ``all_rows=True`` (the reset-everything
+    case), so a stray clear can't silently wipe the whole tapeout history.
+    """
+    where, params, n = _cache_event_where(**filters)
+    if n == 0 and not all_rows:
+        raise ValueError(
+            "refusing to clear the whole ledger without a filter; pass a filter "
+            "(--dag/--design/--stage/--before/--after/--user) or all_rows=True.")
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {FQ_CACHE_EVENT}{where}", params)
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def set_cache_event_project(project: str, *, all_rows: bool = False,
+                            **filters: Any) -> int:
+    """Categorize ledger rows under ``project`` (UPDATE the project column).
+
+    Returns the number of rows updated. This is how you bucket one or more
+    dags/designs into a named project after the fact, e.g.
+    ``set_cache_event_project("ee290_tapeout", dag="RocketConfig")``. Refuses to
+    relabel the whole ledger without ``all_rows=True``.
+    """
+    if not project:
+        raise ValueError("project must be non-empty")
+    where, params, n = _cache_event_where(**filters)
+    if n == 0 and not all_rows:
+        raise ValueError(
+            "refusing to relabel the whole ledger without a filter; pass a "
+            "filter (--dag/--design/--stage/--after/--before/--user) or all_rows=True.")
+    settings = _pg_settings()
+    conn = psycopg2.connect(**settings)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE {FQ_CACHE_EVENT} SET project = %s{where}",
+                        [project] + params)
+            return cur.rowcount
+    finally:
+        conn.close()
 
 
 def list_stage_blobs(

@@ -90,6 +90,7 @@ def _resolve_workspace_obj_dir(context, design):
     dag_id = None
     run_id = None
     ws_name = None
+    proj_name = None
     try:
         if context is not None:
             dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
@@ -104,6 +105,10 @@ def _resolve_workspace_obj_dir(context, design):
                 conf = getattr(dag_run, "conf", None)
                 if isinstance(conf, dict):
                     ws_name = conf.get("workspace") or conf.get("workspace_name")
+                    # Optional project label for the time-saved tracker: trigger
+                    # the DAG with conf={"project": "<name>"} to bucket this run
+                    # under a named project/tapeout.
+                    proj_name = conf.get("project")
     except Exception:
         pass
 
@@ -126,6 +131,16 @@ def _resolve_workspace_obj_dir(context, design):
         os.environ["HAMMER_AIRFLOW_RUN_ID"] = str(run_id)
     if user:
         os.environ["HAMMER_AIRFLOW_TRIGGERING_USER"] = str(user)
+    # The design/project name (DESIGN_NAME = the build-dir basename, e.g.
+    # chipyard.harness.TestHarness.RocketConfig-ChipTop). Stamped to tag blobs
+    # and the time-saved ledger with which design produced them -- otherwise the
+    # `design` column stays NULL and only dag_id scopes.
+    if design:
+        os.environ["HAMMER_AIRFLOW_DESIGN"] = str(design)
+    # Project label from the trigger conf (conf={"project": ...}). A shell env
+    # var or vlsi.pd_cache.project still win, since neither is overwritten here.
+    if proj_name and not os.environ.get("HAMMER_PD_PROJECT"):
+        os.environ["HAMMER_PD_PROJECT"] = str(proj_name)
 
     # Route OBJ_DIR into the triggering user's workspace so builds on a shared
     # Airflow stay separated by who launched the DAG, not who generated it.

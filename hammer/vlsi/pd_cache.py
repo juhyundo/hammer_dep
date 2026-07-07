@@ -25,7 +25,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     # POSIX-only; harmless to skip on Windows since the cache is Linux-only.
@@ -128,6 +128,7 @@ def _record_cache_event(
     restore_seconds: Optional[float] = None,
     saved_cpu_seconds: Optional[float] = None,
     tool_cpu_seconds: Optional[float] = None,
+    enabled: Optional[bool] = None,
 ) -> None:
     """
     Append a single cache event for the current DAG run.
@@ -145,26 +146,60 @@ def _record_cache_event(
     """
     run_id = os.environ.get("HAMMER_AIRFLOW_RUN_ID", "")
     dag_id = os.environ.get("HAMMER_AIRFLOW_DAG_ID", "")
+    design = os.environ.get("HAMMER_AIRFLOW_DESIGN") or os.environ.get("design") or None
+    project = os.environ.get("HAMMER_PD_PROJECT") or None
+    # 1. Per-run JSONL log -- feeds the exit_ task's one-run summary, then gets
+    #    deleted by clear_run_cache_events. Only written inside an Airflow run.
+    #    Carries design/project so the exit_ summary can show which project
+    #    this run was tagged under.
     f = _events_file_for_run(run_id)
-    if f is None:
+    if f is not None:
+        event = {
+            "ts":                time.time(),
+            "dag_id":            dag_id,
+            "run_id":            run_id,
+            "stage_tag":         stage_tag,
+            "outcome":           outcome,
+            "saved_seconds":     saved_seconds,
+            "tool_seconds":      tool_seconds,
+            "restore_seconds":   restore_seconds,
+            "saved_cpu_seconds": saved_cpu_seconds,
+            "tool_cpu_seconds":  tool_cpu_seconds,
+            "design":            design,
+            "project":           project,
+        }
+        try:
+            with f.open("a") as fh:
+                fh.write(json.dumps(event) + "\n")
+        except Exception:
+            # Telemetry must never fail the run.
+            pass
+    # 2. Durable Postgres ledger -- survives the exit_ cleanup so the time-saved
+    #    tracker can total savings across every run of a tapeout. Gated by the
+    #    ledger switch (default on; HAMMER_PD_CACHE_LEDGER=0 to disable). Best
+    #    effort only: the DB may be unreachable, or a direct shell run may have
+    #    no Postgres password, so any failure here is swallowed instead of
+    #    stalling the run.
+    if enabled is None:
+        enabled = is_ledger_enabled()
+    if not enabled:
         return
-    event = {
-        "ts":                time.time(),
-        "dag_id":            dag_id,
-        "run_id":            run_id,
-        "stage_tag":         stage_tag,
-        "outcome":           outcome,
-        "saved_seconds":     saved_seconds,
-        "tool_seconds":      tool_seconds,
-        "restore_seconds":   restore_seconds,
-        "saved_cpu_seconds": saved_cpu_seconds,
-        "tool_cpu_seconds":  tool_cpu_seconds,
-    }
     try:
-        with f.open("a") as fh:
-            fh.write(json.dumps(event) + "\n")
+        pd_store.record_cache_event(
+            stage_tag, outcome,
+            saved_seconds=saved_seconds,
+            tool_seconds=tool_seconds,
+            restore_seconds=restore_seconds,
+            saved_cpu_seconds=saved_cpu_seconds,
+            tool_cpu_seconds=tool_cpu_seconds,
+            triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER") or None,
+            dag_id=dag_id or None,
+            dag_run_id=run_id or None,
+            workspace=os.environ.get("HAMMER_AIRFLOW_WORKSPACE") or None,
+            design=design,
+            project=project,
+        )
     except Exception:
-        # Telemetry must never fail the run.
         pass
 
 
@@ -215,6 +250,13 @@ def read_run_cache_summary(run_id: str) -> str:
         return _format_duration(s) if s is not None else "-"
 
     lines = []
+    # Echo which design/project this run recorded under, so a UI-triggered run
+    # can be checked from this task's log (set via conf {"project": ...} or config).
+    design = next((e.get("design") for e in events if e.get("design")), None)
+    project = next((e.get("project") for e in events if e.get("project")), None)
+    lines.append(f"  Design:  {design or '(unset)'}")
+    lines.append(f"  Project: {project or '(no project set)'}")
+    lines.append("")
     header = (
         f"{'stage':<12}  {'outcome':<14}  {'attributed to':<14}  "
         f"{'wall':<10}  {'cpu':<10}  detail"
@@ -304,8 +346,305 @@ def clear_run_cache_events(run_id: str) -> None:
             pass
 
 
+# ----- Cross-run savings aggregation (the time-saved tracker) -----
+#
+# read_run_cache_summary (above) tallies ONE run from its JSONL file. The
+# helpers below tally MANY runs -- from the durable Postgres ledger
+# (pd_store.fetch_cache_events) and/or the on-disk JSONL files -- so we can
+# answer "how much wall-clock / CPU time did the PD cache save across this
+# whole tapeout?". The per-event attribution here is the same as
+# read_run_cache_summary's; keep the two in sync if the outcome rules change.
+
+
+def _attribute_event(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """Classify one cache event into the savings buckets.
+
+    Returns ``{attribution, wall_saved, cpu_saved, wall_ran, cpu_ran,
+    quantified}``. ``attribution`` is one of ``cache`` / ``dep-check`` /
+    ``ran`` / ``none``. ``quantified`` is False for a skip we know happened but
+    whose original duration wasn't recorded (blob predates duration tracking),
+    so callers can count it as a hit without inflating the saved total.
+    """
+    outcome = ev.get("outcome")
+    saved = ev.get("saved_seconds")
+    tool = ev.get("tool_seconds")
+    saved_cpu = ev.get("saved_cpu_seconds")
+    tool_cpu = ev.get("tool_cpu_seconds")
+    res = {"attribution": "none", "wall_saved": 0.0, "cpu_saved": 0.0,
+           "wall_ran": 0.0, "cpu_ran": 0.0, "quantified": False}
+    if outcome in ("HIT", "SKIP_RESTORED") and saved is not None:
+        res.update(attribution="cache", wall_saved=float(saved),
+                   cpu_saved=float(saved_cpu or 0.0), quantified=True)
+    elif outcome == "SKIP_LOCAL" and saved is not None:
+        res.update(attribution="dep-check", wall_saved=float(saved),
+                   cpu_saved=float(saved_cpu or 0.0), quantified=True)
+    elif outcome == "MISS_STORE" and tool is not None:
+        res.update(attribution="ran", wall_ran=float(tool),
+                   cpu_ran=float(tool_cpu or 0.0), quantified=True)
+    elif outcome in ("HIT", "SKIP_RESTORED", "SKIP_LOCAL") and saved is None:
+        # We skipped a tool run but the blob predates duration tracking.
+        res.update(attribution=("dep-check" if outcome == "SKIP_LOCAL" else "cache"),
+                   quantified=False)
+    return res
+
+
+def iter_jsonl_cache_events(events_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Read every event from every ``*.jsonl`` under the cache_events dir.
+
+    Defaults to ``$AIRFLOW_HOME/cache_events``. These files are per-run and the
+    exit_ task deletes them after summarizing, so this only sees runs that
+    haven't been cleaned up yet -- the durable Postgres ledger
+    (pd_store.fetch_cache_events) is the complete cross-run source.
+    """
+    if events_dir is not None:
+        d: Optional[Path] = Path(events_dir)
+    else:
+        d = _events_dir()
+    if d is None or not d.is_dir():
+        return []
+    events: List[Dict[str, Any]] = []
+    for jf in sorted(d.glob("*.jsonl")):
+        try:
+            with jf.open("r") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        events.append(json.loads(line))
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    return events
+
+
+def _group_key(ev: Dict[str, Any], group_by: str) -> str:
+    if group_by in ("stage", "stage_tag"):
+        return ev.get("stage_tag") or "(unknown)"
+    if group_by in ("dag", "dag_id"):
+        return ev.get("dag_id") or "(none)"
+    if group_by == "design":
+        return ev.get("design") or ev.get("dag_id") or "(unknown)"
+    if group_by == "project":
+        return ev.get("project") or "(unassigned)"
+    if group_by in ("run", "run_id"):
+        return ev.get("run_id") or ev.get("dag_run_id") or "(none)"
+    return "all"
+
+
+def _empty_bucket() -> Dict[str, Any]:
+    return {"events": 0, "hits": 0, "misses": 0, "skips": 0, "warnings": 0,
+            "unquantified": 0, "cache_wall": 0.0, "cache_cpu": 0.0,
+            "depcheck_wall": 0.0, "depcheck_cpu": 0.0,
+            "ran_wall": 0.0, "ran_cpu": 0.0}
+
+
+def _accumulate(bucket: Dict[str, Any], ev: Dict[str, Any]) -> None:
+    bucket["events"] += 1
+    outcome = ev.get("outcome")
+    if outcome == "MISS_STORE":
+        bucket["misses"] += 1
+    elif outcome == "HIT":
+        bucket["hits"] += 1
+    elif outcome in ("SKIP_LOCAL", "SKIP_RESTORED"):
+        bucket["skips"] += 1
+    elif outcome == "SKIP_NO_BLOB":
+        bucket["warnings"] += 1
+    a = _attribute_event(ev)
+    if a["attribution"] == "cache":
+        bucket["cache_wall"] += a["wall_saved"]
+        bucket["cache_cpu"] += a["cpu_saved"]
+    elif a["attribution"] == "dep-check":
+        bucket["depcheck_wall"] += a["wall_saved"]
+        bucket["depcheck_cpu"] += a["cpu_saved"]
+    elif a["attribution"] == "ran":
+        bucket["ran_wall"] += a["wall_ran"]
+        bucket["ran_cpu"] += a["cpu_ran"]
+    if a["attribution"] in ("cache", "dep-check") and not a["quantified"]:
+        bucket["unquantified"] += 1
+
+
+def aggregate_savings(events: List[Dict[str, Any]],
+                      group_by: str = "stage") -> Dict[str, Any]:
+    """Total cache savings over a list of events, with a per-group breakdown."""
+    totals = _empty_bucket()
+    groups: Dict[str, Dict[str, Any]] = {}
+    runs = set()
+    dags = set()
+    first_ts: Optional[float] = None
+    last_ts: Optional[float] = None
+    for ev in events:
+        _accumulate(totals, ev)
+        gk = _group_key(ev, group_by)
+        _accumulate(groups.setdefault(gk, _empty_bucket()), ev)
+        rid = ev.get("run_id") or ev.get("dag_run_id")
+        if rid:
+            runs.add(rid)
+        if ev.get("dag_id"):
+            dags.add(ev.get("dag_id"))
+        ts = ev.get("ts")
+        if isinstance(ts, (int, float)):
+            first_ts = ts if first_ts is None else min(first_ts, ts)
+            last_ts = ts if last_ts is None else max(last_ts, ts)
+    return {"totals": totals, "groups": groups, "group_by": group_by,
+            "n_runs": len(runs), "n_dags": len(dags),
+            "first_ts": first_ts, "last_ts": last_ts}
+
+
+def format_savings_report(events: List[Dict[str, Any]],
+                          group_by: str = "stage",
+                          source: str = "") -> str:
+    """Render a human-readable cross-run time-saved report."""
+    agg = aggregate_savings(events, group_by=group_by)
+    t = agg["totals"]
+    if t["events"] == 0:
+        return "(no cache events found)"
+
+    total_saved_wall = t["cache_wall"] + t["depcheck_wall"]
+    total_saved_cpu = t["cache_cpu"] + t["depcheck_cpu"]
+    decided = t["hits"] + t["misses"]
+    hit_rate = (100.0 * t["hits"] / decided) if decided else 0.0
+
+    label = {"stage": "stage", "stage_tag": "stage", "dag": "dag",
+             "dag_id": "dag", "design": "design", "project": "project",
+             "run": "run", "run_id": "run", "none": "all"}.get(group_by, group_by)
+
+    lines: List[str] = []
+    src = f"  (source: {source})" if source else ""
+    lines.append(f"PD cache time saved{src}")
+    if agg["first_ts"] and agg["last_ts"]:
+        span = (f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(agg['first_ts']))}"
+                f"  ->  {time.strftime('%Y-%m-%d %H:%M', time.localtime(agg['last_ts']))}")
+        lines.append(f"  span: {span}   runs: {agg['n_runs']}   dags: {agg['n_dags']}")
+    header = (f"{label:<34}  {'events':>6}  {'hits':>5}  {'miss':>5}  "
+              f"{'wall saved':>12}  {'cpu saved':>12}  {'wall ran':>12}")
+    lines.append("")
+    lines.append(header)
+    lines.append("-" * len(header))
+    for gk in sorted(agg["groups"], key=lambda k: -(agg["groups"][k]["cache_wall"]
+                                                     + agg["groups"][k]["depcheck_wall"])):
+        b = agg["groups"][gk]
+        saved_w = b["cache_wall"] + b["depcheck_wall"]
+        lines.append(
+            f"{_short(gk, 34):<34}  {b['events']:>6}  {b['hits']:>5}  {b['misses']:>5}  "
+            f"{_format_duration(saved_w):>12}  {_format_duration(b['cache_cpu'] + b['depcheck_cpu']):>12}  "
+            f"{_format_duration(b['ran_wall']):>12}")
+    lines.append("-" * len(header))
+
+    def _pair(wall: float, cpu: float) -> str:
+        return f"wall {_format_duration(wall):<12}  cpu {_format_duration(cpu):<12}"
+
+    lines.append(f"  Saved by cache:            {_pair(t['cache_wall'], t['cache_cpu'])}")
+    lines.append(f"  Saved by dependency check: {_pair(t['depcheck_wall'], t['depcheck_cpu'])}")
+    lines.append(f"  TOTAL TIME SAVED:          {_pair(total_saved_wall, total_saved_cpu)}")
+    lines.append(f"  Time that actually ran:    {_pair(t['ran_wall'], t['ran_cpu'])}")
+    lines.append(f"  Cache hits / misses:       {t['hits']} hit, {t['misses']} miss "
+                 f"({hit_rate:.0f}% hit rate over {decided} decided stages)")
+    if t["unquantified"]:
+        lines.append(f"  Note: {t['unquantified']} hit(s) had no recorded duration "
+                     f"(blob predates duration tracking) and are excluded from the saved total.")
+    return "\n".join(lines)
+
+
+def _short(s: str, n: int) -> str:
+    s = str(s)
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def _jsonl_matches(ev: Dict[str, Any], *, since: Optional[float], until: Optional[float],
+                   dag: Optional[str], design: Optional[str], stage: Optional[str],
+                   user: Optional[str], project: Optional[str] = None) -> bool:
+    """Apply the same filters fetch_cache_events applies in SQL, to a JSONL event."""
+    ts = ev.get("ts")
+    if since is not None and isinstance(ts, (int, float)) and ts < since:
+        return False
+    if until is not None and isinstance(ts, (int, float)) and ts > until:
+        return False
+    if dag and dag.lower() not in str(ev.get("dag_id") or "").lower():
+        return False
+    if design and design.lower() not in str(ev.get("design") or "").lower():
+        return False
+    if stage and stage.lower() not in str(ev.get("stage_tag") or "").lower():
+        return False
+    if project and project.lower() not in str(ev.get("project") or "").lower():
+        return False
+    if user:
+        u = user.lower()
+        if u not in str(ev.get("triggering_user") or "").lower() \
+           and u not in str(ev.get("owner") or "").lower():
+            return False
+    return True
+
+
+def collect_savings_events(
+    *,
+    source: str = "auto",
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    dag: Optional[str] = None,
+    design: Optional[str] = None,
+    stage: Optional[str] = None,
+    user: Optional[str] = None,
+    project: Optional[str] = None,
+    limit: Optional[int] = None,
+    events_dir: Optional[str] = None,
+):
+    """Gather cache events for the time-saved report. Returns (events, label).
+
+    ``source`` is one of:
+      * ``auto`` (default) -- read the durable Postgres ledger; if it's
+        unreachable or empty, fall back to the on-disk JSONL files.
+      * ``db``   -- Postgres ledger only (raises if unreachable).
+      * ``jsonl``-- on-disk JSONL files only (no DB needed).
+      * ``both`` -- concatenate DB + JSONL (may double-count a run that is in
+        the ledger AND still has an un-cleared JSONL file).
+    """
+    def _db():
+        return pd_store.fetch_cache_events(
+            since=since, until=until, dag=dag, design=design,
+            stage=stage, user=user, project=project, limit=limit)
+
+    def _jsonl():
+        evs = iter_jsonl_cache_events(events_dir)
+        return [e for e in evs if _jsonl_matches(
+            e, since=since, until=until, dag=dag, design=design,
+            stage=stage, user=user, project=project)]
+
+    if source == "jsonl":
+        return _jsonl(), "jsonl files"
+    if source == "db":
+        return _db(), "postgres ledger"
+    if source == "both":
+        try:
+            db = _db()
+        except Exception:
+            db = []
+        return db + _jsonl(), "postgres ledger + jsonl files"
+    # auto
+    try:
+        db = _db()
+    except Exception as e:
+        return _jsonl(), f"jsonl files (DB unavailable: {e})"
+    if db:
+        return db, "postgres ledger"
+    return _jsonl(), "jsonl files (ledger empty)"
+
+
 CACHE_ENV_VAR = "HAMMER_PD_CACHE"
 CACHE_SETTING_KEY = "vlsi.pd_cache.enabled"
+
+# Recording switch for the durable time-saved ledger (the pd_cache_events
+# Postgres table). Separate from the cache itself: the cache can be on while
+# ledger recording is off (you still get HITs, just no durable savings rows).
+LEDGER_ENV_VAR = "HAMMER_PD_CACHE_LEDGER"
+LEDGER_SETTING_KEY = "vlsi.pd_cache.ledger_enabled"
+
+# Optional human-assigned project label stamped onto each ledger row, for
+# bucketing several designs/dags under one tapeout. Env var wins; the config
+# key is a fallback so a design can pin its project in yml.
+PROJECT_ENV_VAR = "HAMMER_PD_PROJECT"
+PROJECT_SETTING_KEY = "vlsi.pd_cache.project"
 
 
 def is_cache_enabled(driver: Optional[Any] = None) -> bool:
@@ -323,6 +662,51 @@ def is_cache_enabled(driver: Optional[Any] = None) -> bool:
         except Exception:
             pass
     return False
+
+
+def is_ledger_enabled(driver: Optional[Any] = None) -> bool:
+    """True if the durable time-saved ledger should record cache events.
+
+    This is the tracker's recording switch. It gates ONLY the durable Postgres
+    rows (pd_store.record_cache_event); the per-run JSONL summary that feeds the
+    exit_ task is unaffected. Defaults to on.
+
+    Turn it off with ``HAMMER_PD_CACHE_LEDGER=0`` (or ``=false/no/off``), or in
+    config with ``vlsi.pd_cache.ledger_enabled: false``. The env var wins; the
+    config key is consulted only when the env var is unset and a driver is
+    given. Set the env var in the Airflow worker env (e.g. venv.sh) to control
+    DAG runs centrally.
+    """
+    env = os.environ.get(LEDGER_ENV_VAR)
+    if env is not None:
+        return env.strip().lower() not in ("", "0", "false", "no", "off")
+    if driver is not None:
+        try:
+            val = driver.database.get_setting(LEDGER_SETTING_KEY, nullvalue=None)
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.strip().lower() in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+    return True
+
+
+def _stamp_project_from_config(driver: Optional[Any]) -> None:
+    """If no project env var is set, pull one from config (vlsi.pd_cache.project).
+
+    Stamps HAMMER_PD_PROJECT so _record_cache_event (which reads the env) tags
+    rows with it. A shell/worker env var or the DAG trigger conf both win over
+    the config key, since either would already have set the env var.
+    """
+    if os.environ.get(PROJECT_ENV_VAR) or driver is None:
+        return
+    try:
+        val = driver.database.get_setting(PROJECT_SETTING_KEY, nullvalue=None)
+        if val:
+            os.environ[PROJECT_ENV_VAR] = str(val)
+    except Exception:
+        pass
 
 
 def _build_cache_key(driver: Any, stage_tag: str) -> str:
@@ -381,6 +765,11 @@ def cache_or_run(
     if not is_cache_enabled(driver):
         return run_fn()
 
+    # Resolve the ledger switch once (honors env var + config key) and pass it
+    # to each event record so the time-saved tracker can be turned off.
+    ledger_on = is_ledger_enabled(driver)
+    _stamp_project_from_config(driver)
+
     try:
         key = _build_cache_key(driver, stage_tag)
     except Exception as e:
@@ -426,6 +815,7 @@ def cache_or_run(
                 saved_seconds=saved,
                 restore_seconds=restore_seconds,
                 saved_cpu_seconds=saved_cpu,
+                enabled=ledger_on,
             )
             _info(
                 f"PD cache HIT for {stage_tag} (sha256={short}...). "
@@ -470,12 +860,13 @@ def cache_or_run(
                 dag_id=os.environ.get("HAMMER_AIRFLOW_DAG_ID") or None,
                 dag_run_id=os.environ.get("HAMMER_AIRFLOW_RUN_ID") or None,
                 workspace=os.environ.get("HAMMER_AIRFLOW_WORKSPACE") or None,
-                design=os.environ.get("design") or None,
+                design=os.environ.get("HAMMER_AIRFLOW_DESIGN") or os.environ.get("design") or None,
             )
             _record_cache_event(
                 stage_tag, "MISS_STORE",
                 tool_seconds=duration_seconds,
                 tool_cpu_seconds=cpu_seconds,
+                enabled=ledger_on,
             )
             cpu_msg = (
                 f", CPU={_format_duration(cpu_seconds)}"
@@ -525,6 +916,9 @@ def try_restore_from_cache(
     if not is_cache_enabled(driver):
         return False
 
+    ledger_on = is_ledger_enabled(driver)
+    _stamp_project_from_config(driver)
+
     output_path = Path(rundir) / output_filename
     if output_path.exists():
         # Local files still present, nothing to do. The skip is safe.
@@ -553,6 +947,7 @@ def try_restore_from_cache(
             stage_tag, "SKIP_LOCAL",
             saved_seconds=original_duration,
             saved_cpu_seconds=original_cpu,
+            enabled=ledger_on,
         )
         return True
 
@@ -571,7 +966,7 @@ def try_restore_from_cache(
         return False
 
     if blob is None:
-        _record_cache_event(stage_tag, "SKIP_NO_BLOB")
+        _record_cache_event(stage_tag, "SKIP_NO_BLOB", enabled=ledger_on)
         _warn(
             f"PD cache (skip-path): stage_change_check would skip {stage_tag}, "
             f"but no local {output_filename} and no matching cache blob "
@@ -597,6 +992,7 @@ def try_restore_from_cache(
             saved_seconds=saved,
             restore_seconds=restore_seconds,
             saved_cpu_seconds=saved_cpu,
+            enabled=ledger_on,
         )
         _info(
             f"PD cache HIT (skip-path) for {stage_tag} (sha256={short}...). "

@@ -951,6 +951,177 @@ def _cmd_reap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_time_saved(args: argparse.Namespace) -> int:
+    """Total the PD cache's wall-clock / CPU time savings across runs.
+
+    Same report as scripts/report_time_saved.py: sums every cache HIT's saved
+    duration across runs (a whole tapeout / RTL bring-up), from the durable
+    Postgres ledger and/or the on-disk JSONL event files.
+    """
+    import time as _time
+    from datetime import datetime as _datetime
+    from hammer.vlsi import pd_cache
+
+    def _when(s: Optional[str]) -> Optional[float]:
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return _time.mktime(_datetime.strptime(s, fmt).timetuple())
+            except ValueError:
+                continue
+        raise SystemExit(f"could not parse date/time {s!r}; use epoch, "
+                         f"YYYY-MM-DD, or 'YYYY-MM-DD HH:MM'")
+
+    events, source = pd_cache.collect_savings_events(
+        source=args.source,
+        since=_when(args.since), until=_when(args.until),
+        dag=args.dag, design=args.design, stage=args.stage, user=args.user,
+        project=args.project, limit=args.limit, events_dir=args.events_dir,
+    )
+    print(pd_cache.format_savings_report(events, group_by=args.group_by, source=source))
+    return 0
+
+
+def _cmd_project_set(args: argparse.Namespace) -> int:
+    """Categorize ledger rows under a project (relabel the project column)."""
+    import time as _time
+    from datetime import datetime as _datetime
+    from hammer.vlsi import pd_store
+
+    def _when(s: Optional[str]) -> Optional[float]:
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return _time.mktime(_datetime.strptime(s, fmt).timetuple())
+            except ValueError:
+                continue
+        raise SystemExit(f"could not parse date/time {s!r}")
+
+    filters: Dict[str, object] = {}
+    if args.dag:
+        filters["dag"] = args.dag
+    if args.design:
+        filters["design"] = args.design
+    if args.stage:
+        filters["stage"] = args.stage
+    if args.user:
+        filters["user"] = args.user
+    if args.after:
+        filters["since"] = _when(args.after)
+    if args.before:
+        filters["until"] = _when(args.before)
+
+    if not filters and not args.all:
+        print("Refusing to relabel the whole ledger without --all (or pass a "
+              "filter like --dag/--design/--stage/--after/--before).")
+        return 1
+    try:
+        n = pd_store.count_cache_events(**filters)
+    except Exception as e:
+        print(f"error: ledger unreachable ({e})")
+        return 1
+    if n == 0:
+        print("No matching ledger rows to relabel.")
+        return 0
+    scope = "ALL ledger rows" if not filters else f"{n} matching ledger row(s)"
+    if not args.yes:
+        resp = input(f"Set project='{args.project}' on {scope}? [y/N] ")
+        if resp.strip().lower() not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+    updated = pd_store.set_cache_event_project(
+        args.project, all_rows=not filters, **filters)
+    print(f"Set project='{args.project}' on {updated} ledger row(s).")
+    return 0
+
+
+def _cmd_cache_status(args: argparse.Namespace) -> int:
+    """Show whether the cache + time-saved ledger are on, and the ledger size."""
+    import os
+    from hammer.vlsi import pd_cache, pd_store
+
+    cache_on = pd_cache.is_cache_enabled()
+    ledger_on = pd_cache.is_ledger_enabled()
+    print(f"PD cache         : {'ON' if cache_on else 'off'}   "
+          f"(HAMMER_PD_CACHE={os.environ.get('HAMMER_PD_CACHE', '(unset -> off)')})")
+    print(f"Time-saved ledger: {'ON' if ledger_on else 'off'}   "
+          f"(HAMMER_PD_CACHE_LEDGER={os.environ.get('HAMMER_PD_CACHE_LEDGER', '(unset -> on)')})")
+    print("  turn off: export HAMMER_PD_CACHE_LEDGER=0   turn on: export HAMMER_PD_CACHE_LEDGER=1")
+    try:
+        n = pd_store.count_cache_events()
+        print(f"Durable ledger   : {n} event row(s) in {pd_store.FQ_CACHE_EVENT}")
+    except Exception as e:
+        print(f"Durable ledger   : unreachable ({e})")
+    return 0
+
+
+def _cmd_cache_events_clear(args: argparse.Namespace) -> int:
+    """Reset the durable time-saved ledger (delete rows; filters optional)."""
+    import time as _time
+    from datetime import datetime as _datetime
+    from hammer.vlsi import pd_store
+
+    def _when(s: Optional[str]) -> Optional[float]:
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return _time.mktime(_datetime.strptime(s, fmt).timetuple())
+            except ValueError:
+                continue
+        raise SystemExit(f"could not parse date/time {s!r}")
+
+    filters: Dict[str, object] = {}
+    if args.dag:
+        filters["dag"] = args.dag
+    if args.design:
+        filters["design"] = args.design
+    if args.stage:
+        filters["stage"] = args.stage
+    if args.user:
+        filters["user"] = args.user
+    if args.after:
+        filters["since"] = _when(args.after)
+    if args.before:
+        filters["until"] = _when(args.before)
+
+    if not filters and not args.all:
+        print("Refusing to wipe the whole ledger without --all (or pass a filter "
+              "like --dag/--design/--stage/--after/--before).")
+        return 1
+    try:
+        n = pd_store.count_cache_events(**filters)
+    except Exception as e:
+        print(f"error: ledger unreachable ({e})")
+        return 1
+    if n == 0:
+        print("No matching ledger rows.")
+        return 0
+    scope = "ALL ledger rows" if not filters else f"{n} matching ledger row(s)"
+    if not args.yes:
+        resp = input(f"Delete {scope}? This cannot be undone. [y/N] ")
+        if resp.strip().lower() not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+    deleted = pd_store.clear_cache_events(all_rows=not filters, **filters)
+    print(f"Deleted {deleted} ledger row(s).")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="studio",
@@ -1324,6 +1495,60 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reap.add_argument("--yes", action="store_true",
                         help="Skip the confirmation prompt when killing.")
     p_reap.set_defaults(func=_cmd_reap)
+
+    p_saved = sub.add_parser(
+        "time-saved",
+        help="Total the PD cache's wall-clock / CPU time saved across runs.")
+    p_saved.add_argument("--source", choices=["auto", "db", "jsonl", "both"],
+                         default="auto",
+                         help="Event source (default: auto = DB, fall back to JSONL).")
+    p_saved.add_argument("-g", "--group-by", default="stage",
+                         choices=["stage", "dag", "design", "project", "run", "none"],
+                         help="Break the report down by this dimension (default: stage).")
+    p_saved.add_argument("--since", help="Only events at/after this time (epoch or YYYY-MM-DD).")
+    p_saved.add_argument("--until", help="Only events at/before this time (epoch or YYYY-MM-DD).")
+    p_saved.add_argument("--dag", help="Filter to dag_id containing this substring.")
+    p_saved.add_argument("--design", help="Filter to design containing this substring.")
+    p_saved.add_argument("--stage", help="Filter to stage (e.g. synthesis, par).")
+    p_saved.add_argument("--user", help="Filter to triggering_user / owner substring.")
+    p_saved.add_argument("--project", help="Filter to project containing this substring.")
+    p_saved.add_argument("--events-dir", help="Override JSONL dir (default $AIRFLOW_HOME/cache_events).")
+    p_saved.add_argument("--limit", type=int, default=None, help="Max DB rows to read.")
+    p_saved.set_defaults(func=_cmd_time_saved)
+
+    p_pset = sub.add_parser(
+        "project-set",
+        help="Categorize ledger rows under a project (relabel; filters or --all).")
+    p_pset.add_argument("project", help="Project name to assign (e.g. ee290_tapeout).")
+    p_pset.add_argument("--all", action="store_true",
+                        help="Relabel every row (required to set with no filter).")
+    p_pset.add_argument("--dag", help="Only rows with dag_id containing this substring.")
+    p_pset.add_argument("--design", help="Only rows with design containing this substring.")
+    p_pset.add_argument("--stage", help="Only rows for this stage (e.g. synthesis, par).")
+    p_pset.add_argument("--user", help="Only rows for this triggering_user / owner.")
+    p_pset.add_argument("--after", help="Only rows at/after this time (epoch or YYYY-MM-DD).")
+    p_pset.add_argument("--before", help="Only rows at/before this time (epoch or YYYY-MM-DD).")
+    p_pset.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+    p_pset.set_defaults(func=_cmd_project_set)
+
+    p_cstat = sub.add_parser(
+        "cache-status",
+        help="Show whether the PD cache + time-saved ledger are on, and ledger size.")
+    p_cstat.set_defaults(func=_cmd_cache_status)
+
+    p_cclr = sub.add_parser(
+        "cache-events-clear",
+        help="Reset the durable time-saved ledger (delete rows; --all or filters).")
+    p_cclr.add_argument("--all", action="store_true",
+                        help="Delete every row (required to wipe with no filter).")
+    p_cclr.add_argument("--dag", help="Only rows with dag_id containing this substring.")
+    p_cclr.add_argument("--design", help="Only rows with design containing this substring.")
+    p_cclr.add_argument("--stage", help="Only rows for this stage (e.g. synthesis, par).")
+    p_cclr.add_argument("--user", help="Only rows for this triggering_user / owner.")
+    p_cclr.add_argument("--after", help="Only rows at/after this time (epoch or YYYY-MM-DD).")
+    p_cclr.add_argument("--before", help="Only rows at/before this time (epoch or YYYY-MM-DD).")
+    p_cclr.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+    p_cclr.set_defaults(func=_cmd_cache_events_clear)
 
     return parser
 
