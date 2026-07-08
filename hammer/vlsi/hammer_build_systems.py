@@ -751,19 +751,46 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             if res.returncode != 0:
                 raise AirflowFailException(f"Hammer action {{action_clean}} failed with exit code {{res.returncode}}")
 
+        def _task_module(task_obj):
+            \"\"\"Module name from a task's group id (module_<Name>), or None for top-level tasks.\"\"\"
+            tid = task_obj.task_id
+            if "." in tid:
+                group = tid.rsplit(".", 1)[0]
+                if group.startswith("module_"):
+                    return group[len("module_"):]
+            return None
+
+        def _module_selected(module, conf):
+            \"\"\"True if this module is in the run's 'modules' selection ('all' by default).
+
+            Hierarchical flows: pick modules from the trigger form's dropdown (or
+            pass a list / comma-separated string in conf) to run stages on just
+            those modules instead of every module in the tree. Top-level tasks
+            (start, exit_, bridges) have no module and always pass.
+            \"\"\"
+            sel = conf.get('modules') or ['all']
+            if isinstance(sel, str):
+                sel = sel.split(',')
+            sel = [str(m).strip() for m in sel if str(m).strip()]
+            if not sel or any(m.lower() == 'all' for m in sel) or module is None:
+                return True
+            return module in sel
+
         def should_run_stage(stage_key, context):
             \"\"\"
-            Determines if a stage should execute based on whether it was explicitly 
-            selected OR if any downstream dependent tasks are active.
+            Determines if a stage should execute based on whether it was explicitly
+            selected OR if any downstream dependent tasks are active. Both checks
+            are scoped by the 'modules' selection, so a stage in a deselected
+            module neither runs nor pulls its upstream stages in.
             \"\"\"
             conf = context['dag_run'].conf
-            if conf.get(stage_key, False):
+            if conf.get(stage_key, False) and _module_selected(_task_module(context['task']), conf):
                 return True
-            
+
             def check_downstream_active(task_obj):
                 for downstream in task_obj.downstream_list:
                     downstream_id = downstream.task_id.split('.')[-1]
-                    if conf.get(downstream_id, False):
+                    if conf.get(downstream_id, False) and _module_selected(_task_module(downstream), conf):
                         return True
                     if check_downstream_active(downstream):
                         return True
@@ -973,6 +1000,9 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     """)
 
     # 3. Parameter Inputs & Unique DAG Skeleton Generation
+    # Module choices for the trigger-time 'modules' dropdown: hierarchy members
+    # for a hierarchical flow, just the top module for a flat one.
+    module_examples = ["all"] + (list(dependency_graph.keys()) if dependency_graph else [top_module])
     output += f"""
 @dag(
     dag_id='{unique_dag_id}',
@@ -994,6 +1024,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         'timing_par': Param(default=False, type='boolean', title='Timing Place and Route'),
         'formal_par': Param(default=False, type='boolean', title='Formal Place and Route'),
         'power_par': Param(default=False, type='boolean', title='Power Place and Route'),
+        'modules': Param(default=['all'], type='array', examples={module_examples!r}, title='Modules',
+                         description='Run the selected stages on these modules only (default: all).'),
         'tools': Param(default=DEFAULT_TOOLS, type='string', enum=TOOLS_CHOICES, title='Tools config'),
         'local': Param(default=False, type='boolean', title='Local (skip DB cache pull; run the tool locally)'),
         'redo': Param(default=False, type='boolean', title='Redo (ignore dependency checks for this run)'),
