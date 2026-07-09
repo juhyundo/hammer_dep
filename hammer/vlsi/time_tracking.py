@@ -90,6 +90,54 @@ def stamp_project_from_config(driver: Optional[Any]) -> None:
         pass
 
 
+def make_would_rerun(driver: Optional[Any], output_file) -> Optional[bool]:
+    """Reproduce legacy make's rerun decision for a stage, at skip time.
+
+    Legacy hammer's only whole-stage skip is the hammer.d Makefile rule: rerun
+    when any prerequisite (every project/env config plus the RTL input files)
+    has a newer mtime than the stage's output file. When our content-aware
+    dependency check skips a stage, this tells us whether legacy would have
+    skipped it too (False -> no credit) or rerun the tool (True -> the skip is
+    a SledgeHammer-only saving, e.g. a config was rewritten but the settings
+    that matter didn't change).
+
+    Returns None when the verdict can't be computed (no driver, missing
+    output file, stat errors); callers should record None as "unknown" and
+    reporting treats unknown conservatively (no credit).
+    """
+    if driver is None:
+        return None
+    try:
+        out = Path(output_file)
+        if not out.exists():
+            # No target on disk: make unconditionally reruns.
+            return True
+        prereqs: List[str] = []
+        opts = getattr(driver, "options", None)
+        if opts is not None:
+            prereqs += list(getattr(opts, "project_configs", []) or [])
+            prereqs += list(getattr(opts, "environment_configs", []) or [])
+        try:
+            rtl = driver.database.get_setting("synthesis.inputs.input_files", [])
+            prereqs += [f for f in (rtl or []) if isinstance(f, str)]
+        except Exception:
+            pass
+        if not prereqs:
+            return None
+        out_mtime = out.stat().st_mtime
+        for p in prereqs:
+            try:
+                if os.path.getmtime(p) > out_mtime:
+                    return True
+            except OSError:
+                # make treats a missing prerequisite as an error/rebuild;
+                # count it as a rerun rather than silently skipping it.
+                return True
+        return False
+    except Exception:
+        return None
+
+
 def _format_duration(seconds: float) -> str:
     """Pretty-print a wall-clock duration. Short units for short durations."""
     if seconds < 1.0:
@@ -168,6 +216,7 @@ def record_event(
     restore_seconds: Optional[float] = None,
     saved_cpu_seconds: Optional[float] = None,
     tool_cpu_seconds: Optional[float] = None,
+    make_would_rerun: Optional[bool] = None,
     enabled: Optional[bool] = None,
 ) -> None:
     """
@@ -207,6 +256,7 @@ def record_event(
             "tool_cpu_seconds":  tool_cpu_seconds,
             "design":            design,
             "project":           project,
+            "make_would_rerun":  make_would_rerun,
         }
         try:
             with f.open("a") as fh:
@@ -238,6 +288,7 @@ def record_event(
             workspace=os.environ.get("HAMMER_AIRFLOW_WORKSPACE") or None,
             design=design,
             project=project,
+            make_would_rerun=make_would_rerun,
         )
     except Exception:
         pass
@@ -274,15 +325,19 @@ def read_run_cache_summary(run_id: str) -> str:
     # SKIP_RESTORED    -> cache saved us (dep-check said skip, but local files
     #                     were missing - without the cache this would have
     #                     forced a re-run, so credit goes to cache)
-    # SKIP_LOCAL       -> dep-check saved us (files were already on disk,
-    #                     cache was never even consulted)
+    # SKIP_LOCAL       -> dep-check saved us (files were already on disk).
+    #                     Split by the make verdict: if legacy make's mtime rule
+    #                     would have rerun the stage, the skip is SledgeHammer's;
+    #                     if make would have skipped too (or unknown), no credit.
     # MISS_STORE       -> no savings; the tool actually ran
     # SKIP_NO_BLOB     -> no savings; the run probably failed
     cache_saved = 0.0       # HIT + SKIP_RESTORED  (wall-clock)
-    depcheck_saved = 0.0    # SKIP_LOCAL           (wall-clock)
+    depsh_saved = 0.0       # SKIP_LOCAL, make would rerun     (wall-clock)
+    deplegacy_saved = 0.0   # SKIP_LOCAL, make would skip too  (wall-clock)
     total_ran = 0.0         # MISS_STORE           (wall-clock)
     cache_saved_cpu = 0.0   # HIT + SKIP_RESTORED  (CPU)
-    depcheck_saved_cpu = 0.0  # SKIP_LOCAL         (CPU)
+    depsh_saved_cpu = 0.0
+    deplegacy_saved_cpu = 0.0
     total_ran_cpu = 0.0     # MISS_STORE           (CPU)
 
     def _wc(s: Optional[float]) -> str:
@@ -327,10 +382,16 @@ def read_run_cache_summary(run_id: str) -> str:
             attribution = "dep-check"
             wall_col = _wc(saved)
             cpu_col = _wc(saved_cpu)
-            detail = "no restore needed, files on disk"
-            depcheck_saved += saved
-            if saved_cpu is not None:
-                depcheck_saved_cpu += saved_cpu
+            if ev.get("make_would_rerun") is True:
+                detail = "files on disk; legacy make would have rerun"
+                depsh_saved += saved
+                if saved_cpu is not None:
+                    depsh_saved_cpu += saved_cpu
+            else:
+                detail = "files on disk; legacy make would skip too"
+                deplegacy_saved += saved
+                if saved_cpu is not None:
+                    deplegacy_saved_cpu += saved_cpu
         elif outcome == "SKIP_RESTORED" and saved is not None:
             attribution = "cache"
             wall_col = _wc(saved)
@@ -360,8 +421,10 @@ def read_run_cache_summary(run_id: str) -> str:
             f"{wall_col:<10}  {cpu_col:<10}  {detail}"
         )
     lines.append("-" * len(header))
-    total_saved = cache_saved + depcheck_saved
-    total_saved_cpu = cache_saved_cpu + depcheck_saved_cpu
+    sledge_saved = cache_saved + depsh_saved
+    sledge_saved_cpu = cache_saved_cpu + depsh_saved_cpu
+    total_saved = sledge_saved + deplegacy_saved
+    total_saved_cpu = sledge_saved_cpu + deplegacy_saved_cpu
 
     def _pair(wall: float, cpu: float) -> str:
         return (
@@ -369,10 +432,12 @@ def read_run_cache_summary(run_id: str) -> str:
             f"cpu {_format_duration(cpu):<10}"
         )
 
-    lines.append(f"  Saved by cache:            {_pair(cache_saved, cache_saved_cpu)}")
-    lines.append(f"  Saved by dependency check: {_pair(depcheck_saved, depcheck_saved_cpu)}")
-    lines.append(f"  Total time saved:          {_pair(total_saved, total_saved_cpu)}")
-    lines.append(f"  Stages that actually ran:  {_pair(total_ran, total_ran_cpu)}")
+    lines.append(f"  Saved by cache:                     {_pair(cache_saved, cache_saved_cpu)}")
+    lines.append(f"  Saved by dep-check (vs make rerun): {_pair(depsh_saved, depsh_saved_cpu)}")
+    lines.append(f"  SledgeHammer time saved:            {_pair(sledge_saved, sledge_saved_cpu)}")
+    lines.append(f"  Legacy-equivalent skips:            {_pair(deplegacy_saved, deplegacy_saved_cpu)}")
+    lines.append(f"  Total skipped work:                 {_pair(total_saved, total_saved_cpu)}")
+    lines.append(f"  Stages that actually ran:           {_pair(total_ran, total_ran_cpu)}")
     return "\n".join(lines)
 
 
@@ -400,30 +465,43 @@ def _attribute_event(ev: Dict[str, Any]) -> Dict[str, Any]:
     """Classify one cache event into the savings buckets.
 
     Returns ``{attribution, wall_saved, cpu_saved, wall_ran, cpu_ran,
-    quantified}``. ``attribution`` is one of ``cache`` / ``dep-check`` /
-    ``ran`` / ``none``. ``quantified`` is False for a skip we know happened but
-    whose original duration wasn't recorded (blob predates duration tracking),
-    so callers can count it as a hit without inflating the saved total.
+    quantified}``. ``attribution`` is one of ``cache`` / ``dep-sh`` /
+    ``dep-legacy`` / ``ran`` / ``none``:
+
+      * ``cache``      - HIT / SKIP_RESTORED. Needs the blob cache; legacy
+                         hammer would have run the tool. SledgeHammer-only.
+      * ``dep-sh``     - SKIP_LOCAL where make_would_rerun is True: legacy
+                         make's mtime rule would have rerun the stage, so the
+                         content-aware dep-check saved it. SledgeHammer-only.
+      * ``dep-legacy`` - SKIP_LOCAL where make would have skipped too (False),
+                         or where the verdict is unknown (None / old rows).
+                         Conservatively given no SledgeHammer credit.
+      * ``ran``        - MISS_STORE, the tool actually ran.
+
+    ``quantified`` is False for a skip we know happened but whose original
+    duration wasn't recorded (blob predates duration tracking), so callers can
+    count it as a hit without inflating the saved total.
     """
     outcome = ev.get("outcome")
     saved = ev.get("saved_seconds")
     tool = ev.get("tool_seconds")
     saved_cpu = ev.get("saved_cpu_seconds")
     tool_cpu = ev.get("tool_cpu_seconds")
+    dep_kind = "dep-sh" if ev.get("make_would_rerun") is True else "dep-legacy"
     res = {"attribution": "none", "wall_saved": 0.0, "cpu_saved": 0.0,
            "wall_ran": 0.0, "cpu_ran": 0.0, "quantified": False}
     if outcome in ("HIT", "SKIP_RESTORED") and saved is not None:
         res.update(attribution="cache", wall_saved=float(saved),
                    cpu_saved=float(saved_cpu or 0.0), quantified=True)
     elif outcome == "SKIP_LOCAL" and saved is not None:
-        res.update(attribution="dep-check", wall_saved=float(saved),
+        res.update(attribution=dep_kind, wall_saved=float(saved),
                    cpu_saved=float(saved_cpu or 0.0), quantified=True)
     elif outcome == "MISS_STORE" and tool is not None:
         res.update(attribution="ran", wall_ran=float(tool),
                    cpu_ran=float(tool_cpu or 0.0), quantified=True)
     elif outcome in ("HIT", "SKIP_RESTORED", "SKIP_LOCAL") and saved is None:
         # We skipped a tool run but the blob predates duration tracking.
-        res.update(attribution=("dep-check" if outcome == "SKIP_LOCAL" else "cache"),
+        res.update(attribution=(dep_kind if outcome == "SKIP_LOCAL" else "cache"),
                    quantified=False)
     return res
 
@@ -476,7 +554,8 @@ def _group_key(ev: Dict[str, Any], group_by: str) -> str:
 def _empty_bucket() -> Dict[str, Any]:
     return {"events": 0, "hits": 0, "misses": 0, "skips": 0, "warnings": 0,
             "unquantified": 0, "cache_wall": 0.0, "cache_cpu": 0.0,
-            "depcheck_wall": 0.0, "depcheck_cpu": 0.0,
+            "depsh_wall": 0.0, "depsh_cpu": 0.0,
+            "deplegacy_wall": 0.0, "deplegacy_cpu": 0.0,
             "ran_wall": 0.0, "ran_cpu": 0.0}
 
 
@@ -495,13 +574,16 @@ def _accumulate(bucket: Dict[str, Any], ev: Dict[str, Any]) -> None:
     if a["attribution"] == "cache":
         bucket["cache_wall"] += a["wall_saved"]
         bucket["cache_cpu"] += a["cpu_saved"]
-    elif a["attribution"] == "dep-check":
-        bucket["depcheck_wall"] += a["wall_saved"]
-        bucket["depcheck_cpu"] += a["cpu_saved"]
+    elif a["attribution"] == "dep-sh":
+        bucket["depsh_wall"] += a["wall_saved"]
+        bucket["depsh_cpu"] += a["cpu_saved"]
+    elif a["attribution"] == "dep-legacy":
+        bucket["deplegacy_wall"] += a["wall_saved"]
+        bucket["deplegacy_cpu"] += a["cpu_saved"]
     elif a["attribution"] == "ran":
         bucket["ran_wall"] += a["wall_ran"]
         bucket["ran_cpu"] += a["cpu_ran"]
-    if a["attribution"] in ("cache", "dep-check") and not a["quantified"]:
+    if a["attribution"] in ("cache", "dep-sh", "dep-legacy") and not a["quantified"]:
         bucket["unquantified"] += 1
 
 
@@ -541,8 +623,10 @@ def format_savings_report(events: List[Dict[str, Any]],
     if t["events"] == 0:
         return "(no cache events found)"
 
-    total_saved_wall = t["cache_wall"] + t["depcheck_wall"]
-    total_saved_cpu = t["cache_cpu"] + t["depcheck_cpu"]
+    sledge_wall = t["cache_wall"] + t["depsh_wall"]
+    sledge_cpu = t["cache_cpu"] + t["depsh_cpu"]
+    total_saved_wall = sledge_wall + t["deplegacy_wall"]
+    total_saved_cpu = sledge_cpu + t["deplegacy_cpu"]
     decided = t["hits"] + t["misses"]
     hit_rate = (100.0 * t["hits"] / decided) if decided else 0.0
 
@@ -557,33 +641,38 @@ def format_savings_report(events: List[Dict[str, Any]],
         span = (f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(agg['first_ts']))}"
                 f"  ->  {time.strftime('%Y-%m-%d %H:%M', time.localtime(agg['last_ts']))}")
         lines.append(f"  span: {span}   runs: {agg['n_runs']}   dags: {agg['n_dags']}")
-    # Cache and dep-check savings stay in separate columns: the cache figure is
-    # what only SledgeHammer can deliver (legacy hammer has no blob cache), while
-    # dep-check skips have a legacy analog (make timestamp deps), so reports
-    # should be able to quote them separately.
+    # Three savings columns, by what legacy hammer could have done:
+    #   cache saved  - blob-cache restores; legacy would have run the tool.
+    #   depchk saved - dep-check skips where legacy make's mtime rule would
+    #                  have rerun (a config was touched but the settings that
+    #                  matter didn't change). SledgeHammer-only, like cache.
+    #   legacy skip  - dep-check skips make would also have skipped (or the
+    #                  make verdict is unknown). No SledgeHammer credit.
     header = (f"{label:<30}  {'events':>6}  {'hits':>5}  {'miss':>5}  "
-              f"{'cache saved':>12}  {'depchk saved':>12}  {'cpu saved':>12}  {'wall ran':>12}")
+              f"{'cache saved':>12}  {'depchk saved':>12}  {'legacy skip':>12}  {'wall ran':>12}")
     lines.append("")
     lines.append(header)
     lines.append("-" * len(header))
     for gk in sorted(agg["groups"], key=lambda k: -(agg["groups"][k]["cache_wall"]
-                                                     + agg["groups"][k]["depcheck_wall"])):
+                                                     + agg["groups"][k]["depsh_wall"])):
         b = agg["groups"][gk]
         lines.append(
             f"{_short(gk, 30):<30}  {b['events']:>6}  {b['hits']:>5}  {b['misses']:>5}  "
-            f"{_format_duration(b['cache_wall']):>12}  {_format_duration(b['depcheck_wall']):>12}  "
-            f"{_format_duration(b['cache_cpu'] + b['depcheck_cpu']):>12}  "
+            f"{_format_duration(b['cache_wall']):>12}  {_format_duration(b['depsh_wall']):>12}  "
+            f"{_format_duration(b['deplegacy_wall']):>12}  "
             f"{_format_duration(b['ran_wall']):>12}")
     lines.append("-" * len(header))
 
     def _pair(wall: float, cpu: float) -> str:
         return f"wall {_format_duration(wall):<12}  cpu {_format_duration(cpu):<12}"
 
-    lines.append(f"  Saved by cache:            {_pair(t['cache_wall'], t['cache_cpu'])}")
-    lines.append(f"  Saved by dependency check: {_pair(t['depcheck_wall'], t['depcheck_cpu'])}")
-    lines.append(f"  TOTAL TIME SAVED:          {_pair(total_saved_wall, total_saved_cpu)}")
-    lines.append(f"  Time that actually ran:    {_pair(t['ran_wall'], t['ran_cpu'])}")
-    lines.append(f"  Cache hits / misses:       {t['hits']} hit, {t['misses']} miss "
+    lines.append(f"  Saved by cache:                     {_pair(t['cache_wall'], t['cache_cpu'])}")
+    lines.append(f"  Saved by dep-check (make would rerun): {_pair(t['depsh_wall'], t['depsh_cpu'])}")
+    lines.append(f"  SLEDGEHAMMER TIME SAVED:            {_pair(sledge_wall, sledge_cpu)}")
+    lines.append(f"  Legacy-equivalent skips (no credit): {_pair(t['deplegacy_wall'], t['deplegacy_cpu'])}")
+    lines.append(f"  Total skipped work (incl. legacy):  {_pair(total_saved_wall, total_saved_cpu)}")
+    lines.append(f"  Time that actually ran:             {_pair(t['ran_wall'], t['ran_cpu'])}")
+    lines.append(f"  Cache hits / misses:                {t['hits']} hit, {t['misses']} miss "
                  f"({hit_rate:.0f}% hit rate over {decided} decided stages)")
     if t["unquantified"]:
         lines.append(f"  Note: {t['unquantified']} hit(s) had no recorded duration "

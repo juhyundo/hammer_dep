@@ -48,22 +48,33 @@ per-group columns and in the totals) so you can quote them honestly:
   restores need the shared Postgres blob cache, which legacy hammer does not
   have. SKIP_RESTORED belongs here too: the dependency check wanted to skip but
   the local files were gone, so without the cache the stage would have re-run.
-- "Saved by dependency check" (SKIP_LOCAL) should be reported separately. The
-  change-detection code is also part of this fork (upstream hammer has no
-  stage_change_check or needsToRerun), but a legacy make flow gets similar
-  skips from timestamp-based Makefile dependencies, so a careful reader can
-  discount this bucket. Quote it as "additional skips" rather than folding it
-  into the headline.
+- Dependency-check skips (SKIP_LOCAL) are split by the recorded
+  `make_would_rerun` flag. At skip time the tracker replays legacy make's
+  decision using the same prerequisite list hammer.d gives make (every
+  project/env config plus the RTL files, compared by mtime against the stage
+  output):
+    - `make_would_rerun = true`: legacy make would have rerun the stage (for
+      example a config file was rewritten but the settings that matter didn't
+      change). The content-aware dependency check saved this; it counts as
+      SledgeHammer time, reported as "saved by dep-check (make would rerun)".
+    - `make_would_rerun = false`: legacy make would have skipped it too.
+      Reported as "legacy-equivalent skips" and given no SledgeHammer credit.
+    - missing/unknown (rows recorded before this flag existed, or the mtime
+      check failed): treated as legacy-equivalent, so the SledgeHammer number
+      stays a floor.
 
-For the strict headline number, `--cache-only` drops the SKIP_LOCAL events
-entirely:
+The report prints SLEDGEHAMMER TIME SAVED (cache plus make-would-rerun
+dep-check skips) directly; that is the paper number. `--cache-only` remains
+the even stricter cut that drops every SKIP_LOCAL regardless of flag:
 
 ```bash
-studio time-saved --project ee290_tapeout --cache-only
+studio time-saved --project ee290_tapeout               # shows the split + SLEDGEHAMMER total
+studio time-saved --project ee290_tapeout --cache-only  # cache restores only
 ```
 
-Every ledger row stores its outcome, so this split can always be recomputed
-from the raw data, including for runs recorded before this section was written.
+Every ledger row stores its outcome (and, for skips, the make verdict), so the
+split can always be recomputed from the raw data. Rows recorded before the
+flag existed conservatively fall in the legacy bucket.
 
 ## What legacy hammer already saves (the baseline)
 

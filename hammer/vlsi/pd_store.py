@@ -470,9 +470,15 @@ CREATE TABLE IF NOT EXISTS {FQ_CACHE_EVENT} (
     -- vlsi.pd_cache.project config key, the DAG trigger conf 'project' key,
     -- or relabel existing rows with `studio project-set`.
     project           TEXT,
+    -- For dep-check skips: would legacy make (mtime rule over the hammer.d
+    -- prerequisites) have rerun this stage? TRUE means the skip is a
+    -- SledgeHammer-only saving; FALSE means make would have skipped it too;
+    -- NULL means unknown (old rows, or the mtime check failed).
+    make_would_rerun  BOOLEAN,
     sha256            TEXT
 );
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS project TEXT;
+ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS make_would_rerun BOOLEAN;
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_stage   ON {FQ_CACHE_EVENT} (stage);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_dag     ON {FQ_CACHE_EVENT} (dag_id);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_design  ON {FQ_CACHE_EVENT} (design);
@@ -1500,7 +1506,7 @@ _CACHE_EVENT_COLS = (
     "saved_seconds", "tool_seconds", "restore_seconds",
     "saved_cpu_seconds", "tool_cpu_seconds",
     "owner", "triggering_user", "dag_id", "dag_run_id", "workspace", "design",
-    "project",
+    "project", "make_would_rerun",
     "sha256",
 )
 
@@ -1566,6 +1572,7 @@ def record_cache_event(
     workspace: Optional[str] = None,
     design: Optional[str] = None,
     project: Optional[str] = None,
+    make_would_rerun: Optional[bool] = None,
     sha256: Optional[str] = None,
 ) -> None:
     """Append one cache event to the durable Postgres ledger ({FQ_CACHE_EVENT}).
@@ -1586,14 +1593,14 @@ def record_cache_event(
                     stage, outcome, saved_seconds, tool_seconds, restore_seconds,
                     saved_cpu_seconds, tool_cpu_seconds,
                     triggering_user, dag_id, dag_run_id, workspace, design,
-                    project, sha256
+                    project, make_would_rerun, sha256
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (stage, outcome, saved_seconds, tool_seconds, restore_seconds,
                  saved_cpu_seconds, tool_cpu_seconds,
                  triggering_user, dag_id, dag_run_id, workspace, design,
-                 project, sha256),
+                 project, make_would_rerun, sha256),
             )
         conn.commit()
     finally:

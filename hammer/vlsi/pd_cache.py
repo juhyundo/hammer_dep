@@ -46,6 +46,7 @@ from hammer.vlsi.time_tracking import (
     is_ledger_enabled,
     record_event as _record_cache_event,
     stamp_project_from_config as _stamp_project_from_config,
+    make_would_rerun as _make_would_rerun,
     _format_duration, _format_savings,
     read_run_cache_summary, clear_run_cache_events,
     iter_jsonl_cache_events, aggregate_savings, format_savings_report,
@@ -326,6 +327,10 @@ def try_restore_from_cache(
             stage_tag, "SKIP_LOCAL",
             saved_seconds=original_duration,
             saved_cpu_seconds=original_cpu,
+            # Would legacy make's mtime rule have rerun this stage? True means
+            # this skip is a SledgeHammer-only saving (content-aware dep-check
+            # beat make); False means legacy would have skipped it too.
+            make_would_rerun=_make_would_rerun(driver, output_path),
             enabled=ledger_on,
         )
         return True
@@ -371,6 +376,9 @@ def try_restore_from_cache(
             saved_seconds=saved,
             restore_seconds=restore_seconds,
             saved_cpu_seconds=saved_cpu,
+            # The output file was missing, so legacy make would rebuild
+            # unconditionally: this restore is a SledgeHammer-only saving.
+            make_would_rerun=True,
             enabled=ledger_on,
         )
         _info(
