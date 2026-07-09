@@ -1639,6 +1639,7 @@ def fetch_cache_events(
         sql += f" LIMIT {int(limit)}"
     conn = _connect()
     try:
+        _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
@@ -1659,6 +1660,7 @@ def count_cache_events(**filters: Any) -> int:
     where, params, _ = _cache_event_where(**filters)
     conn = _connect()
     try:
+        _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {FQ_CACHE_EVENT}{where}", params)
             return int(cur.fetchone()[0])
@@ -1681,6 +1683,7 @@ def clear_cache_events(*, all_rows: bool = False, **filters: Any) -> int:
     conn = psycopg2.connect(**settings)
     conn.autocommit = True
     try:
+        _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {FQ_CACHE_EVENT}{where}", params)
             return cur.rowcount
@@ -1708,6 +1711,7 @@ def set_cache_event_project(project: str, *, all_rows: bool = False,
     conn = psycopg2.connect(**settings)
     conn.autocommit = True
     try:
+        _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(f"UPDATE {FQ_CACHE_EVENT} SET project = %s{where}",
                         [project] + params)
