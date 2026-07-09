@@ -1050,7 +1050,7 @@ def hammer_dag():
             run_id = None
         if run_id:
             try:
-                from hammer.vlsi.pd_cache import read_run_cache_summary, clear_run_cache_events
+                from hammer.vlsi.time_tracking import read_run_cache_summary, clear_run_cache_events
                 summary = read_run_cache_summary(run_id)
                 if summary:
                     print("=" * 72)

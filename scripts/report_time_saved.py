@@ -37,7 +37,7 @@ import time
 from datetime import datetime
 from typing import List, Optional
 
-from hammer.vlsi import pd_cache
+from hammer.vlsi import time_tracking
 
 
 def _parse_when(s: Optional[str]) -> Optional[float]:
@@ -77,6 +77,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--stage", help="Filter to stage containing this substring (e.g. synthesis, par).")
     p.add_argument("--user", help="Filter to triggering_user / owner containing this substring.")
     p.add_argument("--project", help="Filter to project containing this substring.")
+    p.add_argument("--cache-only", action="store_true",
+                   help="Count only cache-delivered savings (exclude dependency-check "
+                        "skips, which a legacy make flow may also have skipped).")
     p.add_argument("--events-dir", help="Override the JSONL events dir "
                                         "(default: $AIRFLOW_HOME/cache_events).")
     p.add_argument("--limit", type=int, default=None, help="Max DB rows to read.")
@@ -85,7 +88,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.source == "db" and args.events_dir:
         print("[warn] --events-dir is ignored with --source db.", file=sys.stderr)
     try:
-        events, source = pd_cache.collect_savings_events(
+        events, source = time_tracking.collect_savings_events(
             source=args.source,
             since=_parse_when(args.since), until=_parse_when(args.until),
             dag=args.dag, design=args.design, stage=args.stage, user=args.user,
@@ -94,7 +97,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:
         # only --source db surfaces a hard error here; auto/jsonl fall back
         raise SystemExit(f"Could not read cache events: {e}")
-    print(pd_cache.format_savings_report(events, group_by=args.group_by, source=source))
+    if args.cache_only:
+        events = time_tracking.exclude_depcheck_skips(events)
+        source = f"{source}, cache-only"
+    print(time_tracking.format_savings_report(events, group_by=args.group_by, source=source))
     return 0
 
 

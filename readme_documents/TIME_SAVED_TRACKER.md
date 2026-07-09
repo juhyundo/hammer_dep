@@ -38,6 +38,86 @@ The report counts savings the same way the per-run summary does:
 HIT and SKIP_RESTORED count as "saved by cache", SKIP_LOCAL as "saved by
 dependency check", MISS_STORE as "time that actually ran".
 
+## Attributing savings: SledgeHammer vs legacy hammer
+
+For reporting real statistics, the two savings buckets are not equally
+attributable to SledgeHammer, and the report keeps them separate (both in the
+per-group columns and in the totals) so you can quote them honestly:
+
+- "Saved by cache" (HIT + SKIP_RESTORED) is the SledgeHammer number. These
+  restores need the shared Postgres blob cache, which legacy hammer does not
+  have. SKIP_RESTORED belongs here too: the dependency check wanted to skip but
+  the local files were gone, so without the cache the stage would have re-run.
+- "Saved by dependency check" (SKIP_LOCAL) should be reported separately. The
+  change-detection code is also part of this fork (upstream hammer has no
+  stage_change_check or needsToRerun), but a legacy make flow gets similar
+  skips from timestamp-based Makefile dependencies, so a careful reader can
+  discount this bucket. Quote it as "additional skips" rather than folding it
+  into the headline.
+
+For the strict headline number, `--cache-only` drops the SKIP_LOCAL events
+entirely:
+
+```bash
+studio time-saved --project ee290_tapeout --cache-only
+```
+
+Every ledger row stores its outcome, so this split can always be recomputed
+from the raw data, including for runs recorded before this section was written.
+
+## What legacy hammer already saves (the baseline)
+
+Checked against upstream ucb-bar/hammer (this repo's origin remote), which has
+exactly three time-saving mechanisms, all local-filesystem and timestamp based:
+
+- Make action skipping. The generated hammer.d turns each action into a file
+  target: syn is skipped when syn-output-full.json is newer than every
+  prerequisite, and the prerequisites are ALL the config files plus the RTL.
+  Touching any config re-runs the action and everything downstream. Pure
+  mtime comparison, no content hashing.
+- redo-<action> targets, which re-run one action without the dependency
+  cascade. Correctness is the user's responsibility.
+- Step-level resume inside one action (--from_step / --only_step and friends),
+  backed by the genus/innovus write_db checkpoints left in the run dir.
+
+Upstream has no shared cache, no content-based change detection, and no
+master_database. A fresh checkout or a wiped build dir re-runs everything.
+
+Mapping that onto the tracker outcomes:
+
+- HIT and SKIP_RESTORED have no legacy equivalent. Legacy re-runs the tool
+  whenever outputs are missing; only the shared cache turns that into a
+  restore. These are safe to claim.
+- SKIP_LOCAL usually has a legacy analog: with the outputs present and up to
+  date, make would have skipped the same stage. This is why --cache-only
+  excludes it. (The fork's check is content-based, so it also skips
+  touched-but-unchanged configs where make would re-run; we conservatively do
+  not claim those either.)
+
+## Running a legacy-equivalent baseline (A/B measurement)
+
+Turning the cache off does NOT give you legacy hammer: the fork's dependency
+check (stage_change_check against obj_dir/master_database.json) still skips
+unchanged stages with the cache disabled. For a true upstream-equivalent run,
+bypass both layers:
+
+```bash
+# direct CLI: cache off, dependency check bypassed
+HAMMER_PD_CACHE=0 ./ee290-vlsi ... --force syn
+
+# via make: redo-* skips make's own timestamp gate, --force skips the dep-check
+make redo-syn HAMMER_EXTRA_ARGS='--force'
+```
+
+With the cache off, cache_or_run degenerates to a plain tool run, and --force
+short-circuits the dependency check, so the measured wall time is what legacy
+hammer would spend. Time a flow that way, run the same flow with the cache on,
+and the difference is SledgeHammer's contribution measured rather than
+inferred. Two things to watch: a loaded config can silently re-enable the
+cache via vlsi.pd_cache.enabled (true cache-off needs the env var unset or 0
+and that key absent), and with the cache off no ledger events are recorded, so
+time the baseline runs externally.
+
 ## How a record is tied to a design
 
 A record is not tied to your current shell directory. It is tied to the
@@ -212,7 +292,16 @@ It refuses to wipe everything without `--all`, and prompts for confirmation
 unless you pass `--yes`. Filters: `--all`, `--dag`, `--design`, `--stage`,
 `--user`, `--after`, `--before`.
 
-## Where the data lives
+## Where the code and data live
+
+The tracker code is `hammer/vlsi/time_tracking.py`: event recording, the
+ledger and project switches, the per-run summary the `exit_` task prints, and
+the cross-run aggregation behind `studio time-saved`. The cache wrapper
+(`pd_cache.py`) only measures the tool run and calls into it; the Postgres
+table plumbing is in `pd_store.py`; the build-system generator has just the
+three-line `exit_` summary hook.
+
+Data:
 
 - `hammer_poc.pd_cache_events` - the durable ledger this tracker reads. Survives
   across runs and machines. This is the source of truth for a tapeout total.

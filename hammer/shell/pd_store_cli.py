@@ -960,7 +960,7 @@ def _cmd_time_saved(args: argparse.Namespace) -> int:
     """
     import time as _time
     from datetime import datetime as _datetime
-    from hammer.vlsi import pd_cache
+    from hammer.vlsi import time_tracking
 
     def _when(s: Optional[str]) -> Optional[float]:
         if not s:
@@ -977,13 +977,16 @@ def _cmd_time_saved(args: argparse.Namespace) -> int:
         raise SystemExit(f"could not parse date/time {s!r}; use epoch, "
                          f"YYYY-MM-DD, or 'YYYY-MM-DD HH:MM'")
 
-    events, source = pd_cache.collect_savings_events(
+    events, source = time_tracking.collect_savings_events(
         source=args.source,
         since=_when(args.since), until=_when(args.until),
         dag=args.dag, design=args.design, stage=args.stage, user=args.user,
         project=args.project, limit=args.limit, events_dir=args.events_dir,
     )
-    print(pd_cache.format_savings_report(events, group_by=args.group_by, source=source))
+    if args.cache_only:
+        events = time_tracking.exclude_depcheck_skips(events)
+        source = f"{source}, cache-only"
+    print(time_tracking.format_savings_report(events, group_by=args.group_by, source=source))
     return 0
 
 
@@ -1048,10 +1051,10 @@ def _cmd_project_set(args: argparse.Namespace) -> int:
 def _cmd_cache_status(args: argparse.Namespace) -> int:
     """Show whether the cache + time-saved ledger are on, and the ledger size."""
     import os
-    from hammer.vlsi import pd_cache, pd_store
+    from hammer.vlsi import pd_cache, pd_store, time_tracking
 
     cache_on = pd_cache.is_cache_enabled()
-    ledger_on = pd_cache.is_ledger_enabled()
+    ledger_on = time_tracking.is_ledger_enabled()
     print(f"PD cache         : {'ON' if cache_on else 'off'}   "
           f"(HAMMER_PD_CACHE={os.environ.get('HAMMER_PD_CACHE', '(unset -> off)')})")
     print(f"Time-saved ledger: {'ON' if ledger_on else 'off'}   "
@@ -1512,6 +1515,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_saved.add_argument("--stage", help="Filter to stage (e.g. synthesis, par).")
     p_saved.add_argument("--user", help="Filter to triggering_user / owner substring.")
     p_saved.add_argument("--project", help="Filter to project containing this substring.")
+    p_saved.add_argument("--cache-only", action="store_true",
+                         help="Count only cache-delivered savings (exclude dependency-check "
+                              "skips, which a legacy make flow may also have skipped).")
     p_saved.add_argument("--events-dir", help="Override JSONL dir (default $AIRFLOW_HOME/cache_events).")
     p_saved.add_argument("--limit", type=int, default=None, help="Max DB rows to read.")
     p_saved.set_defaults(func=_cmd_time_saved)
