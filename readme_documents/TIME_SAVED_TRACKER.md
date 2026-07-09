@@ -31,8 +31,16 @@ One row per cache decision (per stage run), written to the Postgres table
 - timing: `saved_seconds`, `tool_seconds`, `restore_seconds`, plus the
   `*_cpu_seconds` variants. CPU is summed across child processes, so for a
   multi-threaded tool like Innovus it is much larger than wall-clock.
-- provenance: `dag_id`, `dag_run_id`, `design`, `triggering_user`, `owner`,
-  `workspace`, `sha256` (the stage cache key).
+- provenance: `dag_id`, `dag_run_id`, `design`, `module`, `triggering_user`,
+  `owner`, `workspace`, `sha256` (the stage cache key). `module` is the block
+  the stage ran on: the per-module name in hierarchical flows (`syn-SubModA`
+  records `module=SubModA`), the top module in flat flows. Group or filter on
+  it for per-block stats in a hierarchical tapeout:
+
+  ```bash
+  studio time-saved --group-by module
+  studio time-saved --module RocketTile
+  ```
 
 The report counts savings the same way the per-run summary does:
 HIT and SKIP_RESTORED count as "saved by cache", SKIP_LOCAL as "saved by

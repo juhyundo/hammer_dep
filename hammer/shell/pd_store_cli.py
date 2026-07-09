@@ -981,7 +981,8 @@ def _cmd_time_saved(args: argparse.Namespace) -> int:
         source=args.source,
         since=_when(args.since), until=_when(args.until),
         dag=args.dag, design=args.design, stage=args.stage, user=args.user,
-        project=args.project, limit=args.limit, events_dir=args.events_dir,
+        project=args.project, module=args.module, limit=args.limit,
+        events_dir=args.events_dir,
     )
     if args.cache_only:
         events = time_tracking.exclude_depcheck_skips(events)
@@ -1506,7 +1507,7 @@ def _build_parser() -> argparse.ArgumentParser:
                          default="auto",
                          help="Event source (default: auto = DB, fall back to JSONL).")
     p_saved.add_argument("-g", "--group-by", default="stage",
-                         choices=["stage", "dag", "design", "project", "run", "none"],
+                         choices=["stage", "dag", "design", "project", "module", "run", "none"],
                          help="Break the report down by this dimension (default: stage).")
     p_saved.add_argument("--since", help="Only events at/after this time (epoch or YYYY-MM-DD).")
     p_saved.add_argument("--until", help="Only events at/before this time (epoch or YYYY-MM-DD).")
@@ -1515,6 +1516,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_saved.add_argument("--stage", help="Filter to stage (e.g. synthesis, par).")
     p_saved.add_argument("--user", help="Filter to triggering_user / owner substring.")
     p_saved.add_argument("--project", help="Filter to project containing this substring.")
+    p_saved.add_argument("--module", help="Filter to module containing this substring (hierarchical flows).")
     p_saved.add_argument("--cache-only", action="store_true",
                          help="Count only cache-delivered savings (exclude dependency-check "
                               "skips, which a legacy make flow may also have skipped).")

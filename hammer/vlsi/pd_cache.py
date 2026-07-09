@@ -47,6 +47,7 @@ from hammer.vlsi.time_tracking import (
     record_event as _record_cache_event,
     stamp_project_from_config as _stamp_project_from_config,
     make_would_rerun as _make_would_rerun,
+    stage_module as _stage_module,
     _format_duration, _format_savings,
     read_run_cache_summary, clear_run_cache_events,
     iter_jsonl_cache_events, aggregate_savings, format_savings_report,
@@ -149,6 +150,7 @@ def cache_or_run(
     # to each event record so the time-saved tracker can be turned off.
     ledger_on = is_ledger_enabled(driver)
     _stamp_project_from_config(driver)
+    module = _stage_module(driver, stage_tag)
 
     try:
         key = _build_cache_key(driver, stage_tag)
@@ -195,6 +197,7 @@ def cache_or_run(
                 saved_seconds=saved,
                 restore_seconds=restore_seconds,
                 saved_cpu_seconds=saved_cpu,
+                module=module,
                 enabled=ledger_on,
             )
             _info(
@@ -246,6 +249,7 @@ def cache_or_run(
                 stage_tag, "MISS_STORE",
                 tool_seconds=duration_seconds,
                 tool_cpu_seconds=cpu_seconds,
+                module=module,
                 enabled=ledger_on,
             )
             cpu_msg = (
@@ -298,6 +302,7 @@ def try_restore_from_cache(
 
     ledger_on = is_ledger_enabled(driver)
     _stamp_project_from_config(driver)
+    module = _stage_module(driver, stage_tag)
 
     output_path = Path(rundir) / output_filename
     if output_path.exists():
@@ -331,6 +336,7 @@ def try_restore_from_cache(
             # this skip is a SledgeHammer-only saving (content-aware dep-check
             # beat make); False means legacy would have skipped it too.
             make_would_rerun=_make_would_rerun(driver, output_path),
+            module=module,
             enabled=ledger_on,
         )
         return True
@@ -350,7 +356,7 @@ def try_restore_from_cache(
         return False
 
     if blob is None:
-        _record_cache_event(stage_tag, "SKIP_NO_BLOB", enabled=ledger_on)
+        _record_cache_event(stage_tag, "SKIP_NO_BLOB", module=module, enabled=ledger_on)
         _warn(
             f"PD cache (skip-path): stage_change_check would skip {stage_tag}, "
             f"but no local {output_filename} and no matching cache blob "
@@ -379,6 +385,7 @@ def try_restore_from_cache(
             # The output file was missing, so legacy make would rebuild
             # unconditionally: this restore is a SledgeHammer-only saving.
             make_would_rerun=True,
+            module=module,
             enabled=ledger_on,
         )
         _info(

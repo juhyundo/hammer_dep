@@ -475,10 +475,14 @@ CREATE TABLE IF NOT EXISTS {FQ_CACHE_EVENT} (
     -- SledgeHammer-only saving; FALSE means make would have skipped it too;
     -- NULL means unknown (old rows, or the mtime check failed).
     make_would_rerun  BOOLEAN,
+    -- The block the stage ran on: the per-module name in hierarchical flows
+    -- (syn-SubModA records module=SubModA), the top module in flat flows.
+    module            TEXT,
     sha256            TEXT
 );
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS project TEXT;
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS make_would_rerun BOOLEAN;
+ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS module TEXT;
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_stage   ON {FQ_CACHE_EVENT} (stage);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_dag     ON {FQ_CACHE_EVENT} (dag_id);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_design  ON {FQ_CACHE_EVENT} (design);
@@ -1506,7 +1510,7 @@ _CACHE_EVENT_COLS = (
     "saved_seconds", "tool_seconds", "restore_seconds",
     "saved_cpu_seconds", "tool_cpu_seconds",
     "owner", "triggering_user", "dag_id", "dag_run_id", "workspace", "design",
-    "project", "make_would_rerun",
+    "project", "make_would_rerun", "module",
     "sha256",
 )
 
@@ -1520,6 +1524,7 @@ def _cache_event_where(
     stage: Optional[str] = None,
     user: Optional[str] = None,
     project: Optional[str] = None,
+    module: Optional[str] = None,
     outcome: Optional[str] = None,
 ) -> Tuple[str, List[Any], int]:
     """Build the shared WHERE clause for cache-event queries.
@@ -1547,6 +1552,9 @@ def _cache_event_where(
     if project:
         clauses.append("project ILIKE %s")
         params.append(f"%{project}%")
+    if module:
+        clauses.append("module ILIKE %s")
+        params.append(f"%{module}%")
     if outcome:
         clauses.append("outcome = %s")
         params.append(outcome)
@@ -1573,6 +1581,7 @@ def record_cache_event(
     design: Optional[str] = None,
     project: Optional[str] = None,
     make_would_rerun: Optional[bool] = None,
+    module: Optional[str] = None,
     sha256: Optional[str] = None,
 ) -> None:
     """Append one cache event to the durable Postgres ledger ({FQ_CACHE_EVENT}).
@@ -1593,14 +1602,14 @@ def record_cache_event(
                     stage, outcome, saved_seconds, tool_seconds, restore_seconds,
                     saved_cpu_seconds, tool_cpu_seconds,
                     triggering_user, dag_id, dag_run_id, workspace, design,
-                    project, make_would_rerun, sha256
+                    project, make_would_rerun, module, sha256
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (stage, outcome, saved_seconds, tool_seconds, restore_seconds,
                  saved_cpu_seconds, tool_cpu_seconds,
                  triggering_user, dag_id, dag_run_id, workspace, design,
-                 project, make_would_rerun, sha256),
+                 project, make_would_rerun, module, sha256),
             )
         conn.commit()
     finally:
@@ -1616,6 +1625,7 @@ def fetch_cache_events(
     stage: Optional[str] = None,
     user: Optional[str] = None,
     project: Optional[str] = None,
+    module: Optional[str] = None,
     outcome: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
@@ -1631,7 +1641,7 @@ def fetch_cache_events(
     """
     where, params, _ = _cache_event_where(
         since=since, until=until, dag=dag, design=design,
-        stage=stage, user=user, project=project, outcome=outcome)
+        stage=stage, user=user, project=project, module=module, outcome=outcome)
     # extract(epoch ...) so the caller gets a plain float ts like the JSONL events
     select_cols = "extract(epoch from ts) AS ts, " + ", ".join(_CACHE_EVENT_COLS[1:])
     sql = f"SELECT {select_cols} FROM {FQ_CACHE_EVENT}{where} ORDER BY ts"

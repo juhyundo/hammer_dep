@@ -138,6 +138,27 @@ def make_would_rerun(driver: Optional[Any], output_file) -> Optional[bool]:
         return None
 
 
+def stage_module(driver: Optional[Any], stage_tag: str) -> Optional[str]:
+    """The block a stage is running on, for tagging events.
+
+    Reads <stage>.inputs.top_module from the live config, which hierarchical
+    flows swap per module (syn-SubModA runs with synthesis.inputs.top_module =
+    SubModA) and flat flows leave at the design top. Works before the tool is
+    loaded, so both the cache path and the dep-check skip path can use it.
+    """
+    if driver is None:
+        return None
+    prefix = {"synthesis": "synthesis", "syn": "synthesis"}.get(stage_tag, stage_tag)
+    for key in (f"{prefix}.inputs.top_module", "synthesis.inputs.top_module"):
+        try:
+            val = driver.database.get_setting(key, nullvalue=None)
+            if val:
+                return str(val)
+        except Exception:
+            continue
+    return None
+
+
 def _format_duration(seconds: float) -> str:
     """Pretty-print a wall-clock duration. Short units for short durations."""
     if seconds < 1.0:
@@ -217,6 +238,7 @@ def record_event(
     saved_cpu_seconds: Optional[float] = None,
     tool_cpu_seconds: Optional[float] = None,
     make_would_rerun: Optional[bool] = None,
+    module: Optional[str] = None,
     enabled: Optional[bool] = None,
 ) -> None:
     """
@@ -257,6 +279,7 @@ def record_event(
             "design":            design,
             "project":           project,
             "make_would_rerun":  make_would_rerun,
+            "module":            module,
         }
         try:
             with f.open("a") as fh:
@@ -289,6 +312,7 @@ def record_event(
             design=design,
             project=project,
             make_would_rerun=make_would_rerun,
+            module=module,
         )
     except Exception:
         pass
@@ -360,6 +384,7 @@ def read_run_cache_summary(run_id: str) -> str:
     lines.append("-" * len(header))
     for ev in events:
         stage = ev.get("stage_tag", "?")
+        mod = ev.get("module")
         outcome = ev.get("outcome", "?")
         saved = ev.get("saved_seconds")
         tool = ev.get("tool_seconds")
@@ -416,6 +441,8 @@ def read_run_cache_summary(run_id: str) -> str:
             # we skipped a tool run but can't quantify how much we saved.
             attribution = "cache" if outcome != "SKIP_LOCAL" else "dep-check"
             detail = "skipped tool run (original duration not recorded)"
+        if mod:
+            detail = f"[{mod}] {detail}" if detail else f"[{mod}]"
         lines.append(
             f"{stage:<12}  {outcome:<14}  {attribution:<14}  "
             f"{wall_col:<10}  {cpu_col:<10}  {detail}"
@@ -546,6 +573,8 @@ def _group_key(ev: Dict[str, Any], group_by: str) -> str:
         return ev.get("design") or ev.get("dag_id") or "(unknown)"
     if group_by == "project":
         return ev.get("project") or "(unassigned)"
+    if group_by == "module":
+        return ev.get("module") or "(unknown)"
     if group_by in ("run", "run_id"):
         return ev.get("run_id") or ev.get("dag_run_id") or "(none)"
     return "all"
@@ -632,7 +661,8 @@ def format_savings_report(events: List[Dict[str, Any]],
 
     label = {"stage": "stage", "stage_tag": "stage", "dag": "dag",
              "dag_id": "dag", "design": "design", "project": "project",
-             "run": "run", "run_id": "run", "none": "all"}.get(group_by, group_by)
+             "module": "module", "run": "run", "run_id": "run",
+             "none": "all"}.get(group_by, group_by)
 
     lines: List[str] = []
     src = f"  (source: {source})" if source else ""
@@ -698,7 +728,8 @@ def exclude_depcheck_skips(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 def _jsonl_matches(ev: Dict[str, Any], *, since: Optional[float], until: Optional[float],
                    dag: Optional[str], design: Optional[str], stage: Optional[str],
-                   user: Optional[str], project: Optional[str] = None) -> bool:
+                   user: Optional[str], project: Optional[str] = None,
+                   module: Optional[str] = None) -> bool:
     """Apply the same filters fetch_cache_events applies in SQL, to a JSONL event."""
     ts = ev.get("ts")
     if since is not None and isinstance(ts, (int, float)) and ts < since:
@@ -712,6 +743,8 @@ def _jsonl_matches(ev: Dict[str, Any], *, since: Optional[float], until: Optiona
     if stage and stage.lower() not in str(ev.get("stage_tag") or "").lower():
         return False
     if project and project.lower() not in str(ev.get("project") or "").lower():
+        return False
+    if module and module.lower() not in str(ev.get("module") or "").lower():
         return False
     if user:
         u = user.lower()
@@ -731,6 +764,7 @@ def collect_savings_events(
     stage: Optional[str] = None,
     user: Optional[str] = None,
     project: Optional[str] = None,
+    module: Optional[str] = None,
     limit: Optional[int] = None,
     events_dir: Optional[str] = None,
 ):
@@ -747,13 +781,13 @@ def collect_savings_events(
     def _db():
         return pd_store.fetch_cache_events(
             since=since, until=until, dag=dag, design=design,
-            stage=stage, user=user, project=project, limit=limit)
+            stage=stage, user=user, project=project, module=module, limit=limit)
 
     def _jsonl():
         evs = iter_jsonl_cache_events(events_dir)
         return [e for e in evs if _jsonl_matches(
             e, since=since, until=until, dag=dag, design=design,
-            stage=stage, user=user, project=project)]
+            stage=stage, user=user, project=project, module=module)]
 
     if source == "jsonl":
         return _jsonl(), "jsonl files"
