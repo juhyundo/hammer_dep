@@ -735,6 +735,21 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             if _mods.get('redo'):
                 cmd += ["--force"]
 
+            # Sub-step flow control from the trigger form. The flags attach only
+            # to the chosen stage's tasks (default syn) and never to bridge
+            # actions, so a from_step meant for syn can't break par or syn-to-par.
+            _steps_stage = str(_mods.get('steps_stage') or 'syn')
+            _is_stage_task = ("-to-" not in action_clean
+                              and not action_clean.startswith("hier-")
+                              and (action_clean == _steps_stage
+                                   or (action_clean.startswith(_steps_stage + "-")
+                                       and not action_clean.startswith(_steps_stage + "-par"))))
+            if _is_stage_task:
+                for _flag in ("from_step", "to_step", "only_step"):
+                    _val = str(_mods.get(_flag) or "").strip()
+                    if _val:
+                        cmd += ["--" + _flag, _val]
+
             cmd += ["--obj_dir", obj_dir, action_clean]
 
             print(f"Executing Process Command: {{' '.join(cmd)}}")
@@ -1029,6 +1044,14 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         'tools': Param(default=DEFAULT_TOOLS, type='string', enum=TOOLS_CHOICES, title='Tools config'),
         'local': Param(default=False, type='boolean', title='Local (skip DB cache pull; run the tool locally)'),
         'redo': Param(default=False, type='boolean', title='Redo (ignore dependency checks for this run)'),
+        'from_step': Param(default='', type='string', title='From step',
+                           description='Start the selected stage from this sub-step, loading its pre_<step> checkpoint from the rundir. Leave empty for automatic resume.'),
+        'to_step': Param(default='', type='string', title='To step',
+                         description='Stop the selected stage after this sub-step (its checkpoint stays resumable).'),
+        'only_step': Param(default='', type='string', title='Only step',
+                           description='Run exactly this one sub-step of the selected stage.'),
+        'steps_stage': Param(default='syn', type='string', enum=['syn', 'par'], title='Step flags apply to',
+                             description='Which stage the from/to/only step fields target.'),
     }},
     render_template_as_native_obj=True
 )

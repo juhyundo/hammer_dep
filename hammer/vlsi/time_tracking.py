@@ -358,10 +358,12 @@ def read_run_cache_summary(run_id: str) -> str:
     cache_saved = 0.0       # HIT + SKIP_RESTORED  (wall-clock)
     depsh_saved = 0.0       # SKIP_LOCAL, make would rerun     (wall-clock)
     deplegacy_saved = 0.0   # SKIP_LOCAL, make would skip too  (wall-clock)
+    resume_saved = 0.0      # RESUME, skipped completed steps  (wall-clock)
     total_ran = 0.0         # MISS_STORE           (wall-clock)
     cache_saved_cpu = 0.0   # HIT + SKIP_RESTORED  (CPU)
     depsh_saved_cpu = 0.0
     deplegacy_saved_cpu = 0.0
+    resume_saved_cpu = 0.0
     total_ran_cpu = 0.0     # MISS_STORE           (CPU)
 
     def _wc(s: Optional[float]) -> str:
@@ -425,6 +427,14 @@ def read_run_cache_summary(run_id: str) -> str:
             cache_saved += saved
             if saved_cpu is not None:
                 cache_saved_cpu += saved_cpu
+        elif outcome == "RESUME" and saved is not None:
+            attribution = "resume"
+            wall_col = _wc(saved)
+            cpu_col = _wc(saved_cpu)
+            detail = "resumed from checkpoint; skipped completed steps"
+            resume_saved += saved
+            if saved_cpu is not None:
+                resume_saved_cpu += saved_cpu
         elif outcome == "MISS_STORE" and tool is not None:
             attribution = "—"
             wall_col = _wc(tool)
@@ -448,8 +458,8 @@ def read_run_cache_summary(run_id: str) -> str:
             f"{wall_col:<10}  {cpu_col:<10}  {detail}"
         )
     lines.append("-" * len(header))
-    sledge_saved = cache_saved + depsh_saved
-    sledge_saved_cpu = cache_saved_cpu + depsh_saved_cpu
+    sledge_saved = cache_saved + depsh_saved + resume_saved
+    sledge_saved_cpu = cache_saved_cpu + depsh_saved_cpu + resume_saved_cpu
     total_saved = sledge_saved + deplegacy_saved
     total_saved_cpu = sledge_saved_cpu + deplegacy_saved_cpu
 
@@ -461,6 +471,8 @@ def read_run_cache_summary(run_id: str) -> str:
 
     lines.append(f"  Saved by cache:                     {_pair(cache_saved, cache_saved_cpu)}")
     lines.append(f"  Saved by dep-check (vs make rerun): {_pair(depsh_saved, depsh_saved_cpu)}")
+    if resume_saved or resume_saved_cpu:
+        lines.append(f"  Saved by substep resume:            {_pair(resume_saved, resume_saved_cpu)}")
     lines.append(f"  SledgeHammer time saved:            {_pair(sledge_saved, sledge_saved_cpu)}")
     lines.append(f"  Legacy-equivalent skips:            {_pair(deplegacy_saved, deplegacy_saved_cpu)}")
     lines.append(f"  Total skipped work:                 {_pair(total_saved, total_saved_cpu)}")
@@ -517,7 +529,12 @@ def _attribute_event(ev: Dict[str, Any]) -> Dict[str, Any]:
     dep_kind = "dep-sh" if ev.get("make_would_rerun") is True else "dep-legacy"
     res = {"attribution": "none", "wall_saved": 0.0, "cpu_saved": 0.0,
            "wall_ran": 0.0, "cpu_ran": 0.0, "quantified": False}
-    if outcome in ("HIT", "SKIP_RESTORED") and saved is not None:
+    if outcome == "RESUME" and saved is not None:
+        # a failed/paused run picked up from its last confirmed checkpoint
+        # instead of starting over; saved = measured time of the skipped steps
+        res.update(attribution="resume", wall_saved=float(saved),
+                   cpu_saved=float(saved_cpu or 0.0), quantified=True)
+    elif outcome in ("HIT", "SKIP_RESTORED") and saved is not None:
         res.update(attribution="cache", wall_saved=float(saved),
                    cpu_saved=float(saved_cpu or 0.0), quantified=True)
     elif outcome == "SKIP_LOCAL" and saved is not None:
@@ -585,6 +602,7 @@ def _empty_bucket() -> Dict[str, Any]:
             "unquantified": 0, "cache_wall": 0.0, "cache_cpu": 0.0,
             "depsh_wall": 0.0, "depsh_cpu": 0.0,
             "deplegacy_wall": 0.0, "deplegacy_cpu": 0.0,
+            "resume_wall": 0.0, "resume_cpu": 0.0,
             "ran_wall": 0.0, "ran_cpu": 0.0}
 
 
@@ -609,6 +627,9 @@ def _accumulate(bucket: Dict[str, Any], ev: Dict[str, Any]) -> None:
     elif a["attribution"] == "dep-legacy":
         bucket["deplegacy_wall"] += a["wall_saved"]
         bucket["deplegacy_cpu"] += a["cpu_saved"]
+    elif a["attribution"] == "resume":
+        bucket["resume_wall"] += a["wall_saved"]
+        bucket["resume_cpu"] += a["cpu_saved"]
     elif a["attribution"] == "ran":
         bucket["ran_wall"] += a["wall_ran"]
         bucket["ran_cpu"] += a["cpu_ran"]
@@ -652,8 +673,8 @@ def format_savings_report(events: List[Dict[str, Any]],
     if t["events"] == 0:
         return "(no cache events found)"
 
-    sledge_wall = t["cache_wall"] + t["depsh_wall"]
-    sledge_cpu = t["cache_cpu"] + t["depsh_cpu"]
+    sledge_wall = t["cache_wall"] + t["depsh_wall"] + t["resume_wall"]
+    sledge_cpu = t["cache_cpu"] + t["depsh_cpu"] + t["resume_cpu"]
     total_saved_wall = sledge_wall + t["deplegacy_wall"]
     total_saved_cpu = sledge_cpu + t["deplegacy_cpu"]
     decided = t["hits"] + t["misses"]
@@ -698,6 +719,8 @@ def format_savings_report(events: List[Dict[str, Any]],
 
     lines.append(f"  Saved by cache:                     {_pair(t['cache_wall'], t['cache_cpu'])}")
     lines.append(f"  Saved by dep-check (make would rerun): {_pair(t['depsh_wall'], t['depsh_cpu'])}")
+    if t["resume_wall"] or t["resume_cpu"]:
+        lines.append(f"  Saved by substep resume:            {_pair(t['resume_wall'], t['resume_cpu'])}")
     lines.append(f"  SLEDGEHAMMER TIME SAVED:            {_pair(sledge_wall, sledge_cpu)}")
     lines.append(f"  Legacy-equivalent skips (no credit): {_pair(t['deplegacy_wall'], t['deplegacy_cpu'])}")
     lines.append(f"  Total skipped work (incl. legacy):  {_pair(total_saved_wall, total_saved_cpu)}")

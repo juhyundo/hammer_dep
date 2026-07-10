@@ -164,6 +164,9 @@ class CLIDriver:
         self.timing_rundir = "" # type: Optional[str]
         self.pcb_rundir = ""  # type: Optional[str]
         self.force_rerun = False  # type: bool
+        # True when the user passed --from_step/--to_step/--only_step etc.;
+        # automatic substep resume defers to explicit flow control.
+        self._explicit_flow_control = False  # type: bool
         self.force_local = False  # type: bool  # --local: skip the DB cache pull
         self.synthesis_action: CLIActionConfigType
         # If a subclass has defined these, don't clobber them in init
@@ -625,6 +628,26 @@ class CLIDriver:
                     else:
                         post_load_func_checked(driver)
                     assert driver.syn_tool is not None, "load_synthesis_tool was unsuccessful"
+                    # Resume a previous partial run from its last tool-confirmed
+                    # checkpoint (write_db pre_<step>), unless the user gave
+                    # explicit flow control or --force.
+                    from hammer.vlsi import substep_resume
+                    resume_plan = None
+                    if not self.force_rerun and not self._explicit_flow_control:
+                        resume_plan = substep_resume.plan_resume(
+                            driver, "synthesis", driver.syn_tool.run_dir,
+                            "syn-output.json", "genus.log")
+                    if resume_plan is not None:
+                        driver.log.info(
+                            "Substep resume: previous syn attempt left confirmed "
+                            f"checkpoints; resuming from step '{resume_plan['step']}' "
+                            "instead of starting over.")
+                        driver.set_post_custom_syn_tool_hooks(HammerTool.make_start_stop_hooks(
+                            HammerStartStopStep(step=resume_plan["step"], inclusive=True),
+                            HammerStartStopStep(step=None, inclusive=False)))
+                    substep_resume.record_attempt(
+                        driver, "synthesis", driver.syn_tool.run_dir,
+                        resume_plan["step"] if resume_plan else None)
                     from hammer.vlsi.pd_cache import cache_or_run
                     success, output = cache_or_run(
                         driver, "synthesis",
@@ -642,6 +665,17 @@ class CLIDriver:
                         return None
                     post_run_func_checked(driver)
                     driver.database.commit_master_database()
+                    if resume_plan is not None:
+                        # the resumed run finished: credit the skipped steps'
+                        # measured time (from the previous attempt's checkpoints)
+                        try:
+                            from hammer.vlsi import time_tracking
+                            time_tracking.record_event(
+                                "synthesis", "RESUME",
+                                saved_seconds=resume_plan.get("saved_seconds"),
+                                module=time_tracking.stage_module(driver, "synthesis"))
+                        except Exception:
+                            pass
                     dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output.json"), output)
                     dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output-full.json"),
                                             self.get_full_config(driver, output))
@@ -1548,6 +1582,7 @@ class CLIDriver:
         stop_step = only_step or to_step or until_step or None
         stop_incl = (only_step or to_step) is not None
         if (start_step or stop_step) is not None:
+            self._explicit_flow_control = True
             driver.set_post_custom_syn_tool_hooks(HammerTool.make_start_stop_hooks(
                 HammerStartStopStep(step=start_step, inclusive=start_incl),
                 HammerStartStopStep(step=stop_step, inclusive=stop_incl)))
