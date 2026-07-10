@@ -35,6 +35,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,18 +44,26 @@ MARKER_NAME = ".substep_resume.json"
 ENABLE_ENV_VAR = "HAMMER_SUBSTEP_RESUME"
 ENABLE_SETTING_KEY = "vlsi.substep_resume.enabled"
 
-# Tool-confirmed checkpoint write, per tool log. Genus example:
-#   Finished exporting design database to file 'pre_syn_map' for 'riscv_top' ...
+# Tool-confirmed checkpoint write, per tool log.
+#   genus prints an explicit completion line per export.
+#   innovus prints when a write STARTS; completion is inferred (see
+#   confirmed_checkpoints): a later write starting means the earlier one
+#   finished, and the newest write is trusted only if the `latest` symlink
+#   (repointed by the script right after write_db returns) points at it.
 _CONFIRM_RE = {
     "genus.log": re.compile(r"Finished exporting design database to file 'pre_([A-Za-z0-9_]+)'"),
+    "innovus.log": re.compile(r"Writing Binary DB to pre_([A-Za-z0-9_]+)/"),
 }
+_INFER_COMPLETION = {"innovus.log"}
 
-# Latest step a resume may start from, per tool. Genus's fill_outputs requires
-# write_regs and write_outputs to have run in the current invocation, so a
-# resume that starts after write_regs would finish the tool but fail hammer's
-# bookkeeping. The steps from write_regs on cost seconds, so the clamp is cheap.
+# Latest step a resume may start from, per tool. Both genus and innovus
+# fill_outputs require write_regs and the write steps after it to have run in
+# the current invocation (ran_write_regs / ran_write_design / ran_write_ilm),
+# so a later resume would finish the tool but fail hammer's bookkeeping. The
+# steps from write_regs on are cheap.
 _RESUME_CEILING = {
     "genus.log": "write_regs",
+    "innovus.log": "write_regs",
 }
 
 
@@ -85,9 +94,27 @@ def _newest_log(rundir: str, log_name: str) -> Optional[str]:
     return max(cands, key=os.path.getmtime)
 
 
+def _checkpoint_present(rundir: str, step: str) -> bool:
+    """A checkpoint exists with content: a non-empty file (genus writes a
+    single db file) or a non-empty directory (innovus writes a db dir)."""
+    p = os.path.join(rundir, "pre_" + step)
+    try:
+        if os.path.isdir(p):
+            return bool(os.listdir(p))
+        return os.path.getsize(p) > 0
+    except OSError:
+        return False
+
+
 def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]:
     """Step names whose pre_<step> checkpoint the tool confirmed writing, in
-    log order, filtered to files still present and non-empty."""
+    log order, filtered to checkpoints still present with content.
+
+    For tools that only announce the START of a db write (innovus), completion
+    is inferred: every write except the last is complete because a later write
+    began after it; the last one counts only if the `latest` symlink points at
+    it, since the generated script repoints `latest` immediately after
+    write_db returns."""
     pat = _CONFIRM_RE.get(log_name)
     log = _newest_log(rundir, log_name)
     if pat is None or log is None:
@@ -101,15 +128,15 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
                     names.append(m.group(1))
     except OSError:
         return []
-    out = []
-    for n in names:
-        p = os.path.join(rundir, "pre_" + n)
+    if names and log_name in _INFER_COMPLETION:
+        target = None
         try:
-            if os.path.getsize(p) > 0:
-                out.append(n)
+            target = os.path.basename(os.readlink(os.path.join(rundir, "latest")))
         except OSError:
-            continue
-    return out
+            pass
+        if target != "pre_" + names[-1]:
+            names = names[:-1]
+    return [n for n in names if _checkpoint_present(rundir, n)]
 
 
 def _marker_path(rundir: str) -> str:
@@ -137,11 +164,15 @@ def write_marker(rundir: str, data: Dict[str, Any]) -> None:
 def clean_checkpoints(rundir: str) -> None:
     """Remove stale checkpoint dbs and the marker (inputs changed)."""
     for p in glob.glob(os.path.join(rundir, "pre_*")):
-        if re.fullmatch(r"pre_[A-Za-z0-9_]+", os.path.basename(p)) and os.path.isfile(p):
-            try:
+        if not re.fullmatch(r"pre_[A-Za-z0-9_]+", os.path.basename(p)):
+            continue
+        try:
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
                 os.unlink(p)
-            except OSError:
-                pass
+        except OSError:
+            pass
     try:
         os.unlink(_marker_path(rundir))
     except OSError:

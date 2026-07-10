@@ -722,6 +722,26 @@ class CLIDriver:
                     else:
                         post_load_func_checked(driver)
                     assert driver.par_tool is not None, "load_par_tool was unsuccessful"
+                    # Resume a previous partial par run from its last completed
+                    # checkpoint (write_db pre_<step> directory), unless the user
+                    # gave explicit flow control or --force.
+                    from hammer.vlsi import substep_resume
+                    par_resume_plan = None
+                    if not self.force_rerun and not self._explicit_flow_control:
+                        par_resume_plan = substep_resume.plan_resume(
+                            driver, "par", driver.par_tool.run_dir,
+                            "par-output.json", "innovus.log")
+                    if par_resume_plan is not None:
+                        driver.log.info(
+                            "Substep resume: previous par attempt left completed "
+                            f"checkpoints; resuming from step '{par_resume_plan['step']}' "
+                            "instead of starting over.")
+                        driver.set_post_custom_par_tool_hooks(HammerTool.make_start_stop_hooks(
+                            HammerStartStopStep(step=par_resume_plan["step"], inclusive=True),
+                            HammerStartStopStep(step=None, inclusive=False)))
+                    substep_resume.record_attempt(
+                        driver, "par", driver.par_tool.run_dir,
+                        par_resume_plan["step"] if par_resume_plan else None)
                     from hammer.vlsi.pd_cache import cache_or_run
                     success, output = cache_or_run(
                         driver, "par",
@@ -739,6 +759,15 @@ class CLIDriver:
                         return None
                     post_run_func_checked(driver)
                     driver.database.commit_master_database()
+                    if par_resume_plan is not None:
+                        try:
+                            from hammer.vlsi import time_tracking
+                            time_tracking.record_event(
+                                "par", "RESUME",
+                                saved_seconds=par_resume_plan.get("saved_seconds"),
+                                module=time_tracking.stage_module(driver, "par"))
+                        except Exception:
+                            pass
                     dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output.json"), output)
                     dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output-full.json"),
                                             self.get_full_config(driver, output))
