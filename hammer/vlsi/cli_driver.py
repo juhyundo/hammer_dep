@@ -166,7 +166,8 @@ class CLIDriver:
         self.force_rerun = False  # type: bool
         # True when the user passed --from_step/--to_step/--only_step etc.;
         # automatic substep resume defers to explicit flow control.
-        self._explicit_flow_control = False  # type: bool
+        self._explicit_flow_control = False
+        self._explicit_start_step = None  # type: Optional[str]  # type: bool
         self.force_local = False  # type: bool  # --local: skip the DB cache pull
         self.synthesis_action: CLIActionConfigType
         # If a subclass has defined these, don't clobber them in init
@@ -621,7 +622,7 @@ class CLIDriver:
 
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
-                if self.force_rerun or driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
+                if self.force_rerun or self._explicit_flow_control or driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
                         driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -632,6 +633,30 @@ class CLIDriver:
                     # checkpoint (write_db pre_<step>), unless the user gave
                     # explicit flow control or --force.
                     from hammer.vlsi import substep_resume
+                    from hammer.vlsi import time_tracking
+                    # capture now: hierarchical post_run restores the parent
+                    # config, so reading the module after the run is wrong
+                    resume_module = time_tracking.stage_module(driver, "synthesis")
+                    # steps[0] is static; the first_step property is only set
+                    # during the run and raises before it
+                    try:
+                        _first = driver.syn_tool.steps[0].name
+                    except Exception:
+                        _first = None
+                    if self._explicit_start_step is not None and \
+                            self._explicit_start_step != _first:
+                        ok, detail = substep_resume.ensure_step_checkpoint(
+                            driver, "synthesis", driver.syn_tool.run_dir,
+                            self._explicit_start_step, "genus.log")
+                        if not ok:
+                            driver.log.error(
+                                f"Cannot start synthesis from step "
+                                f"'{self._explicit_start_step}': {detail}")
+                            return None
+                        if detail == "database":
+                            driver.log.info(
+                                f"Checkpoint pre_{self._explicit_start_step} fetched "
+                                "from the database for the requested start step.")
                     resume_plan = None
                     if not self.force_rerun and not self._explicit_flow_control:
                         resume_plan = substep_resume.plan_resume(
@@ -662,9 +687,45 @@ class CLIDriver:
                     if not success:
                         driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("Synthesis tool did not succeed")
+                        substep_resume.push_checkpoint_db(
+                            driver, "synthesis", driver.syn_tool.run_dir,
+                            "genus.log", module=resume_module)
+                        if self._explicit_flow_control:
+                            driver.log.info(
+                                "Flow control stopped this run before final outputs; "
+                                "checkpoints up to the stop step are saved. Rerun "
+                                "without step flags to auto-resume from there.")
+                        return None
+                    # A run deliberately stopped early by flow control has no
+                    # final outputs and must not commit as a completed stage
+                    # (genus's fill_outputs tolerates the missing files). Fail
+                    # it cleanly so the next plain run auto-resumes.
+                    if self._explicit_flow_control and not getattr(driver.syn_tool, "ran_write_outputs", True):
+                        driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
+                        substep_resume.push_checkpoint_db(
+                            driver, "synthesis", driver.syn_tool.run_dir,
+                            "genus.log", module=resume_module)
+                        driver.log.info(
+                            "Flow control stopped synthesis before write_outputs; "
+                            "not committing the partial run. Checkpoints up to the "
+                            "stop step are saved. Rerun without step flags to "
+                            "auto-resume from there.")
+                        return None
+                    # The tool exited cleanly, but innovus/genus tolerate many
+                    # real failures (e.g. unlegalized instances) as continuable
+                    # ERROR lines. Scan the log and apply the fail_on policy.
+                    from hammer.vlsi import error_scan
+                    _scan = error_scan.scan_and_report(
+                        driver, "synthesis", driver.syn_tool.run_dir, "genus.log")
+                    if _scan and _scan.get("fatal"):
+                        driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
+                        substep_resume.push_checkpoint_db(
+                            driver, "synthesis", driver.syn_tool.run_dir,
+                            "genus.log", module=resume_module)
                         return None
                     post_run_func_checked(driver)
                     driver.database.commit_master_database()
+                    substep_resume.clear_checkpoint_db(driver, "synthesis")
                     if resume_plan is not None:
                         # the resumed run finished: credit the skipped steps'
                         # measured time (from the previous attempt's checkpoints)
@@ -673,7 +734,7 @@ class CLIDriver:
                             time_tracking.record_event(
                                 "synthesis", "RESUME",
                                 saved_seconds=resume_plan.get("saved_seconds"),
-                                module=time_tracking.stage_module(driver, "synthesis"))
+                                module=resume_module)
                         except Exception:
                             pass
                     dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "syn-output.json"), output)
@@ -715,7 +776,7 @@ class CLIDriver:
                                 )
                     return 0
             elif action_type == "par":
-                if self.force_rerun or driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
+                if self.force_rerun or self._explicit_flow_control or driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
                         driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -726,6 +787,28 @@ class CLIDriver:
                     # checkpoint (write_db pre_<step> directory), unless the user
                     # gave explicit flow control or --force.
                     from hammer.vlsi import substep_resume
+                    from hammer.vlsi import time_tracking
+                    par_resume_module = time_tracking.stage_module(driver, "par")
+                    # steps[0] is static; the first_step property is only set
+                    # during the run and raises before it
+                    try:
+                        _first = driver.par_tool.steps[0].name
+                    except Exception:
+                        _first = None
+                    if self._explicit_start_step is not None and \
+                            self._explicit_start_step != _first:
+                        ok, detail = substep_resume.ensure_step_checkpoint(
+                            driver, "par", driver.par_tool.run_dir,
+                            self._explicit_start_step, "innovus.log")
+                        if not ok:
+                            driver.log.error(
+                                f"Cannot start par from step "
+                                f"'{self._explicit_start_step}': {detail}")
+                            return None
+                        if detail == "database":
+                            driver.log.info(
+                                f"Checkpoint pre_{self._explicit_start_step} fetched "
+                                "from the database for the requested start step.")
                     par_resume_plan = None
                     if not self.force_rerun and not self._explicit_flow_control:
                         par_resume_plan = substep_resume.plan_resume(
@@ -756,16 +839,45 @@ class CLIDriver:
                     if not success:
                         driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("Place-and-route tool did not succeed")
+                        substep_resume.push_checkpoint_db(
+                            driver, "par", driver.par_tool.run_dir,
+                            "innovus.log", module=par_resume_module)
+                        if self._explicit_flow_control:
+                            driver.log.info(
+                                "Flow control stopped this run before final outputs; "
+                                "checkpoints up to the stop step are saved. Rerun "
+                                "without step flags to auto-resume from there.")
+                        return None
+                    if self._explicit_flow_control and not getattr(driver.par_tool, "ran_write_design", True):
+                        driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
+                        substep_resume.push_checkpoint_db(
+                            driver, "par", driver.par_tool.run_dir,
+                            "innovus.log", module=par_resume_module)
+                        driver.log.info(
+                            "Flow control stopped par before write_design; not "
+                            "committing the partial run. Checkpoints up to the stop "
+                            "step are saved. Rerun without step flags to auto-resume "
+                            "from there.")
+                        return None
+                    from hammer.vlsi import error_scan
+                    _scan = error_scan.scan_and_report(
+                        driver, "par", driver.par_tool.run_dir, "innovus.log")
+                    if _scan and _scan.get("fatal"):
+                        driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
+                        substep_resume.push_checkpoint_db(
+                            driver, "par", driver.par_tool.run_dir,
+                            "innovus.log", module=par_resume_module)
                         return None
                     post_run_func_checked(driver)
                     driver.database.commit_master_database()
+                    substep_resume.clear_checkpoint_db(driver, "par")
                     if par_resume_plan is not None:
                         try:
                             from hammer.vlsi import time_tracking
                             time_tracking.record_event(
                                 "par", "RESUME",
                                 saved_seconds=par_resume_plan.get("saved_seconds"),
-                                module=time_tracking.stage_module(driver, "par"))
+                                module=par_resume_module)
                         except Exception:
                             pass
                     dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output.json"), output)
@@ -1612,6 +1724,9 @@ class CLIDriver:
         stop_incl = (only_step or to_step) is not None
         if (start_step or stop_step) is not None:
             self._explicit_flow_control = True
+            # remember an inclusive start (from_step/only_step): the stage
+            # branches validate that its checkpoint actually exists
+            self._explicit_start_step = only_step or from_step
             driver.set_post_custom_syn_tool_hooks(HammerTool.make_start_stop_hooks(
                 HammerStartStopStep(step=start_step, inclusive=start_incl),
                 HammerStartStopStep(step=stop_step, inclusive=stop_incl)))
@@ -1971,4 +2086,9 @@ class CLIDriver:
                   file=sys.stderr)
             return 1
 
-        return self.run_main_parsed(vars(parser.parse_args(args)))
+        # Exit with the action's return code. Driver scripts call main() as
+        # their last statement and discard its return value, so without this a
+        # cleanly-failed stage (tool error handled python-side, partial run
+        # stopped by flow control, error-scan policy) exits 0 and looks
+        # successful to make and to Airflow tasks.
+        sys.exit(self.run_main_parsed(vars(parser.parse_args(args))))

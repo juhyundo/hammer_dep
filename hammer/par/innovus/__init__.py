@@ -776,9 +776,15 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         assert super().do_pre_steps(first_step)
         if first_step != self.first_step:
             if self.use_python:
+                # a python exception aborts the script and exits the tool
                 self.py_append(f"read_db('pre_{first_step.name}')")
             else:
-                self.verbose_append("read_db pre_{step}".format(step=first_step.name))
+                # guard the restore: on a bad checkpoint innovus drops to an
+                # interactive prompt instead of exiting, hanging a batch run
+                self.append(
+                    'if {{[catch {{read_db pre_{step}}} _resume_err]}} {{'
+                    'puts $_resume_err; '
+                    'puts {{ERROR: failed to load checkpoint pre_{step}}}; exit 2}}'.format(step=first_step.name))
         return True
 
     def do_between_steps(self, prev: HammerToolStep, next: HammerToolStep) -> bool:

@@ -40,6 +40,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import tarfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -115,6 +116,8 @@ FQ_NOTIFY_EMAIL = f"{SCHEMA_NAME}.{NOTIFY_EMAIL_TABLE}"
 # tapeout, since the JSONL files are ephemeral.
 CACHE_EVENT_TABLE = "pd_cache_events"
 FQ_CACHE_EVENT = f"{SCHEMA_NAME}.{CACHE_EVENT_TABLE}"
+CHECKPOINT_TABLE = "pd_checkpoints"
+FQ_CHECKPOINT = f"{SCHEMA_NAME}.{CHECKPOINT_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -488,6 +491,35 @@ CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_dag     ON {FQ_CACHE_EVENT} (
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_design  ON {FQ_CACHE_EVENT} (design);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_project ON {FQ_CACHE_EVENT} (project);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_ts      ON {FQ_CACHE_EVENT} (ts);
+
+-- Sub-step checkpoints of crashed or paused stages: the tool's own
+-- pre_<step> design database, tarballed/gzipped, so a rerun can resume on a
+-- different machine or a fresh checkout. Rows exist only while a stage is
+-- broken: pushed when a stage fails, replaced by newer attempts (one row per
+-- stage_key + step), and deleted when the stage later commits successfully.
+CREATE TABLE IF NOT EXISTS {FQ_CHECKPOINT} (
+    id               BIGSERIAL PRIMARY KEY,
+    stage_key        TEXT NOT NULL,
+    stage            TEXT NOT NULL,
+    step             TEXT NOT NULL,
+    data             BYTEA NOT NULL,
+    size_bytes       BIGINT NOT NULL,
+    -- innovus checkpoints are directories (stored as tar.gz); genus
+    -- checkpoints are single files (stored gzipped)
+    is_dir           BOOLEAN NOT NULL DEFAULT FALSE,
+    owner            TEXT NOT NULL DEFAULT current_user,
+    triggering_user  TEXT,
+    dag_id           TEXT,
+    dag_run_id       TEXT,
+    workspace        TEXT,
+    design           TEXT,
+    module           TEXT,
+    project          TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (stage_key, step)
+);
+CREATE INDEX IF NOT EXISTS idx_{CHECKPOINT_TABLE}_key    ON {FQ_CHECKPOINT} (stage_key);
+CREATE INDEX IF NOT EXISTS idx_{CHECKPOINT_TABLE}_design ON {FQ_CHECKPOINT} (design);
 
 -- Nobody gets access by default. The group role is the only way in.
 REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
@@ -1758,6 +1790,129 @@ def list_stage_blobs(
             return list(cur.fetchall())
     finally:
         conn.close()
+
+
+def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
+                     **provenance: Any) -> int:
+    """Upsert one sub-step checkpoint (file gzipped, directory tarred).
+
+    One row per (stage_key, step); a newer attempt replaces the old data.
+    Returns the stored size in bytes.
+    """
+    path = Path(path)
+    if path.is_dir():
+        data = tar_directory(path, arcname=path.name)
+        is_dir = True
+    else:
+        data = gzip.compress(path.read_bytes())
+        is_dir = False
+    cols = ("triggering_user", "dag_id", "dag_run_id", "workspace",
+            "design", "module", "project")
+    vals = [provenance.get(c) for c in cols]
+    with _connect() as conn:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {FQ_CHECKPOINT}
+                    (stage_key, stage, step, data, size_bytes, is_dir,
+                     {", ".join(cols)})
+                    VALUES (%s, %s, %s, %s, %s, %s, {", ".join(["%s"] * len(cols))})
+                    ON CONFLICT (stage_key, step) DO UPDATE SET
+                        data = EXCLUDED.data,
+                        size_bytes = EXCLUDED.size_bytes,
+                        is_dir = EXCLUDED.is_dir,
+                        stage = EXCLUDED.stage,
+                        created_at = NOW()""",
+                [stage_key, stage, step, psycopg2.Binary(data), len(data), is_dir] + vals)
+        conn.commit()
+    return len(data)
+
+
+def find_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = None,
+                     stage: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """Checkpoint metadata rows (no blob data), newest first."""
+    where, params = [], []  # type: List[str], List[Any]
+    for col, val in (("stage_key", stage_key), ("design", design), ("stage", stage)):
+        if val is not None:
+            where.append(f"{col} = %s")
+            params.append(val)
+    sql = (f"SELECT id, stage_key, stage, step, size_bytes, is_dir, owner, "
+           f"design, module, project, dag_id, created_at FROM {FQ_CHECKPOINT}")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    params.append(limit)
+    with _connect() as conn:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, row)) for row in cur.fetchall()]
+
+
+def fetch_checkpoint(stage_key: str, step: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The newest checkpoint row (with data) for a stage key, or the exact
+    step's row when ``step`` is given. None if absent."""
+    sql = (f"SELECT id, stage_key, stage, step, data, size_bytes, is_dir "
+           f"FROM {FQ_CHECKPOINT} WHERE stage_key = %s")
+    params: List[Any] = [stage_key]
+    if step is not None:
+        sql += " AND step = %s"
+        params.append(step)
+    sql += " ORDER BY created_at DESC LIMIT 1"
+    with _connect() as conn:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            if row is None:
+                return None
+            names = [d[0] for d in cur.description]
+            rec = dict(zip(names, row))
+            rec["data"] = bytes(rec["data"])
+            return rec
+
+
+def materialize_checkpoint(rec: Dict[str, Any], rundir: Path) -> Path:
+    """Write a fetched checkpoint back into a rundir as pre_<step>."""
+    rundir = Path(rundir)
+    rundir.mkdir(parents=True, exist_ok=True)
+    dest = rundir / f"pre_{rec['step']}"
+    if rec["is_dir"]:
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        untar_to_directory(rec["data"], rundir)
+    else:
+        dest.write_bytes(gzip.decompress(rec["data"]))
+    return dest
+
+
+def delete_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = None,
+                       ids: Optional[List[int]] = None,
+                       older_than_days: Optional[float] = None) -> int:
+    """Delete checkpoint rows by key, design, ids, or age. Returns row count."""
+    where, params = [], []  # type: List[str], List[Any]
+    if stage_key is not None:
+        where.append("stage_key = %s")
+        params.append(stage_key)
+    if design is not None:
+        where.append("design = %s")
+        params.append(design)
+    if ids:
+        where.append("id = ANY(%s)")
+        params.append(list(ids))
+    if older_than_days is not None:
+        where.append("created_at < NOW() - (%s || ' days')::interval")
+        params.append(str(older_than_days))
+    if not where:
+        raise ValueError("refusing to delete all checkpoints; pass a filter")
+    with _connect() as conn:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {FQ_CHECKPOINT} WHERE " + " AND ".join(where), params)
+            n = cur.rowcount
+        conn.commit()
+    return n
 
 
 def tar_directory(path: Path, arcname: Optional[str] = None) -> bytes:

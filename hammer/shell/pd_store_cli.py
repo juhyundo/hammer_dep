@@ -1049,6 +1049,40 @@ def _cmd_project_set(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_checkpoints(args: argparse.Namespace) -> int:
+    """List stored sub-step checkpoints (broken/paused stages only)."""
+    from hammer.vlsi import pd_store
+    rows = pd_store.find_checkpoints(stage_key=args.key, design=args.design,
+                                     stage=args.stage, limit=args.limit)
+    if not rows:
+        print("No checkpoints stored (they exist only while a stage is broken or paused).")
+        return 0
+    print(f"{'id':>5}  {'stage':<10} {'step':<24} {'size':>9}  {'design':<18} "
+          f"{'module':<14} {'owner':<12} created")
+    for r in rows:
+        size = f"{(r['size_bytes'] or 0) / 1e6:.1f}M"
+        print(f"{r['id']:>5}  {r['stage'] or '':<10} {r['step'] or '':<24} {size:>9}  "
+              f"{(r['design'] or '-'):<18} {(r['module'] or '-'):<14} "
+              f"{(r['owner'] or '-'):<12} {r['created_at']:%Y-%m-%d %H:%M}")
+        if args.keys:
+            print(f"       key={r['stage_key']}")
+    return 0
+
+
+def _cmd_checkpoints_clear(args: argparse.Namespace) -> int:
+    """Delete stored checkpoints by id, key, design, or age."""
+    from hammer.vlsi import pd_store
+    if not any([args.id, args.key, args.design, args.older_than_days]):
+        print("Pass --id/--key/--design/--older-than-days (no blanket wipe).")
+        return 1
+    n = pd_store.delete_checkpoints(
+        stage_key=args.key, design=args.design,
+        ids=[int(i) for i in args.id] if args.id else None,
+        older_than_days=args.older_than_days)
+    print(f"Deleted {n} checkpoint(s).")
+    return 0
+
+
 def _cmd_cache_status(args: argparse.Namespace) -> int:
     """Show whether the cache + time-saved ledger are on, and the ledger size."""
     import os
@@ -1538,6 +1572,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pset.add_argument("--before", help="Only rows at/before this time (epoch or YYYY-MM-DD).")
     p_pset.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
     p_pset.set_defaults(func=_cmd_project_set)
+
+    p_ckpt = sub.add_parser(
+        "checkpoints",
+        help="List sub-step checkpoints stored in the database (broken/paused stages).")
+    p_ckpt.add_argument("--key", help="Exact stage key.")
+    p_ckpt.add_argument("--design", help="Only this design.")
+    p_ckpt.add_argument("--stage", help="Only this stage (synthesis, par).")
+    p_ckpt.add_argument("--limit", type=int, default=50)
+    p_ckpt.add_argument("--keys", action="store_true", help="Also print stage keys.")
+    p_ckpt.set_defaults(func=_cmd_checkpoints)
+
+    p_ckclr = sub.add_parser(
+        "checkpoints-clear",
+        help="Delete stored sub-step checkpoints by --id/--key/--design/--older-than-days.")
+    p_ckclr.add_argument("--id", action="append", help="Checkpoint id (repeatable).")
+    p_ckclr.add_argument("--key", help="Exact stage key.")
+    p_ckclr.add_argument("--design", help="All checkpoints for this design.")
+    p_ckclr.add_argument("--older-than-days", type=float,
+                         help="Only checkpoints older than this many days.")
+    p_ckclr.set_defaults(func=_cmd_checkpoints_clear)
 
     p_cstat = sub.add_parser(
         "cache-status",

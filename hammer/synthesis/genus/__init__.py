@@ -100,9 +100,15 @@ class Genus(HammerSynthesisTool, CadenceTool):
 
     def do_pre_steps(self, first_step: HammerToolStep) -> bool:
         assert super().do_pre_steps(first_step)
-        # Reload from the last checkpoint if we're not starting over.
+        # Reload from the last checkpoint if we're not starting over. Guard the
+        # restore: on a bad/missing checkpoint genus drops to an interactive
+        # prompt instead of exiting, which would hang a batch run forever.
+        # Failing fast lets the resume ladder burn this checkpoint and retry.
         if first_step != self.first_step:
-            self.verbose_append("read_db pre_{step}".format(step=first_step.name))
+            self.append(
+                'if {{[catch {{read_db pre_{step}}} _resume_err]}} {{'
+                'puts $_resume_err; '
+                'puts {{ERROR: failed to load checkpoint pre_{step}}}; exit 2}}'.format(step=first_step.name))
         return True
 
     def do_between_steps(self, prev: HammerToolStep, next: HammerToolStep) -> bool:
@@ -113,6 +119,13 @@ class Genus(HammerSynthesisTool, CadenceTool):
 
     def do_post_steps(self) -> bool:
         assert super().do_post_steps()
+        # run_genus is itself the final step of this plugin, so flow control
+        # that stops earlier (--to_step / --until_step / --only_step) would
+        # otherwise emit a truncated script and never launch the tool. Launch
+        # it here in that case, so a deliberate pause still executes the
+        # selected steps and leaves their checkpoints for a later resume.
+        if not getattr(self, "_ran_run_genus", False):
+            return self.run_genus()
         return True
     @property
     def mapped_v_path(self) -> str:
@@ -482,6 +495,7 @@ set_db hinst:{inst} .preserve true
         return True
     
     def run_genus(self) -> bool:
+        self._ran_run_genus = True
         verbose_append = self.verbose_append
 
         """Close out the synthesis script and run Genus."""

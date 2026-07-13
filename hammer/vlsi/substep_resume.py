@@ -43,6 +43,8 @@ from typing import Any, Dict, List, Optional
 MARKER_NAME = ".substep_resume.json"
 ENABLE_ENV_VAR = "HAMMER_SUBSTEP_RESUME"
 ENABLE_SETTING_KEY = "vlsi.substep_resume.enabled"
+DB_ENABLE_ENV_VAR = "HAMMER_DB_CHECKPOINTS"
+DB_ENABLE_SETTING_KEY = "vlsi.substep_resume.db_checkpoints"
 
 # Tool-confirmed checkpoint write, per tool log.
 #   genus prints an explicit completion line per export.
@@ -114,29 +116,60 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
     is inferred: every write except the last is complete because a later write
     began after it; the last one counts only if the `latest` symlink points at
     it, since the generated script repoints `latest` immediately after
-    write_db returns."""
+    write_db returns.
+
+    Confirmations are collected across ALL log rotations, not just the newest:
+    a resume attempt that dies loading its checkpoint confirms nothing in its
+    own log, but the checkpoints proven by earlier attempts are still on disk
+    and still valid (a stage-key change deletes them, so presence plus the
+    marker key check is sufficient). The result is ordered by checkpoint
+    mtime, oldest first, which is completion order."""
     pat = _CONFIRM_RE.get(log_name)
-    log = _newest_log(rundir, log_name)
-    if pat is None or log is None:
+    if pat is None:
         return []
-    names: List[str] = []
+    cands = glob.glob(os.path.join(rundir, log_name + "*"))
+    cands = [c for c in cands
+             if re.fullmatch(re.escape(log_name) + r"\d*", os.path.basename(c))]
+    if not cands:
+        return []
+    target = None
     try:
-        with open(log, errors="ignore") as fh:
-            for line in fh:
-                m = pat.search(line)
-                if m and m.group(1) not in names:
-                    names.append(m.group(1))
+        target = os.path.basename(os.readlink(os.path.join(rundir, "latest")))
     except OSError:
-        return []
-    if names and log_name in _INFER_COMPLETION:
-        target = None
+        pass
+    def _log_mtime(path: str) -> float:
         try:
-            target = os.path.basename(os.readlink(os.path.join(rundir, "latest")))
+            return os.path.getmtime(path)
         except OSError:
-            pass
-        if target != "pre_" + names[-1]:
+            return 0.0
+    announced: List[str] = []  # first-seen announced order, oldest log first
+    for log in sorted(cands, key=_log_mtime):
+        names: List[str] = []
+        try:
+            with open(log, errors="ignore") as fh:
+                for line in fh:
+                    m = pat.search(line)
+                    if m and m.group(1) not in names:
+                        names.append(m.group(1))
+        except OSError:
+            continue
+        # the drop-the-last-announced rule applies per attempt (per log)
+        if names and log_name in _INFER_COMPLETION and target != "pre_" + names[-1]:
             names = names[:-1]
-    return [n for n in names if _checkpoint_present(rundir, n)]
+        for n in names:
+            if n not in announced:
+                announced.append(n)
+    present = [n for n in announced if _checkpoint_present(rundir, n)]
+
+    # completion order: checkpoint mtime, announced order as the tiebreak
+    # (synthetic same-second writes, coarse filesystems)
+    def _ck_key(n: str):
+        try:
+            mt = os.path.getmtime(os.path.join(rundir, "pre_" + n))
+        except OSError:
+            mt = 0.0
+        return (mt, announced.index(n))
+    return sorted(present, key=_ck_key)
 
 
 def _marker_path(rundir: str) -> str:
@@ -187,6 +220,164 @@ def _stage_key(driver: Any, stage_tag: str) -> Optional[str]:
         return None
 
 
+def _db_enabled(driver: Optional[Any] = None) -> bool:
+    env = os.environ.get(DB_ENABLE_ENV_VAR)
+    if env is not None:
+        return env.strip().lower() not in ("", "0", "false", "no", "off")
+    if driver is not None:
+        try:
+            val = driver.database.get_setting(DB_ENABLE_SETTING_KEY, nullvalue=None)
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.strip().lower() in ("1", "true", "yes", "on")
+        except Exception:
+            pass
+    return True
+
+
+def _provenance(driver: Any) -> dict:
+    project = os.environ.get("HAMMER_PD_PROJECT")
+    if not project:
+        try:
+            project = driver.database.get_setting("vlsi.pd_cache.project", nullvalue=None)
+        except Exception:
+            project = None
+    return {
+        "triggering_user": os.environ.get("HAMMER_AIRFLOW_TRIGGER_USER"),
+        "dag_id": os.environ.get("HAMMER_AIRFLOW_DAG_ID"),
+        "dag_run_id": os.environ.get("HAMMER_AIRFLOW_RUN_ID"),
+        "workspace": os.environ.get("HAMMER_WORKSPACE"),
+        "design": os.environ.get("HAMMER_AIRFLOW_DESIGN"),
+        "project": project,
+    }
+
+
+def _log_info(driver: Any, msg: str) -> None:
+    try:
+        driver.log.info(msg)
+    except Exception:
+        pass
+
+
+def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
+                       log_name: str = "genus.log",
+                       module: Optional[str] = None) -> Optional[str]:
+    """After a failed or paused run, upload the newest trusted checkpoint so
+    another machine or a fresh checkout can resume this stage. Never raises;
+    returns the pushed step name or None."""
+    try:
+        if not is_enabled(driver) or not _db_enabled(driver):
+            return None
+        key = _stage_key(driver, stage_tag)
+        if key is None:
+            return None
+        marker = read_marker(rundir)
+        if marker is None or marker.get("stage_key") != key:
+            return None
+        confirmed = confirmed_checkpoints(rundir, log_name)
+        # a checkpoint past the resume ceiling can never seed a resume
+        ceiling = _RESUME_CEILING.get(log_name)
+        if ceiling and ceiling in confirmed:
+            confirmed = confirmed[: confirmed.index(ceiling) + 1]
+        if not confirmed:
+            return None
+        step = confirmed[-1]
+        path = os.path.join(rundir, "pre_" + step)
+        from hammer.vlsi import pd_store
+        from pathlib import Path
+        size = pd_store.store_checkpoint(key, stage_tag, step, Path(path),
+                                         module=module, **_provenance(driver))
+        _log_info(driver, f"Pushed checkpoint pre_{step} ({size / 1e6:.1f} MB "
+                          "compressed) to the database for cross-machine resume.")
+        return step
+    except Exception:
+        return None
+
+
+def clear_checkpoint_db(driver: Any, stage_tag: str) -> int:
+    """Drop this stage's database checkpoints once it commits successfully.
+    Never raises; returns rows deleted."""
+    try:
+        if not _db_enabled(driver):
+            return 0
+        key = _stage_key(driver, stage_tag)
+        if key is None:
+            return 0
+        from hammer.vlsi import pd_store
+        n = pd_store.delete_checkpoints(stage_key=key)
+        if n:
+            _log_info(driver, f"Cleared {n} database checkpoint(s) for the completed stage.")
+        return n
+    except Exception:
+        return 0
+
+
+def _db_fallback_plan(driver: Any, stage_tag: str, rundir: str) -> Optional[Dict[str, Any]]:
+    """No usable local checkpoint: try the database. Downloads the newest
+    checkpoint stored for this exact stage key and materializes it into the
+    rundir. The row's existence is its trust: it was log-confirmed and
+    key-matched when pushed. Never raises."""
+    try:
+        if not _db_enabled(driver):
+            return None
+        key = _stage_key(driver, stage_tag)
+        if key is None:
+            return None
+        from hammer.vlsi import pd_store
+        rec = pd_store.fetch_checkpoint(key)
+        if rec is None:
+            return None
+        step = rec["step"]
+        # anti-loop: if the previous attempt already resumed from this very
+        # checkpoint and confirmed nothing new, don't fetch it again
+        marker = read_marker(rundir)
+        if marker is not None and marker.get("stage_key") == key:
+            if step in marker.get("burned", []) or step == marker.get("resumed_from"):
+                return None
+        from pathlib import Path
+        pd_store.materialize_checkpoint(rec, Path(rundir))
+        _log_info(driver, f"Fetched checkpoint pre_{step} "
+                          f"({rec['size_bytes'] / 1e6:.1f} MB) from the database.")
+        return {"step": step, "saved_seconds": None, "key": key, "source": "database"}
+    except Exception:
+        return None
+
+
+def ensure_step_checkpoint(driver: Any, stage_tag: str, rundir: str, step_name: str,
+                           log_name: str = "genus.log"):
+    """Validate a user-chosen start step: its pre_<step> checkpoint must exist
+    locally or be fetchable from the database. Returns (ok, detail); on
+    failure the detail lists what IS available."""
+    try:
+        if _checkpoint_present(rundir, step_name):
+            return True, "local"
+        key = _stage_key(driver, stage_tag)
+        if _db_enabled(driver) and key is not None:
+            from hammer.vlsi import pd_store
+            rec = pd_store.fetch_checkpoint(key, step=step_name)
+            if rec is not None:
+                from pathlib import Path
+                pd_store.materialize_checkpoint(rec, Path(rundir))
+                return True, "database"
+        local = sorted(os.path.basename(p)[len("pre_"):]
+                       for p in glob.glob(os.path.join(rundir, "pre_*"))
+                       if _checkpoint_present(rundir, os.path.basename(p)[len("pre_"):]))
+        indb = []
+        if _db_enabled(driver) and key is not None:
+            try:
+                from hammer.vlsi import pd_store
+                indb = [r["step"] for r in pd_store.find_checkpoints(stage_key=key)]
+            except Exception:
+                indb = []
+        return False, (f"no checkpoint exists for step '{step_name}'. "
+                       f"Available locally: {', '.join(local) or 'none'}. "
+                       f"Available in the database for these inputs: "
+                       f"{', '.join(indb) or 'none'}.")
+    except Exception as exc:
+        return False, f"checkpoint lookup failed: {exc}"
+
+
 def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
                 log_name: str = "genus.log") -> Optional[Dict[str, Any]]:
     """Decide whether the coming run can resume from a checkpoint.
@@ -198,18 +389,31 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
     try:
         if not is_enabled(driver):
             return None
-        if os.path.exists(os.path.join(rundir, output_filename)):
-            return None  # previous run completed; dep-check/cache own this case
         confirmed = confirmed_checkpoints(rundir, log_name)
         if not confirmed:
-            return None
+            return _db_fallback_plan(driver, stage_tag, rundir)
+        # A present output json only means "completed" if it is newer than the
+        # newest confirmed checkpoint. An older one is a leftover from an
+        # earlier successful run that a later (killed) attempt superseded --
+        # common when re-running a stage in a long-lived build dir.
+        out_path = os.path.join(rundir, output_filename)
+        if os.path.exists(out_path):
+            try:
+                newest_ck = max(os.path.getmtime(os.path.join(rundir, "pre_" + c))
+                                for c in confirmed)
+                if os.path.getmtime(out_path) > newest_ck:
+                    return None  # genuinely completed; dep-check/cache own this
+            except OSError:
+                return None
         key = _stage_key(driver, stage_tag)
         marker = read_marker(rundir)
         if key is None or marker is None or marker.get("stage_key") != key:
             # checkpoints came from different inputs (or we can't prove
-            # otherwise): they are worthless and could mislead a later run
+            # otherwise): they are worthless and could mislead a later run.
+            # The database may still hold one pushed for the CURRENT inputs
+            # (e.g. by another machine), so check it before going scratch.
             clean_checkpoints(rundir)
-            return None
+            return _db_fallback_plan(driver, stage_tag, rundir)
         burned = list(marker.get("burned", []))
         # a resume that produced no new confirmed checkpoint made no progress:
         # burn that rung so we step down the ladder instead of looping
@@ -226,7 +430,7 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
             candidates = [c for c in candidates if c in allowed]
         if not candidates:
             clean_checkpoints(rundir)
-            return None
+            return _db_fallback_plan(driver, stage_tag, rundir)
         step = candidates[-1]
         # measured time of the completed steps, from checkpoint mtimes: the
         # span from the first confirmed boundary to the resume point. This is
