@@ -299,6 +299,30 @@ studio time-saved --dag RocketConfig --group-by run  # per run within a project
 studio time-saved --user lawrence --since 2026-06-01  # one person, one window
 ```
 
+## The paper's CSV (turnaround-time breakdown)
+
+`--csv` writes the TAT table directly: one row per group plus TOTAL, with
+eight numeric columns covering the three savings categories in wall-clock
+and compute (CPU) seconds:
+
+```bash
+studio time-saved -g project --csv tat.csv     # one row per tapeout project
+studio time-saved --project ee290 --csv -      # single project, to stdout
+```
+
+```
+project,dep_management_wall_s,dep_management_cpu_s,caching_wall_s,caching_cpu_s,checkpointing_wall_s,checkpointing_cpu_s,total_wall_saved_s,total_cpu_saved_s
+```
+
+The mapping is the same attribution the report uses: dep management counts
+only skips legacy make would have rerun (make_would_rerun=True; dep-legacy
+skips get no credit), caching counts blob restores, checkpointing counts
+sub-step RESUME events. Totals are the sum of the three, i.e. SLEDGEHAMMER
+TIME SAVED. Checkpointing compute is a floor: resume savings are measured
+from checkpoint timestamps (wall-clock only), so unknown CPU counts as zero
+rather than an estimate. All the usual filters compose with `--csv`
+(`--project`, `--since`/`--until`, `--stage`, `--cache-only`, ...).
+
 ## Resetting
 
 ```bash

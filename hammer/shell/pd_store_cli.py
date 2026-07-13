@@ -987,6 +987,15 @@ def _cmd_time_saved(args: argparse.Namespace) -> int:
     if args.cache_only:
         events = time_tracking.exclude_depcheck_skips(events)
         source = f"{source}, cache-only"
+    if args.csv:
+        csv_text = time_tracking.savings_csv(events, group_by=args.group_by)
+        if args.csv == "-":
+            print(csv_text, end="")
+        else:
+            with open(args.csv, "w") as f:
+                f.write(csv_text)
+            print(f"Wrote {args.csv} ({len(csv_text.splitlines()) - 1} data row(s)).")
+        return 0
     print(time_tracking.format_savings_report(events, group_by=args.group_by, source=source))
     return 0
 
@@ -1622,6 +1631,9 @@ def _build_parser() -> argparse.ArgumentParser:
                               "skips, which a legacy make flow may also have skipped).")
     p_saved.add_argument("--events-dir", help="Override JSONL dir (default $AIRFLOW_HOME/cache_events).")
     p_saved.add_argument("--limit", type=int, default=None, help="Max DB rows to read.")
+    p_saved.add_argument("--csv", metavar="PATH",
+                         help="Write the 8-column TAT breakdown (dep management / caching / "
+                              "checkpointing, wall + compute, plus totals) as CSV. '-' for stdout.")
     p_saved.set_defaults(func=_cmd_time_saved)
 
     p_pset = sub.add_parser(

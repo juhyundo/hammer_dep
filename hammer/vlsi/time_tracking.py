@@ -664,6 +664,46 @@ def aggregate_savings(events: List[Dict[str, Any]],
             "first_ts": first_ts, "last_ts": last_ts}
 
 
+def savings_csv(events: List[Dict[str, Any]], group_by: str = "project") -> str:
+    """The paper's turnaround-time table as CSV: one row per group plus TOTAL.
+
+    Eight numeric columns, wall-clock and compute (CPU) seconds for each of
+    the three savings categories and their sums:
+
+      dep management  - SKIP_LOCAL events where legacy make's mtime rule
+                        would have rerun the stage (make_would_rerun=True)
+      caching         - HIT / SKIP_RESTORED blob restores
+      checkpointing   - RESUME events (sub-step resume)
+
+    The totals match the report's SLEDGEHAMMER TIME SAVED definition
+    (dep-legacy skips get no credit). Checkpointing CPU is a floor: resume
+    savings are measured from checkpoint timestamps, which give wall-clock
+    only, so unknown CPU counts as zero rather than an estimate.
+    """
+    agg = aggregate_savings(events, group_by=group_by)
+    label = group_by if group_by != "none" else "scope"
+    cols = ["dep_management_wall_s", "dep_management_cpu_s",
+            "caching_wall_s", "caching_cpu_s",
+            "checkpointing_wall_s", "checkpointing_cpu_s",
+            "total_wall_saved_s", "total_cpu_saved_s"]
+    lines = [",".join([label] + cols)]
+
+    def _row(name: str, b: Dict[str, Any]) -> str:
+        dep_w, dep_c = b["depsh_wall"], b["depsh_cpu"]
+        cache_w, cache_c = b["cache_wall"], b["cache_cpu"]
+        ck_w, ck_c = b["resume_wall"], b["resume_cpu"]
+        vals = [dep_w, dep_c, cache_w, cache_c, ck_w, ck_c,
+                dep_w + cache_w + ck_w, dep_c + cache_c + ck_c]
+        safe = str(name).replace(",", ";")
+        return ",".join([safe] + [f"{v:.1f}" for v in vals])
+
+    if group_by != "none":
+        for name in sorted(agg["groups"]):
+            lines.append(_row(name, agg["groups"][name]))
+    lines.append(_row("TOTAL", agg["totals"]))
+    return "\n".join(lines) + "\n"
+
+
 def format_savings_report(events: List[Dict[str, Any]],
                           group_by: str = "stage",
                           source: str = "") -> str:
