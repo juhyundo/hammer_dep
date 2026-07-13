@@ -295,17 +295,31 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
         return None
 
 
-def clear_checkpoint_db(driver: Any, stage_tag: str) -> int:
+def clear_checkpoint_db(driver: Any, stage_tag: str,
+                        rundir: Optional[str] = None) -> int:
     """Drop this stage's database checkpoints once it commits successfully.
-    Never raises; returns rows deleted."""
+
+    Clears the current stage key, plus every key in this rundir's attempt
+    lineage (the marker's key_history): the usual fix-the-config-then-succeed
+    flow sweeps the rows its own broken predecessors pushed, while a teammate
+    debugging a different config of the same design keeps their row (their
+    keys are not in this rundir's lineage). Never raises; returns rows
+    deleted."""
     try:
         if not _db_enabled(driver):
             return 0
         key = _stage_key(driver, stage_tag)
         if key is None:
             return 0
+        keys = [key]
+        if rundir:
+            marker = read_marker(rundir)
+            if marker:
+                keys += [k for k in marker.get("key_history", []) if k not in keys]
         from hammer.vlsi import pd_store
-        n = pd_store.delete_checkpoints(stage_key=key)
+        n = 0
+        for k in keys:
+            n += pd_store.delete_checkpoints(stage_key=k)
         if n:
             _log_info(driver, f"Cleared {n} database checkpoint(s) for the completed stage.")
         return n
@@ -463,11 +477,19 @@ def record_attempt(driver: Any, stage_tag: str, rundir: str,
             return
         old = read_marker(rundir)
         burned = list(old.get("burned", [])) if old and old.get("stage_key") == key else []
+        # lineage of config keys this rundir has attempted: lets a later
+        # success clear the database rows its own earlier (differently
+        # configured) attempts pushed, without touching anyone else's
+        history = list(old.get("key_history", [])) if old else []
+        if old and old.get("stage_key") and old["stage_key"] != key \
+                and old["stage_key"] not in history:
+            history.append(old["stage_key"])
         write_marker(rundir, {
             "stage_key": key,
             "ts": time.time(),
             "resumed_from": resumed_from,
             "burned": burned,
+            "key_history": history[-10:],
         })
     except Exception:
         pass

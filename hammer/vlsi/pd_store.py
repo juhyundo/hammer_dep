@@ -1850,15 +1850,24 @@ def find_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = No
             return [dict(zip(names, row)) for row in cur.fetchall()]
 
 
-def fetch_checkpoint(stage_key: str, step: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """The newest checkpoint row (with data) for a stage key, or the exact
-    step's row when ``step`` is given. None if absent."""
-    sql = (f"SELECT id, stage_key, stage, step, data, size_bytes, is_dir "
-           f"FROM {FQ_CHECKPOINT} WHERE stage_key = %s")
-    params: List[Any] = [stage_key]
+def fetch_checkpoint(stage_key: Optional[str] = None, step: Optional[str] = None,
+                     ckpt_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """The newest checkpoint row (with data) for a stage key (optionally an
+    exact step), or the exact row by ``ckpt_id``. None if absent."""
+    if stage_key is None and ckpt_id is None:
+        raise ValueError("pass stage_key or ckpt_id")
+    where, params = [], []  # type: List[str], List[Any]
+    if stage_key is not None:
+        where.append("stage_key = %s")
+        params.append(stage_key)
     if step is not None:
-        sql += " AND step = %s"
+        where.append("step = %s")
         params.append(step)
+    if ckpt_id is not None:
+        where.append("id = %s")
+        params.append(ckpt_id)
+    sql = (f"SELECT id, stage_key, stage, step, data, size_bytes, is_dir "
+           f"FROM {FQ_CHECKPOINT} WHERE " + " AND ".join(where))
     sql += " ORDER BY created_at DESC LIMIT 1"
     with _connect() as conn:
         _ensure_schema(conn, quiet=True)
@@ -1888,9 +1897,11 @@ def materialize_checkpoint(rec: Dict[str, Any], rundir: Path) -> Path:
 
 
 def delete_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = None,
+                       stage: Optional[str] = None, module: Optional[str] = None,
                        ids: Optional[List[int]] = None,
                        older_than_days: Optional[float] = None) -> int:
-    """Delete checkpoint rows by key, design, ids, or age. Returns row count."""
+    """Delete checkpoint rows by key, design/stage/module, ids, or age.
+    Returns row count."""
     where, params = [], []  # type: List[str], List[Any]
     if stage_key is not None:
         where.append("stage_key = %s")
@@ -1898,6 +1909,12 @@ def delete_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = 
     if design is not None:
         where.append("design = %s")
         params.append(design)
+    if stage is not None:
+        where.append("stage = %s")
+        params.append(stage)
+    if module is not None:
+        where.append("module = %s")
+        params.append(module)
     if ids:
         where.append("id = ANY(%s)")
         params.append(list(ids))

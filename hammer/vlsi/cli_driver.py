@@ -725,7 +725,7 @@ class CLIDriver:
                         return None
                     post_run_func_checked(driver)
                     driver.database.commit_master_database()
-                    substep_resume.clear_checkpoint_db(driver, "synthesis")
+                    substep_resume.clear_checkpoint_db(driver, "synthesis", rundir=driver.syn_tool.run_dir)
                     if resume_plan is not None:
                         # the resumed run finished: credit the skipped steps'
                         # measured time (from the previous attempt's checkpoints)
@@ -870,7 +870,7 @@ class CLIDriver:
                         return None
                     post_run_func_checked(driver)
                     driver.database.commit_master_database()
-                    substep_resume.clear_checkpoint_db(driver, "par")
+                    substep_resume.clear_checkpoint_db(driver, "par", rundir=driver.par_tool.run_dir)
                     if par_resume_plan is not None:
                         try:
                             from hammer.vlsi import time_tracking

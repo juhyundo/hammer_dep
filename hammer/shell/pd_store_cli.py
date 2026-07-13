@@ -1069,6 +1069,72 @@ def _cmd_checkpoints(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_checkpoints_push(args: argparse.Namespace) -> int:
+    """Upload a local checkpoint from a rundir to the database by hand.
+
+    The automatic push fires on stage failure; this covers the rest: banking
+    partial progress before wiping a machine, or handing a paused run to a
+    teammate. The stage key comes from the rundir's resume marker, so the
+    rundir must have been run by resume-enabled hammer (or pass --key).
+    """
+    import os
+    from pathlib import Path
+    from hammer.vlsi import pd_store, substep_resume
+
+    stage_tag, log_name = {"syn": ("synthesis", "genus.log"),
+                           "par": ("par", "innovus.log")}[args.stage]
+    key = args.key
+    if key is None:
+        marker = substep_resume.read_marker(args.rundir)
+        key = marker.get("stage_key") if marker else None
+    if not key:
+        print("No resume marker in that rundir; pass --key explicitly.")
+        return 1
+    confirmed = substep_resume.confirmed_checkpoints(args.rundir, log_name)
+    ceiling = substep_resume._RESUME_CEILING.get(log_name)
+    if ceiling and ceiling in confirmed:
+        confirmed = confirmed[: confirmed.index(ceiling) + 1]
+    if not confirmed:
+        print("No tool-confirmed checkpoints in that rundir; nothing trustworthy to push.")
+        return 1
+    step = args.step or confirmed[-1]
+    if step not in confirmed:
+        print(f"Step '{step}' is not a tool-confirmed checkpoint here. "
+              f"Confirmed: {', '.join(confirmed)}.")
+        return 1
+    path = Path(args.rundir) / f"pre_{step}"
+    size = pd_store.store_checkpoint(
+        key, stage_tag, step, path,
+        design=args.design or os.environ.get("HAMMER_AIRFLOW_DESIGN"),
+        module=args.module, project=args.project,
+        triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGER_USER"),
+        workspace=os.environ.get("HAMMER_WORKSPACE"))
+    print(f"Pushed pre_{step} ({size / 1e6:.1f} MB compressed) for stage "
+          f"{stage_tag}. A rerun with matching inputs resumes from it; "
+          f"see it with: studio checkpoints")
+    return 0
+
+
+def _cmd_checkpoints_fetch(args: argparse.Namespace) -> int:
+    """Download one checkpoint by id into a rundir as pre_<step>.
+
+    No stage-key check: fetching by id is an explicit choice, like naming a
+    step with --from_step. Useful for continuing a teammate's failed run
+    after a config change, where the automatic key-matched fetch won't fire.
+    """
+    from pathlib import Path
+    from hammer.vlsi import pd_store
+    rec = pd_store.fetch_checkpoint(ckpt_id=args.id)
+    if rec is None:
+        print(f"No checkpoint with id {args.id}.")
+        return 1
+    dest = pd_store.materialize_checkpoint(rec, Path(args.dest))
+    print(f"Wrote {dest} ({rec['size_bytes'] / 1e6:.1f} MB compressed, "
+          f"stage {rec['stage']}, step {rec['step']}).")
+    print(f"Continue with: --from_step {rec['step']} (or the DAG From-step field).")
+    return 0
+
+
 def _cmd_checkpoints_clear(args: argparse.Namespace) -> int:
     """Delete stored checkpoints by id, key, design, or age."""
     from hammer.vlsi import pd_store
@@ -1582,6 +1648,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ckpt.add_argument("--limit", type=int, default=50)
     p_ckpt.add_argument("--keys", action="store_true", help="Also print stage keys.")
     p_ckpt.set_defaults(func=_cmd_checkpoints)
+
+    p_ckp = sub.add_parser(
+        "checkpoints-push",
+        help="Upload a local rundir checkpoint to the database by hand.")
+    p_ckp.add_argument("--rundir", required=True, help="syn-rundir / par-rundir path.")
+    p_ckp.add_argument("--stage", required=True, choices=["syn", "par"])
+    p_ckp.add_argument("--step", help="Which pre_<step> (default: newest confirmed).")
+    p_ckp.add_argument("--key", help="Stage key override if the rundir has no marker.")
+    p_ckp.add_argument("--design", help="Design tag (default: $HAMMER_AIRFLOW_DESIGN).")
+    p_ckp.add_argument("--module", help="Module tag for hierarchical flows.")
+    p_ckp.add_argument("--project", help="Project tag for the tapeout grouping.")
+    p_ckp.set_defaults(func=_cmd_checkpoints_push)
+
+    p_ckf = sub.add_parser(
+        "checkpoints-fetch",
+        help="Download one checkpoint by id into a rundir (no key check; explicit choice).")
+    p_ckf.add_argument("--id", type=int, required=True, help="Checkpoint id (see checkpoints).")
+    p_ckf.add_argument("--dest", required=True, help="Rundir to write pre_<step> into.")
+    p_ckf.set_defaults(func=_cmd_checkpoints_fetch)
 
     p_ckclr = sub.add_parser(
         "checkpoints-clear",
