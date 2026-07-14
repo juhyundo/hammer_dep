@@ -172,6 +172,41 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
     return sorted(present, key=_ck_key)
 
 
+def announced_order(rundir: str, log_name: str = "genus.log") -> List[str]:
+    """Step names in first-announced order across all log rotations.
+
+    Once any attempt announced a step's boundary, its position here reflects
+    true tool step order (a full run announces everything in order; partial
+    runs re-announce prefixes). Used for the resume ceiling, where mtime
+    order is wrong for mixed-generation rundirs: an old completed run's
+    pre_write_regs has an EARLIER mtime than a fresh attempt's pre_clock_tree
+    even though write_regs is a later step."""
+    pat = _CONFIRM_RE.get(log_name)
+    if pat is None:
+        return []
+    cands = glob.glob(os.path.join(rundir, log_name + "*"))
+    cands = [c for c in cands
+             if re.fullmatch(re.escape(log_name) + r"\d*", os.path.basename(c))]
+
+    def _log_mtime(path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+    announced: List[str] = []
+    for log in sorted(cands, key=_log_mtime):
+        try:
+            with open(log, errors="ignore") as fh:
+                for line in fh:
+                    m = pat.search(line)
+                    if m and m.group(1) not in announced:
+                        announced.append(m.group(1))
+        except OSError:
+            continue
+    return announced
+
+
+
 def _marker_path(rundir: str) -> str:
     return os.path.join(rundir, MARKER_NAME)
 
@@ -276,10 +311,13 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
         if marker is None or marker.get("stage_key") != key:
             return None
         confirmed = confirmed_checkpoints(rundir, log_name)
-        # a checkpoint past the resume ceiling can never seed a resume
+        # a checkpoint past the resume ceiling can never seed a resume;
+        # clamp by announced (step) order, not mtime position
         ceiling = _RESUME_CEILING.get(log_name)
-        if ceiling and ceiling in confirmed:
-            confirmed = confirmed[: confirmed.index(ceiling) + 1]
+        announced = announced_order(rundir, log_name)
+        if ceiling and ceiling in announced:
+            allowed = set(announced[: announced.index(ceiling) + 1])
+            confirmed = [c for c in confirmed if c in allowed]
         if not confirmed:
             return None
         step = confirmed[-1]
@@ -292,6 +330,9 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
                           "compressed) to the database for cross-machine resume.")
         return step
     except Exception:
+        if os.environ.get("HAMMER_CHECKPOINT_DEBUG"):
+            import traceback
+            traceback.print_exc()
         return None
 
 
@@ -324,6 +365,9 @@ def clear_checkpoint_db(driver: Any, stage_tag: str,
             _log_info(driver, f"Cleared {n} database checkpoint(s) for the completed stage.")
         return n
     except Exception:
+        if os.environ.get("HAMMER_CHECKPOINT_DEBUG"):
+            import traceback
+            traceback.print_exc()
         return 0
 
 
@@ -436,11 +480,14 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
             if last not in burned:
                 burned.append(last)
         candidates = [c for c in confirmed if c not in burned]
-        # The ceiling is positional in the confirmed order, so it holds even
-        # when the ceiling step itself has been burned off the ladder.
+        # The ceiling is positional in ANNOUNCED (step) order, which survives
+        # both a burned ceiling step and mixed-generation rundirs, where an
+        # old run's late-step checkpoint has an earlier mtime than a fresh
+        # attempt's early-step one.
         ceiling = _RESUME_CEILING.get(log_name)
-        if ceiling and ceiling in confirmed:
-            allowed = set(confirmed[: confirmed.index(ceiling) + 1])
+        announced = announced_order(rundir, log_name)
+        if ceiling and ceiling in announced:
+            allowed = set(announced[: announced.index(ceiling) + 1])
             candidates = [c for c in candidates if c in allowed]
         if not candidates:
             clean_checkpoints(rundir)

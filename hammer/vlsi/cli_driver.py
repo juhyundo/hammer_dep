@@ -658,6 +658,10 @@ class CLIDriver:
                                 f"Checkpoint pre_{self._explicit_start_step} fetched "
                                 "from the database for the requested start step.")
                     resume_plan = None
+                    if self.force_rerun:
+                        # force means recompute: stale checkpoints must not
+                        # seed a resume of the run after this one either
+                        substep_resume.clean_checkpoints(driver.syn_tool.run_dir)
                     if not self.force_rerun and not self._explicit_flow_control:
                         resume_plan = substep_resume.plan_resume(
                             driver, "synthesis", driver.syn_tool.run_dir,
@@ -674,8 +678,14 @@ class CLIDriver:
                         driver, "synthesis", driver.syn_tool.run_dir,
                         resume_plan["step"] if resume_plan else None)
                     from hammer.vlsi.pd_cache import cache_or_run
-                    success, output = cache_or_run(
-                        driver, "synthesis",
+                    # write-ahead intent: mark needs-rerun BEFORE the tool runs.
+                    # If this process dies uncatchably (SIGKILL, OOM, power),
+                    # the master otherwise still claims the last commit and the
+                    # next invocation would skip, stranding the recompute.
+                    driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
+                    try:
+                        success, output = cache_or_run(
+                            driver, "synthesis",
                         rundir=driver.syn_tool.run_dir,
                         output_filename="syn-output.json",
                         run_fn=lambda: driver.run_synthesis(
@@ -683,7 +693,22 @@ class CLIDriver:
                             driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
                             list(extra_hooks or [])),
                         force_local=self.force_local,
-                    )
+                        )
+                    except BaseException:
+                        # a killed or crashed tool unwinds as an exception and
+                        # never reaches the failure branch below. Mark the
+                        # stage needs-rerun (else a previously committed run
+                        # makes the next invocation skip, stranding the crash)
+                        # and push the newest checkpoint for cross-machine
+                        # resume before re-raising.
+                        try:
+                            driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
+                        except Exception:
+                            pass
+                        substep_resume.push_checkpoint_db(
+                            driver, "synthesis", driver.syn_tool.run_dir,
+                            "genus.log", module=resume_module)
+                        raise
                     if not success:
                         driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("Synthesis tool did not succeed")
@@ -810,6 +835,8 @@ class CLIDriver:
                                 f"Checkpoint pre_{self._explicit_start_step} fetched "
                                 "from the database for the requested start step.")
                     par_resume_plan = None
+                    if self.force_rerun:
+                        substep_resume.clean_checkpoints(driver.par_tool.run_dir)
                     if not self.force_rerun and not self._explicit_flow_control:
                         par_resume_plan = substep_resume.plan_resume(
                             driver, "par", driver.par_tool.run_dir,
@@ -826,8 +853,14 @@ class CLIDriver:
                         driver, "par", driver.par_tool.run_dir,
                         par_resume_plan["step"] if par_resume_plan else None)
                     from hammer.vlsi.pd_cache import cache_or_run
-                    success, output = cache_or_run(
-                        driver, "par",
+                    # write-ahead intent: mark needs-rerun BEFORE the tool runs.
+                    # If this process dies uncatchably (SIGKILL, OOM, power),
+                    # the master otherwise still claims the last commit and the
+                    # next invocation would skip, stranding the recompute.
+                    driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
+                    try:
+                        success, output = cache_or_run(
+                            driver, "par",
                         rundir=driver.par_tool.run_dir,
                         output_filename="par-output.json",
                         run_fn=lambda: driver.run_par(
@@ -835,7 +868,16 @@ class CLIDriver:
                             driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
                             list(extra_hooks or [])),
                         force_local=self.force_local,
-                    )
+                        )
+                    except BaseException:
+                        try:
+                            driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
+                        except Exception:
+                            pass
+                        substep_resume.push_checkpoint_db(
+                            driver, "par", driver.par_tool.run_dir,
+                            "innovus.log", module=par_resume_module)
+                        raise
                     if not success:
                         driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("Place-and-route tool did not succeed")

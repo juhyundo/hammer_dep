@@ -776,8 +776,17 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         assert super().do_pre_steps(first_step)
         if first_step != self.first_step:
             if self.use_python:
-                # a python exception aborts the script and exits the tool
-                self.py_append(f"read_db('pre_{first_step.name}')")
+                # don't trust the console to die on an exception: like TCL,
+                # an interactive prompt would hang a batch run forever. A
+                # hard exit makes a bad checkpoint cost one fast attempt.
+                self.py_append(
+                    f"try:\n"
+                    f"    read_db('pre_{first_step.name}')\n"
+                    f"except Exception as _resume_err:\n"
+                    f"    print('ERROR: failed to load checkpoint "
+                    f"pre_{first_step.name}: ' + str(_resume_err))\n"
+                    f"    import os\n"
+                    f"    os._exit(2)")
             else:
                 # guard the restore: on a bad checkpoint innovus drops to an
                 # interactive prompt instead of exiting, hanging a batch run

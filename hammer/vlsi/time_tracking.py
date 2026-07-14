@@ -664,6 +664,40 @@ def aggregate_savings(events: List[Dict[str, Any]],
             "first_ts": first_ts, "last_ts": last_ts}
 
 
+def time_saved_summary(**filters: Any) -> Dict[str, Any]:
+    """One call for the paper numbers: query the ledger and return the full
+    turnaround-time breakdown as a dict.
+
+    Accepts the same filters as `studio time-saved` (project=, design=, dag=,
+    stage=, module=, user=, since=, until=, source=, limit=). Returns:
+
+      dep_management_wall_s / dep_management_cpu_s
+      caching_wall_s        / caching_cpu_s
+      checkpointing_wall_s  / checkpointing_cpu_s
+      total_wall_saved_s    / total_cpu_saved_s
+      events, runs, dags, source
+
+    Same attribution as the report and the CSV: dep management counts only
+    skips legacy make would have rerun, checkpointing CPU is a floor (resume
+    savings are wall-clock measured).
+    """
+    events, source = collect_savings_events(**filters)
+    agg = aggregate_savings(events, group_by="none")
+    t = agg["totals"]
+    return {
+        "dep_management_wall_s": t["depsh_wall"],
+        "dep_management_cpu_s": t["depsh_cpu"],
+        "caching_wall_s": t["cache_wall"],
+        "caching_cpu_s": t["cache_cpu"],
+        "checkpointing_wall_s": t["resume_wall"],
+        "checkpointing_cpu_s": t["resume_cpu"],
+        "total_wall_saved_s": t["depsh_wall"] + t["cache_wall"] + t["resume_wall"],
+        "total_cpu_saved_s": t["depsh_cpu"] + t["cache_cpu"] + t["resume_cpu"],
+        "events": t["events"], "runs": agg["n_runs"], "dags": agg["n_dags"],
+        "source": source,
+    }
+
+
 def savings_csv(events: List[Dict[str, Any]], group_by: str = "project") -> str:
     """The paper's turnaround-time table as CSV: one row per group plus TOTAL.
 
