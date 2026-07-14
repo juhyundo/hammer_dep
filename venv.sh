@@ -41,6 +41,55 @@ _sledge_load_secrets() {
     return 0
 }
 
+# Foreign OpenSSL guard. Conda envs (chipyard's included) ship their own
+# libcrypto.so.3 that lacks symbols the system libldap needs (EVP_md2 on
+# RHEL 9.7), which kills psycopg2 with "undefined symbol: EVP_md2". A
+# chipyard/conda activation leaves its lib dir on LD_LIBRARY_PATH even after
+# conda deactivate, so strip conda-shaped entries here.
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    _sledge_clean=""
+    _sledge_dropped=""
+    _sledge_ifs=$IFS; IFS=:
+    for _p in $LD_LIBRARY_PATH; do
+        case "$_p" in
+            *[Cc]onda*|"${CONDA_PREFIX:-/nonexistent-conda}"/*)
+                _sledge_dropped="$_sledge_dropped $_p" ;;
+            *)
+                _sledge_clean="${_sledge_clean:+$_sledge_clean:}$_p" ;;
+        esac
+    done
+    IFS=$_sledge_ifs
+    if [ -n "$_sledge_dropped" ]; then
+        export LD_LIBRARY_PATH="$_sledge_clean"
+        echo "[sledge] removed conda entries from LD_LIBRARY_PATH (their libcrypto.so.3"
+        echo "         breaks the system libldap, which breaks psycopg2):$_sledge_dropped"
+    fi
+    unset _sledge_clean _sledge_dropped _sledge_ifs _p
+fi
+
+# Preflight: if psycopg2 still cannot load, explain why in one screen instead
+# of letting airflow die in a 30-line traceback ending at the real cause.
+if ! python3 -c "import psycopg2" >/dev/null 2>&1; then
+    _sledge_err=$(python3 -c "import psycopg2" 2>&1 | tail -1)
+    echo "[sledge] WARNING: psycopg2 cannot load; airflow and studio will fail." >&2
+    echo "         $_sledge_err" >&2
+    case "$_sledge_err" in
+        *"undefined symbol"*|*libcrypto*|*libssl*|*libldap*)
+            echo "         This is a library conflict: your environment loads a foreign" >&2
+            echo "         OpenSSL ahead of the system one. Likely causes:" >&2
+            [ -n "${CONDA_PREFIX:-}" ] &&                 echo "           - active conda env: $CONDA_PREFIX  (fix: conda deactivate, open a fresh shell)" >&2
+            _sledge_ifs=$IFS; IFS=:
+            for _p in ${LD_LIBRARY_PATH:-}; do
+                [ -e "$_p/libcrypto.so.3" ] &&                     echo "           - LD_LIBRARY_PATH entry shipping its own libcrypto.so.3: $_p" >&2
+            done
+            IFS=$_sledge_ifs; unset _sledge_ifs _p
+            echo "         Fix: rerun from a clean login shell (no conda / chipyard env" >&2
+            echo "         sourced), or remove the entries above from LD_LIBRARY_PATH." >&2
+            ;;
+    esac
+    unset _sledge_err
+fi
+
 # Load them up front when a person sources this. Skipped without a tty (scripts,
 # cron) so nothing blocks on a passphrase prompt; opt out with SLEDGE_NO_AUTO_SECRETS=1.
 # The launcher skips its own decrypt when the conn is already set, so one prompt.
