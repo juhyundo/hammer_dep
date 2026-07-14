@@ -481,9 +481,63 @@ def _refuse_if_whitelist_empty() -> None:
               f"owner ({owner or '?'}) always allowed.")
 
 
+def _promote_owner_to_admin() -> None:
+    """Make sure the OS user running this instance has the FAB Admin role.
+
+    LDAP registration hands out the plain User role, and the login-time
+    promotion in webserver_config.py depends on FAB internals; this is the
+    belt-and-braces version: plain SQL against this instance's own metadata
+    database, which the launching user owns. Idempotent, runs every start.
+    Before the owner's first login there is no user row yet; the login hook
+    covers that, and the next restart covers the login hook failing.
+    """
+    import getpass
+    try:
+        owner = getpass.getuser().strip().lower()
+    except Exception:
+        return
+    conn_str = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")
+    if not conn_str.startswith("postgresql"):
+        return
+    try:
+        import psycopg2
+        # sqlalchemy-style postgresql+psycopg2:// needs normalizing for psycopg2
+        conn = psycopg2.connect(conn_str.replace("postgresql+psycopg2://", "postgresql://"))
+    except Exception as e:
+        print(f"[roles] couldn't check the owner's role ({e}).")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM ab_user WHERE lower(username) = %s", (owner,))
+            u = cur.fetchone()
+            if not u:
+                print(f"[roles] no user row for {owner!r} yet; the first login creates "
+                      "it (and should self-promote; restart once if the Admin menu is missing).")
+                return
+            cur.execute("SELECT id FROM ab_role WHERE name = %s", ("Admin",))
+            r = cur.fetchone()
+            if not r:
+                print("[roles] no Admin role in this metadata DB; skipping.")
+                return
+            cur.execute("SELECT 1 FROM ab_user_role WHERE user_id = %s AND role_id = %s",
+                        (u[0], r[0]))
+            if cur.fetchone():
+                print(f"[roles] instance owner {owner!r} already has Admin.")
+            else:
+                cur.execute("INSERT INTO ab_user_role (user_id, role_id) VALUES (%s, %s)",
+                            (u[0], r[0]))
+                conn.commit()
+                print(f"[roles] promoted instance owner {owner!r} to Admin.")
+    except Exception as e:
+        print(f"[roles] owner promotion skipped ({e}).")
+    finally:
+        conn.close()
+
+
 def main():
     _refuse_if_scheduler_running()
     _refuse_if_whitelist_empty()
+    _promote_owner_to_admin()
     _start_pgadmin()
     HammerStandalone().run()
 
