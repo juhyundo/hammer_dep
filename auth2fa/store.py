@@ -250,9 +250,19 @@ class PostgresTotpStore(TotpStore):
     def _ensure_table(self) -> None:
         conn = self._connect()
         try:
-            with conn.cursor() as cur:
-                cur.execute(_PG_DDL)
-            conn.commit()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(_PG_DDL)
+                conn.commit()
+            except Exception:
+                # Only the schema owner can run this DDL. A teammate's
+                # webserver connects as their own role, so the CREATE/ALTER
+                # statements fail for them even though the table is already
+                # there and fully usable; that must not take down their login.
+                # Fall through if the table answers a probe, else re-raise.
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT 1 FROM {FQ_TOTP} LIMIT 1")
         finally:
             conn.close()
 
