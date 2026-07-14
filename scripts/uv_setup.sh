@@ -6,6 +6,20 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
+# Refuse to build under conda. psycopg2 and python-ldap compile from source
+# here, and an active conda env bakes its library path into the binaries as
+# an RPATH; the resulting psycopg2 then loads conda's OpenSSL forever after,
+# in every shell, and fails with "undefined symbol: EVP_md2". No environment
+# cleanup can fix an RPATH: the only cure is rebuilding, so don't let the
+# tainted build happen in the first place.
+if [ -n "${CONDA_PREFIX:-}" ] || [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
+    echo "ERROR: a conda environment is active (${CONDA_PREFIX:-$CONDA_DEFAULT_ENV})." >&2
+    echo "Building under conda bakes conda library paths into compiled packages." >&2
+    echo "Run 'conda deactivate' until no env is active (including base), open a" >&2
+    echo "fresh login shell, and rerun this script." >&2
+    exit 1
+fi
+
 PG_LOCAL="$HOME/pg_local"
 LIBNSL_LOCAL="$HOME/libnsl_local"
 LDAP_LOCAL="$HOME/ldap_local"

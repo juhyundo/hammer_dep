@@ -83,6 +83,18 @@ if ! python3 -c "import psycopg2" >/dev/null 2>&1; then
                 [ -e "$_p/libcrypto.so.3" ] &&                     echo "           - LD_LIBRARY_PATH entry shipping its own libcrypto.so.3: $_p" >&2
             done
             IFS=$_sledge_ifs; unset _sledge_ifs _p
+            _sledge_pg=$(ls "$VIRTUAL_ENV"/lib/python*/site-packages/psycopg2/_psycopg*.so 2>/dev/null | head -1)
+            if [ -n "$_sledge_pg" ]; then
+                _sledge_rp=$(readelf -d "$_sledge_pg" 2>/dev/null | grep -E "RPATH|RUNPATH" | grep -io "conda[^]]*")
+                if [ -n "$_sledge_rp" ]; then
+                    echo "           - psycopg2 itself was BUILT under conda: its binary carries" >&2
+                    echo "             a conda RPATH ($_sledge_rp), so no shell cleanup can fix it." >&2
+                    echo "             Rebuild it from a conda-free shell:" >&2
+                    echo "                 conda deactivate   # repeat until (base) is gone too" >&2
+                    echo "                 ./scripts/uv_setup.sh" >&2
+                fi
+            fi
+            unset _sledge_pg _sledge_rp
             echo "         Fix: rerun from a clean login shell (no conda / chipyard env" >&2
             echo "         sourced), or remove the entries above from LD_LIBRARY_PATH." >&2
             ;;
