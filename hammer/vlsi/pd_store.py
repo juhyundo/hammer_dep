@@ -570,6 +570,74 @@ def ensure_schema() -> None:
         conn.close()
 
 
+def _valid_role(role: str) -> str:
+    import re
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", role):
+        raise ValueError(f"not a valid Postgres role name: {role!r}")
+    return role
+
+
+def grant_schema_access(role: str) -> None:
+    """Grant a role direct read/write on the hammer_poc schema.
+
+    The group-role path (sledgehammer_users) needs CREATEROLE to exist; on
+    clusters where nobody has it (the BWRC one), each teammate gets these
+    direct grants instead. The login whitelist stays admin-only either way.
+    """
+    _valid_role(role)
+    with _connect() as conn:
+        _ensure_schema(conn, quiet=True)
+        with conn.cursor() as cur:
+            for sql in (
+                f"GRANT USAGE ON SCHEMA {SCHEMA_NAME} TO {role}",
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {SCHEMA_NAME} TO {role}",
+                f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {SCHEMA_NAME} TO {role}",
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA_NAME} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role}",
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA_NAME} GRANT USAGE, SELECT ON SEQUENCES TO {role}",
+                f"REVOKE INSERT, UPDATE, DELETE ON {FQ_WHITELIST} FROM {role}",
+            ):
+                cur.execute(sql)
+        conn.commit()
+
+
+def onboard_user(role: str, whitelist: bool = True) -> List[str]:
+    """Everything a new teammate needs, idempotently. Returns action log.
+
+    1. their Airflow metadata database (airflow_<role>)
+    2. direct grants on the hammer_poc schema (cache, ledger, checkpoints)
+    3. the login whitelist entry (cross-instance UI login)
+    """
+    _valid_role(role)
+    actions: List[str] = []
+    conn = _connect()
+    conn.autocommit = True  # CREATE DATABASE cannot run inside a transaction
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+            if not cur.fetchone():
+                raise RuntimeError(
+                    f"no Postgres role {role!r} on the cluster; have them log "
+                    "in once so LDAP creates it, or ask the DB admin to CREATE ROLE")
+            db = f"airflow_{role}"
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
+            if cur.fetchone():
+                actions.append(f"database {db}: already exists")
+            else:
+                cur.execute(f'CREATE DATABASE "{db}"')
+                actions.append(f"database {db}: created")
+    finally:
+        conn.close()
+    grant_schema_access(role)
+    actions.append("hammer_poc access: granted (login whitelist stays admin-only)")
+    if whitelist:
+        if is_whitelisted(role):
+            actions.append("login whitelist: already listed")
+        else:
+            whitelist_add(role)
+            actions.append("login whitelist: added")
+    return actions
+
+
 def grant_access(role: str) -> None:
     """
     Add a Postgres role to the sledgehammer_users group.

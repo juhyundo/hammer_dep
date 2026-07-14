@@ -194,8 +194,24 @@ def _cmd_stage_pull(args: argparse.Namespace) -> int:
 
 
 def _cmd_grant(args: argparse.Namespace) -> int:
-    pd_store.grant_access(args.role)
-    print(f"Added '{args.role}' to {pd_store.SLEDGEHAMMER_GROUP}.")
+    try:
+        pd_store.grant_access(args.role)
+        print(f"Added '{args.role}' to {pd_store.SLEDGEHAMMER_GROUP}.")
+    except Exception as e:
+        if "does not exist" not in str(e):
+            raise
+        # no group role on this cluster (needs CREATEROLE): grant directly
+        pd_store.grant_schema_access(args.role)
+        print(f"Group role {pd_store.SLEDGEHAMMER_GROUP} doesn't exist on this "
+              f"cluster; granted '{args.role}' direct schema access instead.")
+    return 0
+
+
+def _cmd_onboard(args: argparse.Namespace) -> int:
+    """One command for a new teammate: metadata DB + schema access + whitelist."""
+    for line in pd_store.onboard_user(args.role, whitelist=not args.no_whitelist):
+        print(f"  {line}")
+    print(f"'{args.role}' is set up. They can now run: sledgehammer")
     return 0
 
 
@@ -1363,6 +1379,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_brea.add_argument("--yes", action="store_true",
                         help="Skip the confirmation prompt.")
     p_brea.set_defaults(func=_cmd_blob_reassign)
+
+    p_onboard = sub.add_parser("onboard",
+        help="Set up a new teammate: create their airflow_<user> metadata DB, "
+             "grant hammer_poc access, and whitelist their login.")
+    p_onboard.add_argument("role", help="Their Postgres role / EECS uid (e.g. 'desvaun').")
+    p_onboard.add_argument("--no-whitelist", action="store_true",
+                           help="Skip the login-whitelist step.")
+    p_onboard.set_defaults(func=_cmd_onboard)
 
     p_grant = sub.add_parser("grant",
                              help=f"Add a role to the {pd_store.SLEDGEHAMMER_GROUP} group.")
