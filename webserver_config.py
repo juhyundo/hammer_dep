@@ -89,7 +89,20 @@ def _whitelisted_auth_user_ldap(self, username, password, rotate_session_id=True
     if not _uid_allowed(username):
         _wl_log.warning("LOGIN REJECTED (not whitelisted): %r", username)
         return None
-    return _orig_auth_user_ldap(self, username, password, rotate_session_id=rotate_session_id)
+    user = _orig_auth_user_ldap(self, username, password, rotate_session_id=rotate_session_id)
+    # Whoever runs this instance administers this instance: LDAP registration
+    # hands out the plain User role, so promote the OS owner to Admin on
+    # login. Teammates logging into someone else's instance stay User.
+    if user is not None and (username or "").strip().lower() in _owner_uid:
+        try:
+            _admin = self.find_role("Admin")
+            if _admin is not None and _admin not in user.roles:
+                user.roles.append(_admin)
+                self.update_user(user)
+                _wl_log.info("promoted instance owner %r to Admin", username)
+        except Exception as _e:
+            _wl_log.warning("owner Admin promotion failed for %r (%s)", username, _e)
+    return user
 FabAirflowSecurityManagerOverride.auth_user_ldap = _whitelisted_auth_user_ldap
 
 AUTH_LDAP_SERVER = "ldaps://ldap.eecs.berkeley.edu"
