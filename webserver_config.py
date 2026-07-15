@@ -102,6 +102,15 @@ def _whitelisted_auth_user_ldap(self, username, password, rotate_session_id=True
                 _wl_log.info("promoted instance owner %r to Admin", username)
         except Exception as _e:
             _wl_log.warning("owner Admin promotion failed for %r (%s)", username, _e)
+    if user is not None:
+        try:
+            _names = {r.name for r in user.roles}
+            _member = self.find_role("Member")
+            if _member is not None and "Admin" not in _names and "Member" not in _names:
+                user.roles.append(_member)
+                self.update_user(user)
+        except Exception as _e:
+            _wl_log.warning("Member attach failed for %r (%s)", username, _e)
     return user
 FabAirflowSecurityManagerOverride.auth_user_ldap = _whitelisted_auth_user_ldap
 

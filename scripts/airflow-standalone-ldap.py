@@ -524,7 +524,8 @@ def _promote_owner_to_admin() -> None:
             if cur.fetchone():
                 print(f"[roles] instance owner {owner!r} already has Admin.")
             else:
-                cur.execute("INSERT INTO ab_user_role (user_id, role_id) VALUES (%s, %s)",
+                cur.execute("INSERT INTO ab_user_role (id, user_id, role_id) "
+                            "VALUES (nextval('ab_user_role_id_seq'), %s, %s)",
                             (u[0], r[0]))
                 conn.commit()
                 print(f"[roles] promoted instance owner {owner!r} to Admin.")
@@ -534,10 +535,79 @@ def _promote_owner_to_admin() -> None:
         conn.close()
 
 
+MEMBER_ROLE = "Member"
+MEMBER_PERMS = (("menu_access", "Plugins"), ("can_read", "Plugins"))
+
+
+def _ensure_member_role() -> None:
+    """Give non-admin users the plugin features (pgadmin link, notify email,
+    feedback form...).
+
+    The React UI only shows plugin nav items to users who may read Plugins,
+    which the stock User role can't. FAB resets the built-in roles at every
+    boot, so the extra rights live on a custom Member role (sync leaves those
+    alone), attached here to every user that isn't an Admin. Idempotent.
+    """
+    conn_str = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")
+    if not conn_str.startswith("postgresql"):
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(conn_str.replace("postgresql+psycopg2://", "postgresql://"))
+    except Exception as e:
+        print(f"[roles] couldn't check the Member role ({e}).")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM ab_role WHERE name = %s", (MEMBER_ROLE,))
+            row = cur.fetchone()
+            if row:
+                role_id = row[0]
+            else:
+                cur.execute("INSERT INTO ab_role (id, name) VALUES (nextval('ab_role_id_seq'), %s) RETURNING id", (MEMBER_ROLE,))
+                role_id = cur.fetchone()[0]
+                print(f"[roles] created the {MEMBER_ROLE} role.")
+            for action, resource in MEMBER_PERMS:
+                cur.execute(
+                    """SELECT pv.id FROM ab_permission_view pv
+                       JOIN ab_permission p ON p.id = pv.permission_id
+                       JOIN ab_view_menu vm ON vm.id = pv.view_menu_id
+                       WHERE p.name = %s AND vm.name = %s""", (action, resource))
+                pv = cur.fetchone()
+                if not pv:
+                    continue  # FAB hasn't registered it yet; next boot catches it
+                cur.execute(
+                    """INSERT INTO ab_permission_view_role (id, permission_view_id, role_id)
+                       SELECT nextval('ab_permission_view_role_id_seq'), %s, %s
+                       WHERE NOT EXISTS (SELECT 1 FROM ab_permission_view_role
+                       WHERE permission_view_id = %s AND role_id = %s)""",
+                    (pv[0], role_id, pv[0], role_id))
+            cur.execute(
+                """INSERT INTO ab_user_role (id, user_id, role_id)
+                   SELECT nextval('ab_user_role_id_seq'), u.id, %s FROM ab_user u
+                   WHERE NOT EXISTS (SELECT 1 FROM ab_user_role ur
+                                     JOIN ab_role r ON r.id = ur.role_id
+                                     WHERE ur.user_id = u.id AND r.name = 'Admin')
+                     AND NOT EXISTS (SELECT 1 FROM ab_user_role ur2
+                                     WHERE ur2.user_id = u.id AND ur2.role_id = %s)""",
+                (role_id, role_id))
+            n = cur.rowcount
+            conn.commit()
+            if n:
+                print(f"[roles] attached {MEMBER_ROLE} to {n} member user(s).")
+            else:
+                print(f"[roles] {MEMBER_ROLE} role up to date.")
+    except Exception as e:
+        print(f"[roles] Member role setup skipped ({e}).")
+    finally:
+        conn.close()
+
+
 def main():
     _refuse_if_scheduler_running()
     _refuse_if_whitelist_empty()
     _promote_owner_to_admin()
+    _ensure_member_role()
     _start_pgadmin()
     HammerStandalone().run()
 
