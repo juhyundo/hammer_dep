@@ -536,7 +536,31 @@ def _promote_owner_to_admin() -> None:
 
 
 MEMBER_ROLE = "Member"
-MEMBER_PERMS = (("menu_access", "Plugins"), ("can_read", "Plugins"))
+# Members see the whole sidebar; the underlying APIs still enforce their own
+# permissions, so an admin-only page answers "permission denied" instead of
+# being invisible. can_read on Plugins is the one data grant: the plugin nav
+# items (pgadmin, notify email, feedback form) come from the plugins API.
+MEMBER_PERMS = (
+    ("can_read", "Plugins"),
+    ("menu_access", "Assets"),
+    ("menu_access", "Audit Logs"),
+    ("menu_access", "Configurations"),
+    ("menu_access", "Connections"),
+    ("menu_access", "DAGs"),
+    ("menu_access", "Documentation"),
+    ("menu_access", "HITL Detail"),
+    ("menu_access", "Plugins"),
+    ("menu_access", "Pools"),
+    ("menu_access", "Providers"),
+    ("menu_access", "Variables"),
+    ("menu_access", "XComs"),
+    # the Security section links (FAB pages reject non-admins on entry)
+    ("menu_access", "List Users"),
+    ("menu_access", "List Roles"),
+    ("menu_access", "Actions"),
+    ("menu_access", "Resources"),
+    ("menu_access", "Permission Pairs"),
+)
 
 
 def _ensure_member_role() -> None:
