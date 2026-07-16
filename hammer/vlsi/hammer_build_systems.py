@@ -1018,6 +1018,12 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     # Module choices for the trigger-time 'modules' dropdown: hierarchy members
     # for a hierarchical flow, just the top module for a flat one.
     module_examples = ["all"] + (list(dependency_graph.keys()) if dependency_graph else [top_module])
+    _syn_steps = "init_environment, syn_generic, syn_map, add_tieoffs, write_regs, generate_reports, write_outputs"
+    _par_steps = ("floorplan_design, place_bumps, place_tap_cells, power_straps, place_pins, "
+                  "place_opt_design, clock_tree, add_fillers, route_opt_design, write_regs, write_design")
+    _steps_hint = (f"Sub-steps -- syn: {_syn_steps}.\\n\\npar: {_par_steps}.\\n\\n"
+                   "Custom hook steps (e.g. tstech-prefixed) also appear; the authoritative live "
+                   "list is the pre_<step> dirs in the rundir or `studio checkpoints`.")
     output += f"""
 @dag(
     dag_id='{unique_dag_id}',
@@ -1045,11 +1051,11 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         'local': Param(default=False, type='boolean', title='Local (skip DB cache pull; run the tool locally)'),
         'redo': Param(default=False, type='boolean', title='Redo (ignore dependency checks for this run)'),
         'from_step': Param(default='', type='string', title='From step',
-                           description='Start the selected stage from this sub-step, loading its pre_<step> checkpoint from the rundir. Leave empty for automatic resume.'),
+                           description_md='Start the selected stage from this sub-step, loading its pre_<step> checkpoint from the rundir. Leave empty for automatic resume.\\n\\n{_steps_hint}'),
         'to_step': Param(default='', type='string', title='To step',
-                         description='Stop the selected stage after this sub-step (its checkpoint stays resumable).'),
+                         description_md='Stop the selected stage after this sub-step (its checkpoint stays resumable).\\n\\n{_steps_hint}'),
         'only_step': Param(default='', type='string', title='Only step',
-                           description='Run exactly this one sub-step of the selected stage.'),
+                           description_md='Run exactly this one sub-step of the selected stage.\\n\\n{_steps_hint}'),
         'steps_stage': Param(default='syn', type='string', enum=['syn', 'par'], title='Step flags apply to',
                              description='Which stage the from/to/only step fields target.'),
     }},
