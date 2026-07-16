@@ -112,6 +112,28 @@ LDFLAGS="-L$LDAP_LOCAL/usr/lib64 -L/lib64 ${LDFLAGS:-}" \
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 AIRFLOW_HOME="$(mktemp -d)" airflow version
 
+step "hammer plugins (editable, any that sit next to this checkout)"
+# Tech/PDK plugins (tstech*, mentor, etc.) are separate packages, not deps of
+# hammer-vlsi, so `uv sync` never installs them. When this checkout lives
+# inside a design tree (e.g. chipyard/vlsi/hammer), the plugins are siblings:
+# install any that are present so a chipyard integration is ready without a
+# manual pip step. A standalone hammer clone simply finds none. Skip with
+# SLEDGE_NO_PLUGINS=1.
+if [ -z "${SLEDGE_NO_PLUGINS:-}" ]; then
+    shopt -s nullglob
+    _found_plugin=0
+    for _plug in "$(dirname "$REPO")"/hammer-*-plugin*; do
+        [ -f "$_plug/pyproject.toml" ] || [ -f "$_plug/setup.py" ] || continue
+        echo "  installing $(basename "$_plug")"
+        uv pip install -e "$_plug"
+        _found_plugin=1
+    done
+    shopt -u nullglob
+    [ "$_found_plugin" = 0 ] && echo "  none found next to $(dirname "$REPO") (standalone checkout; nothing to do)"
+else
+    echo "  skipped (SLEDGE_NO_PLUGINS set)"
+fi
+
 step "secrets (committed airflow.cfg ships blank; create the encrypted env)"
 if [ -f "$SECRETS_FILE" ]; then
     echo "already present: $SECRETS_FILE"
