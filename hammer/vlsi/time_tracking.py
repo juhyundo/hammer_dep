@@ -664,6 +664,66 @@ def aggregate_savings(events: List[Dict[str, Any]],
             "first_ts": first_ts, "last_ts": last_ts}
 
 
+def _event_wall(ev: Dict[str, Any]) -> float:
+    """Actual wall-clock a task occupied: the tool run, else a cache restore."""
+    for k in ("tool_seconds", "restore_seconds"):
+        v = ev.get(k)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return 0.0
+
+
+def parallel_savings(events: List[Dict[str, Any]],
+                     group_by: Optional[str] = None) -> Dict[str, Any]:
+    """Wall-clock saved by running module tasks concurrently (task-level
+    parallelism in a hierarchical flow).
+
+    Per run, the sequential-equivalent time is the sum of every task's wall
+    duration; the actual time is the run's wall span (earliest start to latest
+    end). Their difference is the time masked by parallelism -- the non-
+    critical-path modules that overlapped the longest one. Top-level
+    integration runs after the leaves, so its window does not overlap the leaf
+    windows and is not counted as saved (it cancels out), which is why this
+    needs no leaf-vs-top bookkeeping. Parallelism overlaps work rather than
+    removing it, so CPU-seconds saved is zero by definition.
+
+    Returns {parallel_wall_s, parallel_cpu_s, parallel_runs}; with group_by,
+    also {groups: {key: wall_saved}} attributing each run to its longest task.
+    """
+    from collections import defaultdict
+    runs: Dict[str, list] = defaultdict(list)
+    for ev in events:
+        rk = ev.get("run_id") or ev.get("dag_run_id")
+        if rk:
+            runs[rk].append(ev)
+    total = 0.0
+    n_par = 0
+    groups: Dict[str, float] = defaultdict(float)
+    for evs in runs.values():
+        windows = []
+        for ev in evs:
+            dur = _event_wall(ev)
+            ts = ev.get("ts")
+            if dur > 0 and isinstance(ts, (int, float)):
+                windows.append((ts - dur, ts, ev))
+        if len(windows) < 2:
+            continue
+        sum_dur = sum(w[1] - w[0] for w in windows)
+        span = max(w[1] for w in windows) - min(w[0] for w in windows)
+        saved = sum_dur - span
+        if saved <= 0:      # sequential, or idle gaps outweigh any overlap
+            continue
+        total += saved
+        n_par += 1
+        if group_by:
+            crit = max(windows, key=lambda w: w[1] - w[0])[2]
+            groups[_group_key(crit, group_by)] += saved
+    out = {"parallel_wall_s": total, "parallel_cpu_s": 0.0, "parallel_runs": n_par}
+    if group_by:
+        out["groups"] = dict(groups)
+    return out
+
+
 def time_saved_summary(**filters: Any) -> Dict[str, Any]:
     """One call for the paper numbers: query the ledger and return the full
     turnaround-time breakdown as a dict.
@@ -674,15 +734,18 @@ def time_saved_summary(**filters: Any) -> Dict[str, Any]:
       dep_management_wall_s / dep_management_cpu_s
       caching_wall_s        / caching_cpu_s
       checkpointing_wall_s  / checkpointing_cpu_s
+      parallel_wall_s       / parallel_cpu_s
       total_wall_saved_s    / total_cpu_saved_s
       events, runs, dags, source
 
     Same attribution as the report and the CSV: dep management counts only
     skips legacy make would have rerun, checkpointing CPU is a floor (resume
-    savings are wall-clock measured).
+    savings are wall-clock measured), and parallel-execution CPU is zero
+    (concurrency overlaps work, it does not remove it).
     """
     events, source = collect_savings_events(**filters)
     agg = aggregate_savings(events, group_by="none")
+    par = parallel_savings(events)
     t = agg["totals"]
     return {
         "dep_management_wall_s": t["depsh_wall"],
@@ -691,7 +754,9 @@ def time_saved_summary(**filters: Any) -> Dict[str, Any]:
         "caching_cpu_s": t["cache_cpu"],
         "checkpointing_wall_s": t["resume_wall"],
         "checkpointing_cpu_s": t["resume_cpu"],
-        "total_wall_saved_s": t["depsh_wall"] + t["cache_wall"] + t["resume_wall"],
+        "parallel_wall_s": par["parallel_wall_s"],
+        "parallel_cpu_s": par["parallel_cpu_s"],
+        "total_wall_saved_s": t["depsh_wall"] + t["cache_wall"] + t["resume_wall"] + par["parallel_wall_s"],
         "total_cpu_saved_s": t["depsh_cpu"] + t["cache_cpu"] + t["resume_cpu"],
         "events": t["events"], "runs": agg["n_runs"], "dags": agg["n_dags"],
         "source": source,
@@ -708,33 +773,39 @@ def savings_csv(events: List[Dict[str, Any]], group_by: str = "project") -> str:
                         would have rerun the stage (make_would_rerun=True)
       caching         - HIT / SKIP_RESTORED blob restores
       checkpointing   - RESUME events (sub-step resume)
+      parallel        - wall masked by running module tasks concurrently
+                        (sum of task durations minus the run's wall span)
 
     The totals match the report's SLEDGEHAMMER TIME SAVED definition
     (dep-legacy skips get no credit). Checkpointing CPU is a floor: resume
     savings are measured from checkpoint timestamps, which give wall-clock
-    only, so unknown CPU counts as zero rather than an estimate.
+    only, so unknown CPU counts as zero rather than an estimate. Parallel CPU
+    is zero by definition -- concurrency overlaps work, it does not remove it.
     """
     agg = aggregate_savings(events, group_by=group_by)
+    par = parallel_savings(events, group_by=group_by)
+    par_groups = par.get("groups", {})
     label = group_by if group_by != "none" else "scope"
     cols = ["dep_management_wall_s", "dep_management_cpu_s",
             "caching_wall_s", "caching_cpu_s",
             "checkpointing_wall_s", "checkpointing_cpu_s",
+            "parallel_wall_s", "parallel_cpu_s",
             "total_wall_saved_s", "total_cpu_saved_s"]
     lines = [",".join([label] + cols)]
 
-    def _row(name: str, b: Dict[str, Any]) -> str:
+    def _row(name: str, b: Dict[str, Any], par_w: float) -> str:
         dep_w, dep_c = b["depsh_wall"], b["depsh_cpu"]
         cache_w, cache_c = b["cache_wall"], b["cache_cpu"]
         ck_w, ck_c = b["resume_wall"], b["resume_cpu"]
-        vals = [dep_w, dep_c, cache_w, cache_c, ck_w, ck_c,
-                dep_w + cache_w + ck_w, dep_c + cache_c + ck_c]
+        vals = [dep_w, dep_c, cache_w, cache_c, ck_w, ck_c, par_w, 0.0,
+                dep_w + cache_w + ck_w + par_w, dep_c + cache_c + ck_c]
         safe = str(name).replace(",", ";")
         return ",".join([safe] + [f"{v:.1f}" for v in vals])
 
     if group_by != "none":
         for name in sorted(agg["groups"]):
-            lines.append(_row(name, agg["groups"][name]))
-    lines.append(_row("TOTAL", agg["totals"]))
+            lines.append(_row(name, agg["groups"][name], par_groups.get(name, 0.0)))
+    lines.append(_row("TOTAL", agg["totals"], par["parallel_wall_s"]))
     return "\n".join(lines) + "\n"
 
 
@@ -743,11 +814,13 @@ def format_savings_report(events: List[Dict[str, Any]],
                           source: str = "") -> str:
     """Render a human-readable cross-run time-saved report."""
     agg = aggregate_savings(events, group_by=group_by)
+    par = parallel_savings(events)
+    par_wall = par["parallel_wall_s"]
     t = agg["totals"]
     if t["events"] == 0:
         return "(no cache events found)"
 
-    sledge_wall = t["cache_wall"] + t["depsh_wall"] + t["resume_wall"]
+    sledge_wall = t["cache_wall"] + t["depsh_wall"] + t["resume_wall"] + par_wall
     sledge_cpu = t["cache_cpu"] + t["depsh_cpu"] + t["resume_cpu"]
     total_saved_wall = sledge_wall + t["deplegacy_wall"]
     total_saved_cpu = sledge_cpu + t["deplegacy_cpu"]
@@ -795,6 +868,8 @@ def format_savings_report(events: List[Dict[str, Any]],
     lines.append(f"  Saved by dep-check (make would rerun): {_pair(t['depsh_wall'], t['depsh_cpu'])}")
     if t["resume_wall"] or t["resume_cpu"]:
         lines.append(f"  Saved by substep resume:            {_pair(t['resume_wall'], t['resume_cpu'])}")
+    if par_wall:
+        lines.append(f"  Saved by parallel flow execution:   {_pair(par_wall, 0.0)}")
     lines.append(f"  SLEDGEHAMMER TIME SAVED:            {_pair(sledge_wall, sledge_cpu)}")
     lines.append(f"  Legacy-equivalent skips (no credit): {_pair(t['deplegacy_wall'], t['deplegacy_cpu'])}")
     lines.append(f"  Total skipped work (incl. legacy):  {_pair(total_saved_wall, total_saved_cpu)}")

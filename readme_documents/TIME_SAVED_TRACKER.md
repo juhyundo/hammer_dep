@@ -317,11 +317,21 @@ project,dep_management_wall_s,dep_management_cpu_s,caching_wall_s,caching_cpu_s,
 The mapping is the same attribution the report uses: dep management counts
 only skips legacy make would have rerun (make_would_rerun=True; dep-legacy
 skips get no credit), caching counts blob restores, checkpointing counts
-sub-step RESUME events. Totals are the sum of the three, i.e. SLEDGEHAMMER
-TIME SAVED. Checkpointing compute is a floor: resume savings are measured
-from checkpoint timestamps (wall-clock only), so unknown CPU counts as zero
-rather than an estimate. All the usual filters compose with `--csv`
-(`--project`, `--since`/`--until`, `--stage`, `--cache-only`, ...).
+sub-step RESUME events, and parallel counts the wall masked by running module
+tasks concurrently. Totals are the sum of the four, i.e. SLEDGEHAMMER TIME
+SAVED. Checkpointing compute is a floor (resume savings are wall-clock only,
+unknown CPU counts as zero); parallel compute is zero by definition --
+concurrency overlaps work, it does not remove it. All the usual filters
+compose with `--csv` (`--project`, `--since`/`--until`, `--stage`,
+`--cache-only`, ...).
+
+Parallel flow execution is computed per run straight from the ledger, no
+extra collection: sequential-equivalent time is the sum of every task's wall
+duration, actual time is the run's wall span (earliest start to latest end),
+and the difference is the time masked by task-level parallelism. Top-level
+integration runs after the leaves, so its window does not overlap and cancels
+out -- no leaf-vs-top bookkeeping needed. A flat (single-module) run has no
+overlap and reports zero.
 
 ## Resetting
 
