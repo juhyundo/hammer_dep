@@ -6,18 +6,55 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-# Refuse to build under conda. psycopg2 and python-ldap compile from source
-# here, and an active conda env bakes its library path into the binaries as
-# an RPATH; the resulting psycopg2 then loads conda's OpenSSL forever after,
-# in every shell, and fails with "undefined symbol: EVP_md2". No environment
-# cleanup can fix an RPATH: the only cure is rebuilding, so don't let the
-# tainted build happen in the first place.
-if [ -n "${CONDA_PREFIX:-}" ] || [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
-    echo "ERROR: a conda environment is active (${CONDA_PREFIX:-$CONDA_DEFAULT_ENV})." >&2
-    echo "Building under conda bakes conda library paths into compiled packages." >&2
-    echo "Run 'conda deactivate' until no env is active (including base), open a" >&2
-    echo "fresh login shell, and rerun this script." >&2
-    exit 1
+# Sanitize the build environment. psycopg2 and python-ldap compile from source
+# here; whatever OpenSSL / libpq is on the linker path gets baked into the
+# binaries as an RPATH, and a FOREIGN one (conda's, an active venv's, an env
+# module's) then breaks the binary in every future shell -- e.g. conda's
+# libcrypto lacks EVP_md2, so psycopg2 fails to import forever after. No later
+# cleanup fixes an RPATH. So we neutralize the known offenders before building
+# (uv builds the venv with its own standalone Python, so the result is clean),
+# and -- as a catch-all for anything we did not anticipate -- verify at the end
+# that psycopg2 actually imports.
+_strip_pathlike() {   # $1 = the ':'-list; $2.. = glob patterns of entries to drop
+    local list="$1"; shift
+    local out="" p pat drop; local IFS=:
+    for p in $list; do
+        drop=0
+        for pat in "$@"; do case "$p" in $pat) drop=1; break ;; esac; done
+        [ "$drop" = 0 ] && out="${out:+$out:}$p"
+    done
+    printf '%s' "$out"
+}
+_neutralized=""
+# 1. conda / mamba / micromamba / miniforge / pixi -- the usual culprit
+if [ -n "${CONDA_PREFIX:-}${CONDA_DEFAULT_ENV:-}${MAMBA_ROOT_PREFIX:-}${PIXI_PROJECT_ROOT:-}" ] \
+   || printf '%s' "${PATH:-}" | grep -qiE 'conda|miniforge|mamba|pixi'; then
+    _neutralized="$_neutralized conda/mamba/pixi"
+    PATH="$(_strip_pathlike "$PATH" '*conda*' '*miniforge*' '*mamba*' '*pixi*')"; export PATH
+    [ -n "${LD_LIBRARY_PATH:-}" ] && { LD_LIBRARY_PATH="$(_strip_pathlike "$LD_LIBRARY_PATH" '*conda*' '*miniforge*' '*mamba*' '*pixi*')"; export LD_LIBRARY_PATH; }
+    unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_PROMPT_MODIFIER \
+          CONDA_EXE CONDA_PYTHON_EXE MAMBA_ROOT_PREFIX PIXI_PROJECT_ROOT 2>/dev/null || true
+fi
+# 2. an already-active pip/uv virtualenv would shadow the one we are about to build
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    _neutralized="$_neutralized venv($(basename "$VIRTUAL_ENV"))"
+    PATH="$(_strip_pathlike "$PATH" "$VIRTUAL_ENV/bin")"; export PATH
+    unset VIRTUAL_ENV 2>/dev/null || true
+fi
+# 3. an LD_PRELOAD injects a library into every build subprocess
+[ -n "${LD_PRELOAD:-}" ] && { _neutralized="$_neutralized LD_PRELOAD"; unset LD_PRELOAD; }
+if [ -n "$_neutralized" ]; then
+    echo "note: neutralized for a clean build:$_neutralized"
+fi
+# 4. anything left on LD_LIBRARY_PATH that is not a system path (env modules,
+#    spack, a hand-set lib dir) can still carry a foreign OpenSSL. We do not
+#    strip it blindly (it may be intentional), but flag it so a later failure
+#    has an obvious first thing to try.
+if [ -n "${LD_LIBRARY_PATH:-}" ] \
+   && printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -vqE '^(/usr/|/lib|/opt/dell|$)'; then
+    echo "note: LD_LIBRARY_PATH has non-system entries below; if the build's psycopg2"
+    echo "      check fails, 'unset LD_LIBRARY_PATH' and rerun:"
+    printf '        %s\n' "$LD_LIBRARY_PATH"
 fi
 
 PG_LOCAL="$HOME/pg_local"
@@ -111,6 +148,23 @@ LDFLAGS="-L$LDAP_LOCAL/usr/lib64 -L/lib64 ${LDFLAGS:-}" \
     uv pip install "python-ldap==${LDAP_VERSION}" --no-binary python-ldap
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 AIRFLOW_HOME="$(mktemp -d)" airflow version
+
+step "verify the compiled build is clean (no foreign library baked in)"
+# The real safety net: whatever environment we failed to strip above, a
+# tainted psycopg2 shows up here as an import error. Fail loudly with the fix
+# instead of leaving a broken venv that only breaks later, at first DB use.
+if python3 -c "import psycopg2" 2>/tmp/_pg_err; then
+    echo "  psycopg2 imports clean"
+else
+    echo "ERROR: psycopg2 was built against a foreign library and cannot load:" >&2
+    sed 's/^/  /' /tmp/_pg_err >&2
+    echo "  This means an environment was active that put a foreign OpenSSL/libpq" >&2
+    echo "  on the linker path. Check for a conda/venv/module/spack environment or" >&2
+    echo "  a non-system LD_LIBRARY_PATH, clear it, and rerun this script." >&2
+    rm -f /tmp/_pg_err
+    exit 1
+fi
+rm -f /tmp/_pg_err
 
 step "hammer plugins (editable, any that sit next to this checkout)"
 # Tech/PDK plugins (tstech*, mentor, etc.) are separate packages, not deps of
