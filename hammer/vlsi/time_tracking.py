@@ -235,6 +235,7 @@ def record_event(
     saved_seconds: Optional[float] = None,
     tool_seconds: Optional[float] = None,
     restore_seconds: Optional[float] = None,
+    store_seconds: Optional[float] = None,
     saved_cpu_seconds: Optional[float] = None,
     tool_cpu_seconds: Optional[float] = None,
     make_would_rerun: Optional[bool] = None,
@@ -274,6 +275,7 @@ def record_event(
             "saved_seconds":     saved_seconds,
             "tool_seconds":      tool_seconds,
             "restore_seconds":   restore_seconds,
+            "store_seconds":     store_seconds,
             "saved_cpu_seconds": saved_cpu_seconds,
             "tool_cpu_seconds":  tool_cpu_seconds,
             "design":            design,
@@ -303,6 +305,7 @@ def record_event(
             saved_seconds=saved_seconds,
             tool_seconds=tool_seconds,
             restore_seconds=restore_seconds,
+            store_seconds=store_seconds,
             saved_cpu_seconds=saved_cpu_seconds,
             tool_cpu_seconds=tool_cpu_seconds,
             triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER") or None,
@@ -526,6 +529,7 @@ def _attribute_event(ev: Dict[str, Any]) -> Dict[str, Any]:
     tool = ev.get("tool_seconds")
     saved_cpu = ev.get("saved_cpu_seconds")
     tool_cpu = ev.get("tool_cpu_seconds")
+    restore = ev.get("restore_seconds")
     dep_kind = "dep-sh" if ev.get("make_would_rerun") is True else "dep-legacy"
     res = {"attribution": "none", "wall_saved": 0.0, "cpu_saved": 0.0,
            "wall_ran": 0.0, "cpu_ran": 0.0, "quantified": False}
@@ -535,6 +539,11 @@ def _attribute_event(ev: Dict[str, Any]) -> Dict[str, Any]:
         res.update(attribution="resume", wall_saved=float(saved),
                    cpu_saved=float(saved_cpu or 0.0), quantified=True)
     elif outcome in ("HIT", "SKIP_RESTORED") and saved is not None:
+        # saved_seconds is already NET of the restore overhead: pd_cache stores
+        # saved = original_duration - restore_seconds, where restore_seconds
+        # covers fetching the blob from Postgres, decompressing, and untarring.
+        # So a stage whose restore costs more than a rerun (tiny stage, huge
+        # blob) is already floored at 0 there -- do not subtract restore again.
         res.update(attribution="cache", wall_saved=float(saved),
                    cpu_saved=float(saved_cpu or 0.0), quantified=True)
     elif outcome == "SKIP_LOCAL" and saved is not None:

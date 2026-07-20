@@ -459,6 +459,7 @@ CREATE TABLE IF NOT EXISTS {FQ_CACHE_EVENT} (
     saved_seconds     REAL,
     tool_seconds      REAL,
     restore_seconds   REAL,
+    store_seconds     REAL,
     saved_cpu_seconds REAL,
     tool_cpu_seconds  REAL,
     owner             TEXT NOT NULL DEFAULT current_user,
@@ -486,6 +487,7 @@ CREATE TABLE IF NOT EXISTS {FQ_CACHE_EVENT} (
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS project TEXT;
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS make_would_rerun BOOLEAN;
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS module TEXT;
+ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS store_seconds REAL;
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_stage   ON {FQ_CACHE_EVENT} (stage);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_dag     ON {FQ_CACHE_EVENT} (dag_id);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_design  ON {FQ_CACHE_EVENT} (design);
@@ -1607,7 +1609,7 @@ def load_stage_blob(
 # constant so the SELECT and the row->dict mapping can't drift apart.
 _CACHE_EVENT_COLS = (
     "ts", "stage", "outcome",
-    "saved_seconds", "tool_seconds", "restore_seconds",
+    "saved_seconds", "tool_seconds", "restore_seconds", "store_seconds",
     "saved_cpu_seconds", "tool_cpu_seconds",
     "owner", "triggering_user", "dag_id", "dag_run_id", "workspace", "design",
     "project", "make_would_rerun", "module",
@@ -1672,6 +1674,7 @@ def record_cache_event(
     saved_seconds: Optional[float] = None,
     tool_seconds: Optional[float] = None,
     restore_seconds: Optional[float] = None,
+    store_seconds: Optional[float] = None,
     saved_cpu_seconds: Optional[float] = None,
     tool_cpu_seconds: Optional[float] = None,
     triggering_user: Optional[str] = None,
@@ -1700,14 +1703,14 @@ def record_cache_event(
                 f"""
                 INSERT INTO {FQ_CACHE_EVENT} (
                     stage, outcome, saved_seconds, tool_seconds, restore_seconds,
-                    saved_cpu_seconds, tool_cpu_seconds,
+                    store_seconds, saved_cpu_seconds, tool_cpu_seconds,
                     triggering_user, dag_id, dag_run_id, workspace, design,
                     project, make_would_rerun, module, sha256
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (stage, outcome, saved_seconds, tool_seconds, restore_seconds,
-                 saved_cpu_seconds, tool_cpu_seconds,
+                 store_seconds, saved_cpu_seconds, tool_cpu_seconds,
                  triggering_user, dag_id, dag_run_id, workspace, design,
                  project, make_would_rerun, module, sha256),
             )

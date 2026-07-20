@@ -168,6 +168,11 @@ def cache_or_run(
         blob = None
     else:
         try:
+            # time the restore from BEFORE the fetch: shipping the blob from
+            # Postgres over the network is the dominant overhead legacy never
+            # pays, so it must be inside restore_seconds (and thus netted out
+            # of the saved time below).
+            _restore_t0 = time.monotonic()
             blob = pd_store.load_stage_blob(key)
         except Exception as e:
             _warn(f"PD cache: lookup failed ({e}); running {stage_tag} normally.")
@@ -177,13 +182,12 @@ def cache_or_run(
         _, data, original_duration, original_cpu = blob
         rundir_path = Path(rundir)
         try:
-            t0 = time.monotonic()
             rundir_path.parent.mkdir(parents=True, exist_ok=True)
             pd_store.untar_to_directory(data, rundir_path.parent)
             output_path = rundir_path / output_filename
             with output_path.open("r") as f:
                 output = json.load(f)
-            restore_seconds = time.monotonic() - t0
+            restore_seconds = time.monotonic() - _restore_t0
             saved = None
             saved_cpu = None
             if original_duration is not None:
@@ -234,6 +238,11 @@ def cache_or_run(
             except Exception as e:
                 _warn(f"PD cache: could not pre-write {output_filename} ({e}); tarball may lack it.")
 
+            # store cost = tarring/compressing the rundir + uploading the blob
+            # to Postgres. This is the one-time overhead SledgeHammer pays on a
+            # miss that legacy does not; recorded for visibility, NOT netted
+            # into any savings total here.
+            _store_t0 = time.monotonic()
             tarball = pd_store.tar_directory(Path(rundir))
             pd_store.store_stage_blob(
                 stage_tag, key, tarball,
@@ -245,10 +254,12 @@ def cache_or_run(
                 workspace=os.environ.get("HAMMER_AIRFLOW_WORKSPACE") or None,
                 design=os.environ.get("HAMMER_AIRFLOW_DESIGN") or os.environ.get("design") or None,
             )
+            store_seconds = time.monotonic() - _store_t0
             _record_cache_event(
                 stage_tag, "MISS_STORE",
                 tool_seconds=duration_seconds,
                 tool_cpu_seconds=cpu_seconds,
+                store_seconds=store_seconds,
                 module=module,
                 enabled=ledger_on,
             )
@@ -350,6 +361,8 @@ def try_restore_from_cache(
     short = key[:16]
 
     try:
+        # time from before the fetch so the Postgres/network transfer counts
+        _restore_t0 = time.monotonic()
         blob = pd_store.load_stage_blob(key)
     except Exception as e:
         _warn(f"PD cache (skip-path): lookup failed ({e}); not restoring.")
@@ -367,10 +380,9 @@ def try_restore_from_cache(
     _, data, original_duration, original_cpu = blob
     rundir_path = Path(rundir)
     try:
-        t0 = time.monotonic()
         rundir_path.parent.mkdir(parents=True, exist_ok=True)
         pd_store.untar_to_directory(data, rundir_path.parent)
-        restore_seconds = time.monotonic() - t0
+        restore_seconds = time.monotonic() - _restore_t0
         saved = None
         saved_cpu = None
         if original_duration is not None:
