@@ -37,6 +37,10 @@ def _load_secrets() -> None:
     """
     enc = os.path.expanduser(os.environ.get(
         "SLEDGE_SECRETS_FILE", os.path.join(REPO, ".sledgehammer", "airflow-secrets.env.gpg")))
+    # reuse-already-loaded secrets: skip a redundant decrypt (and passphrase
+    # prompt) when they're already exported into this environment.
+    if os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"):
+        return
     if not os.path.exists(enc):
         return
     try:

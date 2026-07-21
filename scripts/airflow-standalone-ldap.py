@@ -182,6 +182,12 @@ def _setup_secrets() -> None:
         os.environ.get("SLEDGE_SECRETS_FILE",
                        os.path.join(repo, ".sledgehammer", "airflow-secrets.env.gpg")))
 
+    # reuse-already-loaded secrets: if venv.sh (or a prior step) already decrypted
+    # and exported them into this environment, don't decrypt again -- that second
+    # decrypt is what makes you enter the passphrase twice in one launch.
+    if os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"):
+        return
+
     if not os.path.exists(enc):
         # Allow an already-populated environment (e.g. CI exported the vars).
         if os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"):
