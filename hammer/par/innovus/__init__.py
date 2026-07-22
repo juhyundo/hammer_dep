@@ -396,8 +396,14 @@ class InnovusTclToPythonConverter:
         parts = self._tokenize_command(line)
         if not parts:
             return f"# FIXME: Empty command"
-        
+
         cmd_name = parts[0]
+
+        # A Tcl variable assignment that fell through the specific set-handlers
+        # above. Keep the variable at Tcl level via the bridge (Python's builtin
+        # set() would swallow it), so later $var references resolve.
+        if cmd_name == 'set' and len(parts) == 3:
+            return f"tcl.eval({line!r})"
         positional_args = []
         named_args = {}
         
@@ -454,6 +460,22 @@ class InnovusTclToPythonConverter:
         args_str = ', '.join(py_args)
         return f"{cmd_name}({args_str})"
     
+    @staticmethod
+    def _brackets_balanced(value: str) -> bool:
+        """True when the outermost [ ] of value enclose the whole token, i.e.
+        the bracket depth never returns to zero before the final character."""
+        depth = 0
+        for i, ch in enumerate(value):
+            if ch == '[':
+                depth += 1
+            elif ch == ']':
+                depth -= 1
+                if depth == 0 and i != len(value) - 1:
+                    return False
+                if depth < 0:
+                    return False
+        return depth == 0
+
     def _tokenize_command(self, line: str) -> List[str]:
         """Tokenize a TCL command into parts, respecting braces, brackets and quotes.
 
@@ -522,11 +544,23 @@ class InnovusTclToPythonConverter:
     def _convert_value(self, value: str) -> str:
         """Convert a TCL value to Python representation"""
         value = value.strip()
-        
+
         # PYTHON: prefix means pass through as raw Python expression (may be brace-wrapped)
         stripped = value.strip('{}')
         if stripped.startswith('PYTHON:'):
             return stripped[7:]
+
+        # Bracket command substitution -> evaluate through the Tcl bridge. The
+        # 25.1 API's bindings brace-quote plain string arguments, so a value
+        # left as the literal string '[cmd ...]' reaches the tool unevaluated;
+        # and translating to nested Python calls doesn't work either because
+        # the API drops some commands as bare names (get_db/set_db become the
+        # db() accessor). tcl.eval keeps the original Tcl semantics and hands
+        # back the computed result. A leading {*} expansion is dropped: the
+        # bridge returns the list whole.
+        bexpr = value[3:] if value.startswith('{*}[') else value
+        if bexpr.startswith('[') and bexpr.endswith(']') and self._brackets_balanced(bexpr):
+            return f"tcl.eval({bexpr[1:-1].strip()!r})"
         
         # Handle braced lists
         if value.startswith('{') and value.endswith('}'):
@@ -555,8 +589,12 @@ class InnovusTclToPythonConverter:
         if value.lower() == 'false':
             return 'False'
         
-        # Handle TCL variables
+        # Handle TCL variables. A plain $name is read back through the bridge:
+        # left as a literal string it would reach the tool brace-quoted and
+        # never substituted. Compound forms keep the old literal behavior.
         if value.startswith('$'):
+            if re.fullmatch(r'\$[A-Za-z_]\w*', value):
+                return f"tcl.eval({('set ' + value[1:])!r})"
             return f"'{value}'"
         
         # Default: treat as string
