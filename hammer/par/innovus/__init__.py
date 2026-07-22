@@ -455,52 +455,68 @@ class InnovusTclToPythonConverter:
         return f"{cmd_name}({args_str})"
     
     def _tokenize_command(self, line: str) -> List[str]:
-        """Tokenize a TCL command into parts, respecting braces and quotes"""
+        """Tokenize a TCL command into parts, respecting braces, brackets and quotes.
+
+        Square brackets must be tracked like braces: a value such as
+        -area [get_computed_shapes [get_db designs .bbox] SIZEY -2.4] is ONE
+        word in Tcl, and splitting it on inner whitespace scatters the pieces
+        between positional and named args, producing a scrambled command.
+        Tokens end only at whitespace (as in Tcl), so glued forms like
+        {*}[cmd ...] also stay whole.
+        """
         tokens = []
         current_token = ''
         in_braces = 0
+        in_brackets = 0
         in_quotes = False
         escape_next = False
-        
+
         for char in line:
             if escape_next:
                 current_token += char
                 escape_next = False
                 continue
-            
+
             if char == '\\':
                 escape_next = True
                 continue
-            
+
             if char == '"' and in_braces == 0:
                 in_quotes = not in_quotes
                 current_token += char
                 continue
-            
+
             if char == '{' and not in_quotes:
                 in_braces += 1
                 current_token += char
                 continue
-            
+
             if char == '}' and not in_quotes:
                 in_braces -= 1
                 current_token += char
-                if in_braces == 0 and current_token:
-                    tokens.append(current_token)
-                    current_token = ''
                 continue
-            
-            if char in ' \t' and in_braces == 0 and not in_quotes:
+
+            if char == '[' and not in_quotes and in_braces == 0:
+                in_brackets += 1
+                current_token += char
+                continue
+
+            if char == ']' and not in_quotes and in_braces == 0:
+                in_brackets -= 1
+                current_token += char
+                continue
+
+            if char in ' \t' and in_braces == 0 and in_brackets == 0 and not in_quotes:
                 if current_token:
                     tokens.append(current_token)
                     current_token = ''
                 continue
-            
+
             current_token += char
-        
+
         if current_token:
             tokens.append(current_token)
-        
+
         return tokens
     
     def _convert_value(self, value: str) -> str:
