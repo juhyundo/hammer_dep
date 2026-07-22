@@ -762,7 +762,11 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             for _k in ("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN",
                        "AIRFLOW__CORE__SQL_ALCHEMY_CONN"):
                 sub_env.pop(_k, None)
-            res = subprocess.run(cmd, cwd=WORK_DIR, env=sub_env)
+            # stdin closed so a tool that errors out and falls back to an
+            # interactive prompt (innovus does this) exits on EOF instead of
+            # hanging the task forever.
+            res = subprocess.run(cmd, cwd=WORK_DIR, env=sub_env,
+                                 stdin=subprocess.DEVNULL)
             if res.returncode != 0:
                 raise AirflowFailException(f"Hammer action {{action_clean}} failed with exit code {{res.returncode}}")
 
