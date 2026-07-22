@@ -603,6 +603,23 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         else f"sledgehammer_{design_name}_{gen_user}",
     )
 
+    # Per-user edge execution: vlsi.core.airflow_edge routes every task of this
+    # DAG to an EdgeExecutor queue (default: the generating user's name, or
+    # vlsi.core.airflow_queue). The owner runs `studio-worker.sh` (or
+    # `airflow edge worker --queues <name>`) as themselves; the shared
+    # deployment then only schedules -- it never executes this DAG's tasks.
+    try:
+        edge_on = bool(driver.database.get_setting("vlsi.core.airflow_edge"))
+    except Exception:
+        edge_on = False
+    edge_queue = None
+    if edge_on:
+        try:
+            edge_queue = str(driver.database.get_setting("vlsi.core.airflow_queue"))
+        except Exception:
+            edge_queue = gen_user
+        edge_queue = re.sub(r"[^A-Za-z0-9_.-]", "_", edge_queue or gen_user)
+
     # 1. Base DAG Header & Safe Execution Subprocess Wrapper
     output = textwrap.dedent(f"""\
         # Auto-generated Airflow DAG by Hammer Build System
@@ -632,6 +649,23 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         PROJ_CONFS_BY_TOOLS = {proj_by_tools_str}
         DEFAULT_TOOLS = "{default_tool}"
         TOOLS_CHOICES = sorted(PROJ_CONFS_BY_TOOLS.keys())
+
+        # Per-user edge execution (vlsi.core.airflow_edge). When a queue is set,
+        # every task in this DAG is routed to the EdgeExecutor on that queue, so
+        # the DAG owner's own edge worker -- running as THEIR Unix user -- does
+        # the work instead of the shared deployment's user. None -> unchanged
+        # local execution.
+        EDGE_QUEUE = {edge_queue!r}
+        EDGE_EXECUTOR = "airflow.providers.edge3.executors.EdgeExecutor"
+        if EDGE_QUEUE:
+            _base_task = task
+
+            def task(fn=None, **kw):
+                kw.setdefault("queue", EDGE_QUEUE)
+                kw.setdefault("executor", EDGE_EXECUTOR)
+                if fn is not None:
+                    return _base_task(**kw)(fn)
+                return _base_task(**kw)
 
         default_args = {{
             'owner': 'hammer',
