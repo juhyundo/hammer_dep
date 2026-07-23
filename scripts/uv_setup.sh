@@ -64,6 +64,7 @@ SECRETS_DIR="$REPO/.sledgehammer"
 SECRETS_FILE="${SLEDGE_SECRETS_FILE:-$SECRETS_DIR/airflow-secrets.env.gpg}"
 AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.1.0}"
 FAB_VERSION="${FAB_VERSION:-3.6.3}"
+EDGE3_VERSION="${EDGE3_VERSION:-1.3.0}"
 LDAP_VERSION="${LDAP_VERSION:-3.4.7}"
 PYVER="${PYVER:-3.11}"
 
@@ -142,6 +143,10 @@ PYTHON_VERSION="$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.v
 CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
 uv pip uninstall myst-parser mdit-py-plugins markdown-it-py >/dev/null 2>&1 || true
 uv pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINT"
+# Edge worker support (constrained so it can't drag airflow to a newer release).
+# Installed BEFORE fab: fab is deliberately unconstrained and must resolve last
+# so the newer deps it needs (pyjwt, common-compat, sqlalchemy) end up on top.
+uv pip install "apache-airflow-providers-edge3==${EDGE3_VERSION}" --constraint "$CONSTRAINT"
 uv pip install "apache-airflow-providers-fab==${FAB_VERSION}"
 CPPFLAGS="-I$LDAP_LOCAL/usr/include -I/usr/include ${CPPFLAGS:-}" \
 LDFLAGS="-L$LDAP_LOCAL/usr/lib64 -L/lib64 ${LDFLAGS:-}" \
