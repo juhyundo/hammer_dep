@@ -835,7 +835,8 @@ def lookup_triggering_user(dag_id: str, run_id: str) -> Optional[str]:
         return None
 
 
-def get_user_workspace(username: Optional[str], workspace_name: str = "default") -> str:
+def get_user_workspace(username: Optional[str], workspace_name: str = "default",
+                       auto_register: bool = True) -> Optional[str]:
     """
     Resolve the workspace root for the given user + named workspace.
 
@@ -876,6 +877,13 @@ def get_user_workspace(username: Optional[str], workspace_name: str = "default")
             row = cur.fetchone()
             if row and row[0]:
                 return row[0]
+
+            # With auto_register=False this is a pure read: report the miss and
+            # write nothing. Flow runs use this so resolving a workspace can
+            # never author a row as a side effect -- only an explicit
+            # `studio workspace-set` creates rows.
+            if not auto_register:
+                return None
 
             # Auto-register this (user, workspace). Anchor the default under the
             # checkout THIS code is running from -- i.e. the user's OWN hammer

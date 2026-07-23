@@ -643,6 +643,7 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
 
         # Grafted from the sledgehammer (ldap-auth) branch.
         DESIGN_NAME = "{design_name}"
+        GEN_USER = "{gen_user}"
         # Tools dropdown {{tool: [configs]}}: make-dag fills this from
         # configs-tool/*.yml so each tool is selectable at trigger time via the
         # 'tools' Param; the plain build path emits a single 'default' entry.
@@ -709,7 +710,9 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             if context is not None:
                 try:
                     from hammer.shell.hammer_vlsi import _resolve_workspace_obj_dir
-                    resolved = _resolve_workspace_obj_dir(context, DESIGN_NAME)
+                    resolved = _resolve_workspace_obj_dir(
+                        context, DESIGN_NAME,
+                        default_obj_dir=OBJ_DIR, gen_user=GEN_USER)
                     if resolved:
                         obj_dir = resolved
                 except Exception as e:

@@ -63,7 +63,7 @@ def run_cli_driver():
 from hammer.vlsi.pd_notify import notify_flow_complete as _notify_flow_complete
 
 
-def _resolve_workspace_obj_dir(context, design):
+def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=None):
     """
     Resolve and set OBJ_DIR in os.environ for the user who triggered this DAG run.
 
@@ -149,20 +149,38 @@ def _resolve_workspace_obj_dir(context, design):
     if os.environ.get("HAMMER_NO_PER_USER_WORKSPACE"):
         return None
 
-    # Look up where this user builds. get_user_workspace returns their stored
-    # path, or registers a default under this checkout's e2e on first use
-    # (build-sky130-cm-<user>). Override per user with `studio
-    # workspace-set <user> <path>`; the path must be writable by the daemon.
-    # A named workspace (conf={"workspace": "<name>"}) lets one user run several.
-    if not ws_name:
-        ws_name = os.environ.get("HAMMER_WORKSPACE") or "default"
+    # Which named workspace, if the trigger asked for one explicitly.
+    explicit_ws = ws_name or os.environ.get("HAMMER_WORKSPACE")
+
+    # The owner of a DAG runs it in the DAG's own obj_dir. When the triggering
+    # user IS the user who generated this DAG (and no named workspace was
+    # requested), the baked directory wins -- no table lookup, no redirect.
+    # Only someone ELSE triggering it gets routed to their own workspace.
+    if (not explicit_ws and gen_user and default_obj_dir
+            and str(user) == str(gen_user)):
+        os.environ["OBJ_DIR"] = default_obj_dir
+        os.environ.pop("HAMMER_D_MK", None)
+        os.environ["HAMMER_AIRFLOW_WORKSPACE"] = os.path.dirname(default_obj_dir)
+        print(f"[user-workspace] owner run: triggering_user={user!r} generated "
+              f"this DAG -> using its own OBJ_DIR={default_obj_dir}")
+        return default_obj_dir
+
+    # Someone else's run (or an explicitly named workspace): resolve from the
+    # user_workspaces table, read-only. Runs never create rows -- a missing
+    # registration is an error with the fix spelled out, not a silent default.
+    ws_name = explicit_ws or "default"
     try:
         from hammer.vlsi import pd_store
-        workspace_root = pd_store.get_user_workspace(user, ws_name)
+        workspace_root = pd_store.get_user_workspace(user, ws_name, auto_register=False)
     except Exception as e:
         print(f"WARNING: could not resolve per-user workspace for {user!r}: {e}. "
               f"Falling back to the DAG's baked OBJ_DIR.")
         return None
+    if not workspace_root:
+        raise RuntimeError(
+            f"no workspace registered for user {user!r} (workspace {ws_name!r}). "
+            f"Register one first:  studio workspace-set {user} /path/to/their/build"
+        )
 
     obj_dir = os.path.join(workspace_root, design)
     os.environ["OBJ_DIR"] = obj_dir
