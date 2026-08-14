@@ -32,10 +32,9 @@ def _ast_hash(func) -> str:
 def fingerprint_hooks(hooks: List) -> str:
     """
     SHA256 over the AST + location, target_name, step of a list of HammerToolHookAction.
-    Hooks are sorted so list ordering doesn't matter.
     """
     h = hashlib.sha256()
-    for action in sorted(hooks, key=lambda a: (a.location.name, a.target_name)):
+    for action in hooks:
         h.update(action.location.name.encode())
         h.update(b"\0")
         h.update(action.target_name.encode())
@@ -58,10 +57,8 @@ def fingerprint_tool_module(tool_name: str, stage: str) -> str:
         return hashlib.sha256(f"{stage}.<unknown>".encode()).hexdigest()
     
     mod = importlib.import_module(tool_name)
-    # Prefer hashing only get_tool_hooks to avoid false positives from
-    for obj in mod.__dict__.values():
-        if isinstance(obj, type) and hasattr(obj, "get_tool_hooks"):
-            return _ast_hash(obj.get_tool_hooks)
+    tool_class = getattr(mod, "tool")
+    return _ast_hash(tool_class.get_tool_hooks)
 
 
 def fingerprint_stage_hooks(tech_hooks: List, user_hooks: List,
@@ -71,7 +68,7 @@ def fingerprint_stage_hooks(tech_hooks: List, user_hooks: List,
 
     :param tech_hooks: Hooks from HammerTechnology.get_tech_*_hooks()
     :param user_hooks: User/extra hooks passed via create_*_action()
-    :param tool_name:  Tool plugin name (e.g. "genus", "innovus")
+    :param tool_name:  Full tool module path (e.g. "hammer.synthesis.genus")
     :param stage:      Stage namespace (e.g. "synthesis", "par")
     """
     h = hashlib.sha256()

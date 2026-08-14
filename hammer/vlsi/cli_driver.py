@@ -608,7 +608,7 @@ class CLIDriver:
                 stage_tag, tech_method, tool_cfg_key = _STAGE_HOOK_META[action_type]
                 try:
                     tool_name = driver.database.get_setting(tool_cfg_key, nullvalue="")
-                    tech_hooks = getattr(driver.tech, tech_method)(tool_name)
+                    tech_hooks = getattr(driver.tech, tech_method)(tool_name.split(".")[-1])
                     hook_fp = hook_check.fingerprint_stage_hooks(
                         tech_hooks=tech_hooks,
                         user_hooks=list(extra_hooks or []),
