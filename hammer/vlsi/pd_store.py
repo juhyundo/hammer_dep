@@ -1413,20 +1413,27 @@ def compute_stage_key(master_db: Dict[str, Any], stage_tag: str) -> str:
     return compute_sha256(_stage_relevant_keys(master_db, stage_tag))
 
 
-def compute_rtl_fingerprint(file_paths: List[str]) -> str:
-    """Hash the contents of the given RTL files in sorted order. Missing files get a placeholder."""
-    h = hashlib.sha256()
-    for path in sorted(file_paths):
-        try:
-            with open(path, "rb") as f:
-                while True:
-                    chunk = f.read(1 << 20)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-        except FileNotFoundError:
-            h.update(f"MISSING:{path}".encode("utf-8"))
-    return h.hexdigest()
+def compute_rtl_fingerprint(file_paths: List[str],
+                            defines: Optional[List[str]] = None,
+                            top_module: Optional[str] = None) -> str:
+    """Fingerprint the given RTL files by their elaborated SystemVerilog design.
+
+    Delegates to :mod:`hammer.vlsi.rtl_check` so that this and the cli_driver's
+    ``vlsi.rtl_fingerprint_sha256`` are the same value -- which means every
+    argument the cli_driver passes has to be passed here too, ``top_module``
+    included: elaborating from a top prunes unreachable modules, so the two
+    modes legitimately produce different fingerprints.
+
+    ``file_paths`` is used in the order given and must NOT be sorted.  Every
+    input forms one compilation unit, exactly as on a VCS or Genus command line,
+    so a `define has to be seen before the file that uses it; sorting can move a
+    defs file after its consumer and make the design fail to parse outright.
+    """
+    from hammer.vlsi import rtl_check
+    overall, _units = rtl_check.digest_units(file_paths,
+                                             defines=defines or [],
+                                             top_module=top_module)
+    return overall
 
 
 def store_master_database(

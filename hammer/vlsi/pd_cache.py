@@ -97,11 +97,19 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
 
     rtl_files = db.get("synthesis.inputs.input_files") or []
     rtl_files = [f for f in rtl_files if isinstance(f, str)]
-    if rtl_files:
-        try:
-            db["vlsi.rtl_fingerprint_sha256"] = pd_store.compute_rtl_fingerprint(rtl_files)
-        except Exception:
-            pass
+    if rtl_files and not db.get("vlsi.rtl_fingerprint_sha256"):
+        defines = db.get("synthesis.inputs.defines") or []
+        defines = [d for d in defines if isinstance(d, str)]
+        top_module = db.get("synthesis.inputs.top_module")
+        # Deliberately unguarded.  `_stage_relevant_keys` drops every
+        # `synthesis.*` key from the par/drc/lvs slices, so this fingerprint is
+        # the ONLY thing carrying RTL identity into those stages' keys --
+        # swallowing a failure here would build a key that ignores the RTL
+        # entirely and let a par result from different RTL come back as a hit.
+        # cache_or_run already catches this and falls through to a normal local
+        # run, which is the right answer when the key cannot be trusted.
+        db["vlsi.rtl_fingerprint_sha256"] = pd_store.compute_rtl_fingerprint(
+            rtl_files, defines, top_module=top_module if isinstance(top_module, str) else None)
 
     return pd_store.compute_stage_key(db, stage_tag)
 
