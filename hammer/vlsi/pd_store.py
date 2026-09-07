@@ -1419,15 +1419,7 @@ def compute_rtl_fingerprint(file_paths: List[str],
     """Fingerprint the given RTL files by their elaborated SystemVerilog design.
 
     Delegates to :mod:`hammer.vlsi.rtl_check` so that this and the cli_driver's
-    ``vlsi.rtl_fingerprint_sha256`` are the same value -- which means every
-    argument the cli_driver passes has to be passed here too, ``top_module``
-    included: elaborating from a top prunes unreachable modules, so the two
-    modes legitimately produce different fingerprints.
-
-    ``file_paths`` is used in the order given and must NOT be sorted.  Every
-    input forms one compilation unit, exactly as on a VCS or Genus command line,
-    so a `define has to be seen before the file that uses it; sorting can move a
-    defs file after its consumer and make the design fail to parse outright.
+    ``vlsi.rtl_fingerprint_sha256`` are the same value
     """
     from hammer.vlsi import rtl_check
     overall, _units = rtl_check.digest_units(file_paths,

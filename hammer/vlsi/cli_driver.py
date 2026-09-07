@@ -582,8 +582,6 @@ class CLIDriver:
                     defines = []
                     if driver.database.has_setting("synthesis.inputs.defines"):
                         defines = list(driver.database.get_setting("synthesis.inputs.defines", nullvalue=[]))
-                    # Elaborate from the same top synthesis will, so the
-                    # fingerprint covers exactly what Genus would compile.
                     top_module = None
                     if driver.database.has_setting("synthesis.inputs.top_module"):
                         top_module = driver.database.get_setting(
@@ -596,6 +594,9 @@ class CLIDriver:
                 return None
             except rtl_check.RtlParseError as e:
                 driver.log.error(f"Failed to parse RTL for fingerprinting:\n{e.report}")
+                return None
+            except rtl_check.SlangNotFound as e:
+                driver.log.error(f"Cannot fingerprint RTL: {e}")
                 return None
             except Exception as e:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")

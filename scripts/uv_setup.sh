@@ -67,6 +67,10 @@ FAB_VERSION="${FAB_VERSION:-3.6.3}"
 EDGE3_VERSION="${EDGE3_VERSION:-1.3.0}"
 LDAP_VERSION="${LDAP_VERSION:-3.4.7}"
 PYVER="${PYVER:-3.11}"
+# Must match SLANG_VERSION in hammer/vlsi/rtl_check.py: the RTL fingerprint is a
+# function of slang's AST JSON, and rtl_check refuses a version it was not pinned
+# to rather than silently moving every stored hash.
+SLANG_VERSION="${SLANG_VERSION:-11.0}"
 
 step() { printf '\n=== %s ===\n' "$1"; }
 
@@ -74,6 +78,38 @@ step "uv"
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv --version
+
+step "slang $SLANG_VERSION (RTL fingerprint)"
+# hammer/vlsi/rtl_check.py shells out to this to fingerprint RTL: it hashes
+# slang's own --ast-json output rather than a hand-rolled AST walk, so the tool
+# itself is the dependency. Not a pip package -- pyslang exists but does not bind
+# slang's ASTSerializer, so the CLI is the only way to reach it.
+if [ -x "$REPO/tools/slang/slang" ] \
+   && "$REPO/tools/slang/slang" --version 2>/dev/null | grep -q "$SLANG_VERSION"; then
+    echo "already present: $("$REPO/tools/slang/slang" --version)"
+else
+    case "$(uname -s)/$(uname -m)" in
+        Linux/x86_64)  _slang_asset="slang-linux-x86_64.tar.gz" ;;
+        Darwin/arm64)  _slang_asset="slang-macos-arm64.tar.gz" ;;
+        *)             _slang_asset="" ;;
+    esac
+    if [ -z "$_slang_asset" ]; then
+        # No prebuilt asset for this platform (linux-arm64, intel macOS).
+        echo "WARNING: no prebuilt slang for $(uname -s)/$(uname -m)."
+        echo "         Install it yourself and point \$SLANG_BIN at it, e.g."
+        echo "           conda install conda-forge::slang-verilog"
+        echo "         or build from https://github.com/MikePopoloski/slang."
+        echo "         RTL fingerprinting will fail until then; nothing else is affected."
+    else
+        mkdir -p "$REPO/tools/slang"
+        curl -fsSL -o "$REPO/tools/slang/$_slang_asset" \
+            "https://github.com/MikePopoloski/slang/releases/download/v${SLANG_VERSION}/${_slang_asset}"
+        tar xzf "$REPO/tools/slang/$_slang_asset" -C "$REPO/tools/slang"
+        rm -f "$REPO/tools/slang/$_slang_asset"
+        chmod +x "$REPO/tools/slang/slang"
+        "$REPO/tools/slang/slang" --version
+    fi
+fi
 
 step "pg_config (psycopg2 builds from source)"
 if [ ! -x "$PG_LOCAL/usr/bin/pg_config" ]; then

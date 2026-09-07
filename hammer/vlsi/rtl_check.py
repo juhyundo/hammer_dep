@@ -1,32 +1,32 @@
-#  Generate a stable RTL fingerprint from the SystemVerilog syntax tree.
+#  Generate a stable RTL fingerprint from the elaborated SystemVerilog design.
 #
-#  File order is significant in RTL compilation. 
-#  Hence, Every RTL input is parsed as ONE compilation unit, in the order given and digested by VCS / Genus.
+#  File order is significant in RTL compilation, so every input is passed to
+#  slang as ONE compilation unit (`--single-unit`), in the order given.
+#
+#  The canonical form is slang's own `--ast-json` output.
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-try:
-    import pyslang
-    from pyslang import ast
-    from pyslang.parsing import PreprocessorOptions, Token, TriviaKind
-    from pyslang.syntax import SyntaxTree
-except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject
-    raise ImportError(
-        "rtl_check requires the 'pyslang' package to compute RTL fingerprints. "
-        "Install it with `pip install pyslang` (it is a declared hammer dependency)."
-    ) from exc
+#  The fingerprint is a function of slang's JSON shape:
+#  different version of slang can silently move every stored hash and mass-invalidate the
+#  cache.
+SLANG_VERSION = "11.0"
 
 
 class RtlParseError(Exception):
-    """Raised when slang reports an error diagnostic while parsing RTL."""
+    """Raised when slang reports an error while compiling the RTL."""
 
     def __init__(self, path: str, report: str) -> None:
         super().__init__(f"failed to parse {path}:\n{report}")
@@ -34,205 +34,195 @@ class RtlParseError(Exception):
         self.report = report
 
 
+class SlangNotFound(Exception):
+    """Raised when the pinned slang binary cannot be located."""
 @dataclass(frozen=True)
 class DesignUnit:
-    """One elaborated design unit and the hash of its canonical form."""
+    """
+    The elaborated design and the hash of its canonical form.
 
-    key: str          # "module:gcd", "$directives:1a2b...", "$unit:1a2b..."
-    sha256: str
-    files: str        # source file(s) the unit was found in; NOT part of the hash
-    tokens: int
+    One of these per run.  It stays a list in the return type because both
+    callers unpack a two-tuple (``pd_store.compute_rtl_fingerprint``,
+    ``cli_driver``) and neither reads past the hash.
+    """
+
+    key: str          # always "design"
+    sha256: str       # identical to the overall fingerprint
+    files: str        # source file(s) that contributed; NOT part of the hash
+    tokens: int       # canonical node count; NOT part of the hash
 
 
-# Preprocessor directives that change how the design elaborates or simulates.
-# These survive as trivia (the preprocessor consumes them, so they are not part
-# of the token stream) and would otherwise be invisible to the fingerprint.
-_SEMANTIC_DIRECTIVES: Set[str] = {
-    "TimeScaleDirective",
-    "DefaultNetTypeDirective",
-    "UnconnectedDriveDirective",
-    "NoUnconnectedDriveDirective",
-    "CellDefineDirective",
-    "EndCellDefineDirective",
-    "ResetAllDirective",
-    "PragmaDirective",
-    "BeginKeywordsDirective",
-    "EndKeywordsDirective",
-    "DefaultDecayTimeDirective",
-    "DefaultTriregStrengthDirective",
-}
+# ── Locating slang ──────────────────────────────────────────────────────────
+def _repo_bundled_slang() -> Optional[str]:
+    """The copy scripts/uv_setup.sh drops in the checkout, if present."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    repo = os.path.dirname(os.path.dirname(here))
+    candidate = os.path.join(repo, "tools", "slang", "slang")
+    return candidate if os.path.isfile(candidate) else None
 
-# Directives deliberately NOT hashed: `define / `undef / `include and the whole `ifdef family to avoid 
-# unused macros being counted in hash. Post-preprocessing token stream picks up the used macros.
 
-# Literal token kinds whose text is normalized before hashing, so that
-# ex) 16'hA_b and 16'hab hash identically.
-_NUMERIC_TOKENS = {
-    "IntegerLiteral",
-    "RealLiteral",
-    "TimeLiteral",
-    "UnbasedUnsizedLiteral",
-}
+def slang_binary() -> str:
+    """
+    Absolute path to the slang executable.
 
-# Fields that tell two nodes of the same kind apart but appear nowhere among the
-# node's children, so the pre-order walk cannot see them.  Without these, a
-# blocking/non-blocking swap, a flipped clock edge, always_comb becoming
-# always_latch, and casez/unique all hash identically to the original.
+    ``$SLANG_BIN`` wins so a site can pin its own build, then PATH, then the copy
+    bundled in the checkout.
+    """
+    env = os.environ.get("SLANG_BIN")
+    if env:
+        if not os.path.isfile(env):
+            raise SlangNotFound(f"$SLANG_BIN={env!r} is not a file. {_INSTALL_HINT}")
+        return env
+    found = shutil.which("slang") or _repo_bundled_slang()
+    if not found:
+        raise SlangNotFound(f"slang {SLANG_VERSION} not found on PATH. {_INSTALL_HINT}")
+    return found
+
+
+def slang_version(binary: Optional[str] = None) -> str:
+    """The ``MAJOR.MINOR`` version the binary reports."""
+    out = subprocess.run([binary or slang_binary(), "--version"],
+                         capture_output=True, text=True).stdout
+    # "slang version 11.0.0+7ddf4059f"
+    m = re.search(r"(\d+)\.(\d+)", out)
+    return f"{m.group(1)}.{m.group(2)}" if m else out.strip()
+
+
+def _checked_binary() -> str:
+    """Locate slang and refuse a version whose JSON shape we have not pinned."""
+    binary = slang_binary()
+    have = slang_version(binary)
+    if have != SLANG_VERSION:
+        raise SlangNotFound(
+            f"slang {have} found at {binary}, but the fingerprint is pinned to "
+            f"{SLANG_VERSION}. A different slang can change the AST JSON and move "
+            f"every stored fingerprint. {_INSTALL_HINT}")
+    return binary
+
+
+# ── Running slang ───────────────────────────────────────────────────────────
+
+def _run_slang(paths: Sequence[str],
+               include_dirs: Sequence[str],
+               defines: Sequence[str],
+               top_module: Optional[str]) -> Dict[str, Any]:
+    """
+    Compile the inputs and return slang's elaborated AST as parsed JSON.
+
+    ``--ignore-unknown-modules`` is what lets a design instantiating a tech macro
+    or SRAM be fingerprinted at all: those are resolved from liberty by the real
+    tools and have no definition among ``input_files``, so slang leaves them as
+    black boxes and elaboration continues.
+
+    ``--ast-json-detailed-types`` expands types structurally instead of printing
+    a typedef by its alias name, which is what lets widening a shared typedef
+    reach the modules that use it.
+    """
+    for path in paths:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(2, "No such file or directory", path)
+
+    binary = _checked_binary()
+    fd, out_path = tempfile.mkstemp(prefix="rtl_ast.", suffix=".json")
+    os.close(fd)
+    try:
+        # --diag-abs-paths: diagnostics land in build logs and in RtlParseError,
+        # where slang's default CWD-relative "../../../../private/var/..." is
+        # unreadable and depends on where the run started.
+        cmd = [binary, "-q", "--single-unit", "--ignore-unknown-modules",
+               "--diag-abs-paths",
+               "--ast-json-detailed-types", "--ast-json-source-info",
+               "--ast-json", out_path]
+        for d in include_dirs:
+            cmd += ["-I", d]
+        for d in defines:
+            cmd += ["-D", d]
+        if top_module:
+            cmd += ["--top", top_module]
+        cmd += list(paths)
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            # slang still writes a JSON file on error; it describes a design that
+            # did not compile, so it must not be hashed.  Its own diagnostics
+            # already carry file:line, so they are the whole report.
+            report = (proc.stderr or "") + (proc.stdout or "")
+            blamed = _blamed_file(report, paths)
+            raise RtlParseError(blamed, _explain(report))
+        with open(out_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+
+_EXPLAINED: Tuple[Tuple[str, str], ...] = (
+    ("-Wduplicate-definition",
+     "the same module is declared more than once across the input files.\n"
+     "Fix: remove the duplicate module, or drop the redundant file from\n"
+     "synthesis.inputs.input_files."),
+)
+
+
+def _explain(report: str) -> str:
+    """Append a fingerprint-specific note to a slang diagnostic we recognize."""
+    text = report.strip()
+    for marker, note in _EXPLAINED:
+        if marker in report:
+            return f"{text}\n\nrtl_check: {note}"
+    return text
+
+
+_DIAG_FILE = re.compile(r"^\s*(\S+?):\d+:\d+:", re.MULTILINE)
+
+
+def _blamed_file(report: str, paths: Sequence[str]) -> str:
+    """The first file slang's diagnostics point at, for the exception message."""
+    m = _DIAG_FILE.search(report)
+    if m:
+        return os.path.realpath(m.group(1))
+    return paths[0] if paths else "<none>"
+
+
+# ── Canonical form ──────────────────────────────────────────────────────────
+
+#  slang emits raw heap pointers, both as an "addr" key and as an identity
+#  prefix inside cross-reference strings ("type": "6338699662056 nib_t").  They
+#  differ on every run, so nothing address-derived should survive into the hash.
+_ADDR_PREFIX = re.compile(r"^\d+ ")
+
+#  Dropped before hashing.  Source info would make the fingerprint depend on file
+#  layout and even on the working directory (slang emits a CWD-relative path).  
+#  It is read for the report first, in _contributing_files.
 #
-# Extend table when another such field exist.
-_DISCRIMINATORS: Dict[str, Tuple[str, ...]] = {
-    "ProceduralBlockSymbol": ("procedureKind",),      # always_comb vs always_latch
-    "SignalEventControl":    ("edge",),               # posedge vs negedge
-    "AssignmentExpression":  ("isNonBlocking",),      # x <= y vs x = y
-    "CaseStatement":         ("condition", "check"),  # casez/casex, unique/priority
-    "ConditionalStatement":  ("check",),              # unique if / priority if
-}
+#  Matched by prefix, not by an exact set: slang emits a plain source_file on
+#  symbols but source_file_start / source_file_end (and the matching line and
+#  column pairs) on anything carrying a range, and listing them one by one meant
+#  every range-bearing node leaked its filename into the hash.
+_VOLATILE_PREFIX = "source_"
+
+
+def _is_volatile(key: str) -> bool:
+    return key == "addr" or key.startswith(_VOLATILE_PREFIX)
+
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-# ── Parsing ─────────────────────────────────────────────────────────────────
-
-def _build_context(paths: Sequence[str],
-                   include_dirs: Sequence[str] = (),
-                   defines: Sequence[str] = ()) -> Tuple[Any, Any]:
-    """
-    Build the SourceManager + option Bag shared by every file in one run.
-
-    The include search path is the set of directories containing the input
-    files, plus any explicitly supplied ``include_dirs``.
-    """
-    sm = pyslang.SourceManager()
-    seen: Set[str] = set()
-    for d in [os.path.dirname(p) for p in paths] + list(include_dirs):
-        d = os.path.realpath(d) if d else os.path.realpath(".")
-        if d and d not in seen:
-            seen.add(d)
-            sm.addUserDirectories(d)
-
-    opts = pyslang.Bag()
-    pp = PreprocessorOptions()
-    if defines:
-        pp.predefines = list(defines)
-    opts.preprocessorOptions = pp
-    return sm, opts
-
-
-def _parse_all(paths: Sequence[str], sm: Any, opts: Any) -> Any:
-    for path in paths:
-        if not os.path.isfile(path):
-            raise FileNotFoundError(2, "No such file or directory", path)
-
-    tree = SyntaxTree.fromFiles(list(paths), sm, opts)
-
-    engine = pyslang.DiagnosticEngine(sm)
-    fatal = [
-        d for d in tree.diagnostics
-        if engine.getSeverity(d.code, d.location) in (
-            pyslang.DiagnosticSeverity.Error,
-            pyslang.DiagnosticSeverity.Fatal,
-        )
-    ]
-    if fatal:
-        # One compilation unit means one failure report; name the file the first
-        # diagnostic points at so the exception sidentifies a real source.
-        blamed = _file_of(sm, fatal[0].location) or (paths[0] if paths else "<none>")
-        raise RtlParseError(blamed, pyslang.DiagnosticEngine.reportAll(sm, fatal))
-    return tree
-
-
-def _file_of(sm: Any, loc: Any) -> Optional[str]:
-    """Absolute path of the file a source location belongs to, if resolvable."""
-    try:
-        name = sm.getFileName(loc)
-    except Exception:  # pragma: no cover - defensive; slang may lack the buffer
-        return None
-    return os.path.realpath(name) if name else None
-
-
-# ── Canonical serialization ─────────────────────────────────────────────────
-
-def _token_text(tok: Any) -> str:
-    """Canonical text for one token, normalizing spelling-only differences."""
-    kind = tok.kind.name
-    if kind == "Identifier":
-        # \escaped_id and escaped_id are distinct identifiers; valueText strips
-        # the backslash, so put a marker back to keep them apart.
-        return ("\\" + tok.valueText) if tok.rawText.startswith("\\") else tok.valueText
-    if kind == "IntegerBase":
-        return tok.valueText.lower()          # 'H == 'h
-    if kind in _NUMERIC_TOKENS:
-        return tok.valueText.replace("_", "").lower()   # 16'hA_b == 16'hab
-    return tok.valueText
-
-
-def _emit_directives(parts: List[str], tok: Any) -> None:
-    """Emit the semantically meaningful preprocessor directives before a token."""
-    for tr in tok.trivia:
-        if tr.kind != TriviaKind.Directive:
-            continue
-        node = tr.syntax()
-        if node is None or node.kind.name not in _SEMANTIC_DIRECTIVES:
-            continue
-        _canon_into(parts, node)
-
-_CLOSE = ")"
-_CLOSE_AST = object()   # sentinel closing an AST scope in _canon_ast
-
-def _canon_into(parts: List[str], node: Any) -> int:
-    """
-    Append the canonical serialization of ``node`` to ``parts``.
-
-    Nodes become ``(<SyntaxKind> ... )``, absent optional children become ``~``,
-    and tokens become ``<TokenKind>:<text>``.  Trivia -- comments, whitespace,
-    newlines -- is never visited and makes the fingerprint formatting-insensitive.  
-    Returns the number of tokens emitted.
-    """
-    ntok = 0
-    stack: List[Any] = [node]
-    while stack:
-        item = stack.pop()
-        if item is _CLOSE:
-            parts.append(")")
-            continue
-        if item is None:
-            parts.append("~")
-            continue
-        if isinstance(item, Token):
-            if item.kind.name == "EndOfFile":
-                continue
-            _emit_directives(parts, item)
-            parts.append(item.kind.name + ":" + _token_text(item))
-            ntok += 1
-            continue
-        parts.append("(" + item.kind.name)
-        stack.append(_CLOSE)
-        for i in range(len(item) - 1, -1, -1):
-            stack.append(item[i])
-    return ntok
-
-
-# ── Elaboration: the semantic (AST) model ───────────────────────────────────
-
-def _elaborate(tree: Any, top_module: Optional[str] = None) -> Any:
-    """
-    `Tool reads ``synthesis.inputs.input_files``
-    *plus* the technology's verilog_synth wrappers, and resolves true leaf cells
-    (standard cells, SRAM macros) from liberty rather than RTL -- an unresolved
-    instance becomes a black box and elaboration continues.  The fingerprint sees
-    only ``input_files``, so it is working with a deliberately incomplete design:
-    without this flag no design instantiating a macro could be fingerprinted.
-    """
-    opts = ast.CompilationOptions()
-    opts.flags = opts.flags | ast.CompilationFlags.IgnoreUnknownModules
-    if top_module:
-        opts.topModules = {top_module}
-    bag = pyslang.Bag()
-    bag.compilationOptions = opts
-    comp = ast.Compilation(bag)
-    comp.addSyntaxTree(tree)
-    return comp
+def _index_by_addr(node: Any, index: Dict[str, Any]) -> None:
+    """Map every node's address to the node, so references can be resolved."""
+    if isinstance(node, dict):
+        addr = node.get("addr")
+        if addr is not None:
+            index.setdefault(str(addr), node)
+        for value in node.values():
+            _index_by_addr(value, index)
+    elif isinstance(node, list):
+        for value in node:
+            _index_by_addr(value, index)
 
 
 def _is_transparent_block(node: Any) -> bool:
@@ -240,229 +230,106 @@ def _is_transparent_block(node: Any) -> bool:
     True for a ``begin``/``end`` that carries no meaning.
 
     Only an *unnamed*, *sequential* block wrapping a *single* statement is pure
-    punctuation -- writing ``if (x) y <= 1;`` and ``begin if (x) begin y <= 1;
-    end end`` must fingerprint the same.  Everything else stays:
-
-    * a named block (``begin : lbl``) can be referenced hierarchically and can
-      hold declarations, so its ``blockSymbol`` is not None;
-    * ``fork``/``join`` changes execution semantics, so ``blockKind`` is not
-      Sequential;
-    * a block over several statements has a ``StatementList`` body, and dropping
-      it would splice those statements into the parent, which can collide with a
-      genuinely different nesting.
+    punctuation -- ``if (x) y <= 1;`` and ``begin if (x) begin y <= 1; end end``
+    must fingerprint the same.  Everything else stays: a named block can be
+    referenced hierarchically, ``fork``/``join`` changes execution semantics, and
+    a multi-statement block has a StatementList body whose removal would splice
+    those statements into the parent and collide with a different nesting.
     """
-    if type(node).__name__ != "BlockStatement":
-        return False
-    if getattr(node, "blockSymbol", None) is not None:
-        return False
-    if str(getattr(node, "blockKind", "")) != "StatementBlockKind.Sequential":
-        return False
-    return type(getattr(node, "body", None)).__name__ != "StatementList"
+    return (isinstance(node, dict)
+            and node.get("kind") == "Block"
+            and node.get("blockKind") == "Sequential"
+            and not node.get("name")
+            and isinstance(node.get("body"), dict)
+            and node["body"].get("kind") != "StatementList")
 
 
-def _ast_descriptor(node: Any) -> Optional[str]:
+def _canon(node: Any, index: Dict[str, Any], resolving: Set[str]) -> Any:
     """
-    Canonical text for one AST node, or None if the node carries no meaning.
+    Canonicalize a JSON subtree for hashing.
 
-    Elaboration has already folded constants and resolved types, so ``[8-1:0]``
-    and ``[7:0]`` arrive as the same type and ``8'd3`` and ``8'h3`` as the same
-    value -- none of that has to be normalized by hand the way the token text
-    did.  What is emitted is the node kind plus the fields that distinguish two
-    nodes of that kind: the operator, the symbol referenced, the constant value,
-    the resolved type, and whatever ``_DISCRIMINATORS`` lists for that kind.
+    Strips volatile keys, folds transparent blocks, and inlines type references.
+
+    Nothing here interprets the *shape* of a node beyond those three rules, and
+    that is deliberate.  An earlier version special-cased ``Instance`` so each
+    module could be hashed as its own unit, which meant assuming an instance's
+    ``body`` is always a dict -- but slang emits the full body only for the first
+    instance of a module and an ``"<addr> <name>"`` reference for every later
+    one, so any design instantiating the same module twice crashed.  Treating a
+    reference as just another string makes that whole class of bug impossible.
     """
+    if isinstance(node, list):
+        return [_canon(v, index, resolving) for v in node]
+    if isinstance(node, str):
+        return _ADDR_PREFIX.sub("", node)
+    if not isinstance(node, dict):
+        return node
+
     if _is_transparent_block(node):
-        return None
+        return _canon(node["body"], index, resolving)
 
-    parts: List[str] = [type(node).__name__]
-    for attr in ("op", "direction", "blockKind"):
-        val = getattr(node, attr, None)
-        if val is not None:
-            parts.append(str(val))
-    for attr in _DISCRIMINATORS.get(type(node).__name__, ()):
-        val = getattr(node, attr, None)
-        # `is not None` and not a truth test: isNonBlocking is a bool, and False
-        # must not collapse into "attribute absent".
-        if val is not None:
-            parts.append(f"{attr}={val}")
-    name = getattr(node, "name", None)
-    if name:
-        parts.append(f"name={name}")
-    symbol = getattr(node, "symbol", None)
-    if symbol is not None and getattr(symbol, "name", None):
-        parts.append(f"ref={symbol.name}")
-    if type(node).__name__ in ("IntegerLiteral", "ParameterSymbol"):
-        value = getattr(node, "value", None)
-        if value is not None:
-            parts.append(f"val={value}")
-    typ = getattr(node, "type", None)
-    if typ is not None:
-        # The canonical type, never the alias name: `str(type)` renders a typedef
-        # as "nib_t", so widening `typedef logic [3:0] nib_t` to [7:0] would be
-        # invisible in every module that uses it.  canonicalType gives
-        # "logic[3:0]" and makes the change land.
-        parts.append(f"type={getattr(typ, 'canonicalType', None) or typ}")
-    return " ".join(parts)
-
-
-def _body_identity(body: Any) -> str:
-    """
-    Stable identity for one elaborated module body.
-
-    NOT ``id()``.  pyslang hands back a fresh Python wrapper on every ``.body``
-    access; the temporary is freed immediately and the next access reuses the
-    address, so ``id(a.body) == id(b.body)`` comes out True for two completely
-    different modules.  Deduplicating on that silently drops units -- six of the
-    fourteen files in a real design vanished from the fingerprint this way.
-
-    The name plus the elaborated parameter values is stable and is exactly the
-    granularity wanted: ``mux #(8)`` and ``mux #(16)`` are different bodies and
-    get separate units, while repeated instances of the same specialization
-    collapse into one.
-    """
-    params = []
-    for member in body:
-        # Real parameters only.  localparams are derived from them, so including
-        # them adds no distinguishing power and makes the key unreadable -- one
-        # real cache module carries 18 of them.
-        if (type(member).__name__ == "ParameterSymbol"
-                and not getattr(member, "isLocalParam", False)):
-            params.append(f"{member.name}={getattr(member, 'value', '')}")
-    return body.name + ("#(" + ",".join(params) + ")" if params else "")
-
-
-def _canon_ast(body: Any, found: List[Any]) -> Tuple[str, int]:
-    """
-    Canonical string + node count for one elaborated design unit.
-
-    Stops at instance boundaries.  ``visit`` on its own descends into child
-    instance bodies, which would fold the whole subtree into every ancestor --
-    ``riscv_top`` then hashes all 10801 nodes of the design instead of its own
-    600, and one leaf edit rewrites every hash up the hierarchy.  A child is
-    emitted as a reference here and hashed as its own unit; instances met along
-    the way are appended to ``found`` so the caller can queue them.
-
-    Scopes are walked member by member so nested instances (inside a generate
-    block, say) are still discovered.  Everything else is handed to ``visit``,
-    which cannot contain an instance and whose pre-order stream is unambiguous
-    for the fixed-arity nodes making up expressions -- Polish notation, so
-    ``(p&q)|r`` and ``p&(q|r)`` serialize differently.
-    """
-    parts: List[str] = []
-
-    def emit(node: Any) -> None:
-        text = _ast_descriptor(node)
-        if text is not None:
-            parts.append(text)
-
-    stack: List[Any] = [_CLOSE_AST if m is _CLOSE_AST else m
-                        for m in reversed(list(body))]
-    while stack:
-        sym = stack.pop()
-        if sym is _CLOSE_AST:
-            parts.append(")")
+    out: Dict[str, Any] = {}
+    for key, value in node.items():
+        if _is_volatile(key):
             continue
-        if type(sym).__name__ == "InstanceSymbol":
-            # Boundary: name the child so a swapped submodule still shows up,
-            # but leave its contents to its own unit.
-            child = getattr(sym, "canonicalBody", None) or sym.body
-            parts.append(f"Instance ref={child.name} inst={sym.name}")
-            found.append(sym)
+        if key == "type" and isinstance(value, str):
+            out[key] = _resolve_type(value, index, resolving)
             continue
-        if type(sym).__name__ == "UninstantiatedDefSymbol":
-            # A tech macro or SRAM.  It has no definition in input_files -- Genus
-            # resolves those from liberty -- so IgnoreUnknownModules leaves it
-            # unelaborated, and `_ast_descriptor` would match only `name`, which
-            # here is the *instance* name.  Two different macros then serialize
-            # identically and a swapped SRAM reads as "RTL unchanged".
-            #
-            # Nothing evaluates a blackbox's parameters either (paramExpressions
-            # come back Invalid), so hash the instantiation syntax instead: that
-            # covers the definition name, the parameters and the port
-            # connections in one pass.  The cost is that an unfolded constant --
-            # `#(.W(4+4))` vs `#(.W(8))` -- looks like a change on this one
-            # instantiation, which over-triggers a re-run rather than missing one.
-            parts.append(f"Blackbox def={sym.definitionName} inst={sym.name}")
-            syntax = getattr(sym, "syntax", None)
-            if syntax is not None:
-                # `syntax` is the per-instance HierarchicalInstance, so it holds
-                # the instance name and the port connections but NOT the
-                # parameter list -- that hangs off the parent statement, shared
-                # by every instance declared in it.  Emit it first so
-                # `foo #(.W(8)) u()` and `foo #(.W(16)) u()` differ.
-                stmt = getattr(syntax, "parent", None)
-                params = getattr(stmt, "parameters", None) if stmt is not None else None
-                if params is not None:
-                    _canon_into(parts, params)
-                _canon_into(parts, syntax)
-            continue
-        if getattr(sym, "isScope", False):
-            text = _ast_descriptor(sym)
-            parts.append("(" + (text or type(sym).__name__))
-            stack.append(_CLOSE_AST)
-            stack.extend(reversed(list(sym)))
-            continue
-        sym.visit(emit)
-    return " ".join(parts), len(parts)
+        out[key] = _canon(value, index, resolving)
+    return out
 
 
-def _raise_on_errors(comp: Any, sm: Any, fallback: str) -> None:
-    """Elaboration errors are design errors; surface them like parse errors."""
-    engine = pyslang.DiagnosticEngine(sm)
-    fatal = []
-    for d in comp.getAllDiagnostics():
-        severity = engine.getSeverity(d.code, d.location)
-        if severity in (pyslang.DiagnosticSeverity.Error,
-                        pyslang.DiagnosticSeverity.Fatal):
-            fatal.append(d)
-
-    if fatal:
-        blamed = _file_of(sm, fatal[0].location) or fallback
-        raise RtlParseError(blamed,
-                            pyslang.DiagnosticEngine.reportAll(sm, fatal))
-
-
-def _warn_uncovered(paths: Sequence[str], buckets: Dict[str, Any]) -> None:
+def _resolve_type(ref: str, index: Dict[str, Any], resolving: Set[str]) -> Any:
     """
-    Warn about listed files that contributed nothing to the fingerprint.
+    Inline a ``"<addr> <name>"`` type reference.
 
-    Elaborating from a top module is what makes a dead module stop forcing a
-    re-run, which is the point.  The same mechanism means a stale or misspelled
-    ``top_module`` silently shrinks coverage while still returning a
-    healthy-looking hash -- so say so.  Diagnostic only: this never raises and
-    never touches a hash.
+    A typedef reaches the hash only through the signals declared with it: the use
+    site prints the alias name, which is identical before and after the alias is
+    widened.  Following the address to the actual definition is what makes
+    ``typedef logic [3:0] nib_t`` -> ``[7:0]`` land in every module that uses it,
+    while an alias nothing references stays invisible -- dead code costs no
+    re-run.  ``resolving`` breaks reference cycles.
     """
-    covered = {entry[1] for entries in buckets.values() for entry in entries}
-    missing = [p for p in paths if p not in covered]
-    if missing and len(missing) != len(paths):
-        print(f"rtl_check: {len(missing)} of {len(paths)} input files contributed no "
-              f"design units; check synthesis.inputs.top_module reaches them:",
-              file=sys.stderr)
-        for p in missing:
-            print(f"  {p}", file=sys.stderr)
+    m = _ADDR_PREFIX.match(ref)
+    if not m:
+        return ref
+    addr = m.group(0).strip()
+    target = index.get(addr)
+    if target is None or addr in resolving:
+        return _ADDR_PREFIX.sub("", ref)
+    resolving.add(addr)
+    try:
+        return _canon(target, index, resolving)
+    finally:
+        resolving.discard(addr)
 
 
-def _collect_directives(tree: Any) -> Optional[str]:
+def _count(node: Any) -> int:
+    """Node count of a canonical form, for the human-readable report."""
+    if isinstance(node, dict):
+        return 1 + sum(_count(v) for v in node.values())
+    if isinstance(node, list):
+        return sum(_count(v) for v in node)
+    return 0
+
+
+def _contributing_files(node: Any, out: Set[str]) -> None:
     """
-    Hash of the semantic preprocessor directives across the whole design.
+    Every source file the elaborated design actually came from.
 
-    ``\\`timescale`` and friends never reach the AST -- the preprocessor consumes
-    them and they survive only as trivia on the syntax tree -- so they have to be
-    picked up separately or a timescale change would be invisible.
+    Read off the raw document, before canonicalization strips the source keys.
+    Purely for the report and for _warn_uncovered; never reaches a hash.
     """
-    parts: List[str] = []
-    root = tree.root
-    stack: List[Any] = [root[i] for i in range(len(root) - 1, -1, -1)]
-    while stack:
-        item = stack.pop()
-        if item is None:
-            continue
-        if isinstance(item, Token):
-            _emit_directives(parts, item)
-            continue
-        for i in range(len(item) - 1, -1, -1):
-            stack.append(item[i])
-    return " ".join(parts) if parts else None
+    if isinstance(node, dict):
+        src = node.get("source_file")
+        if src:
+            out.add(os.path.realpath(src))
+        for value in node.values():
+            _contributing_files(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _contributing_files(value, out)
+
 
 # ── Digesting ───────────────────────────────────────────────────────────────
 
@@ -471,18 +338,16 @@ def digest_units(paths: Sequence[str],
                  defines: Sequence[str] = (),
                  top_module: Optional[str] = None) -> Tuple[str, List[DesignUnit]]:
     """
-    Parse every input file and hash each top-level design unit separately.
+    Compile every input file and hash each elaborated design unit separately.
 
     All inputs form ONE compilation unit, in the order given, so macros cross
-    file boundaries exactly as they do under VCS or Genus.  That makes the order
-    of ``paths`` significant: a macro has to be defined by an earlier file to be
-    visible in a later one.  Reordering ``synthesis.inputs.input_files`` can
-    therefore move the fingerprint deliberately, since it can also change what
-    the tools compile.
+    file boundaries exactly as they do under VCS ``-mfcu`` or a single Genus
+    ``read_hdl -sv``.  That makes the order of ``paths`` significant: a macro has
+    to be defined by an earlier file to be visible in a later one.
 
     :param paths: RTL source files (.v/.sv), in the order the tools see them.
         Header fragments (.vh/.svh) must NOT be listed here: a listed header is
-        parsed as a source in its own right rather than inlined at its `include
+        compiled as a source in its own right rather than inlined at its `include
         site, and a standalone fragment generally is not parsable on its own.
     :param include_dirs: extra `include search directories.
     :param defines: predefined macros, each "NAME" or "NAME=value".
@@ -493,6 +358,7 @@ def digest_units(paths: Sequence[str],
         legitimately wider set, so the two modes give different fingerprints.
     :return: (overall fingerprint, per-unit digests sorted by key)
     :raises FileNotFoundError: an input file is missing.
+    :raises SlangNotFound: the pinned slang binary is missing or the wrong version.
     :raises RtlParseError: slang reported a parse or elaboration error.
     """
     # Order-preserving dedup: the caller's order is what the tools see, and
@@ -505,73 +371,53 @@ def digest_units(paths: Sequence[str],
             seen_paths.add(real)
             real_paths.append(real)
 
-    sm, opts = _build_context(real_paths, include_dirs, defines)
+    doc = _run_slang(real_paths, include_dirs, defines, top_module)
 
-    # key -> list of (unit hash, source file, node count)
-    buckets: Dict[str, List[Tuple[str, str, int]]] = {}
+    index: Dict[str, Any] = {}
+    _index_by_addr(doc, index)
 
-    def add(key: str, unit_sha: str, path: str, ntok: int) -> None:
-        buckets.setdefault(key, []).append((unit_sha, path, ntok))
+    # The CompilationUnit member holds file-scope declarations -- typedefs,
+    # parameters, imports -- whether or not anything uses them, so hashing it
+    # would make editing an unused declaration force a re-run.  Excluding it is
+    # what keeps dead code free; a *used* typedef still lands, because
+    # _resolve_type follows the reference from every signal declared with it.
+    members = [m for m in doc.get("design", {}).get("members", [])
+               if not (isinstance(m, dict) and m.get("kind") == "CompilationUnit")]
 
-    tree = _parse_all(real_paths, sm, opts)
-    fallback = real_paths[0] if real_paths else "<none>"
+    # `definitions` carries the per-module settings that live outside the design
+    # tree: `celldefine, `unconnected_drive, default net type and lifetime.
+    payload = {"design": _canon(members, index, set()),
+               "definitions": _canon(doc.get("definitions", []), index, set())}
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    overall = sha256_hex(text.encode("utf-8"))
 
-    # `comp` owns every symbol walked below.  It MUST stay referenced for the
-    # whole walk: letting it be collected mid-traversal silently truncates the
-    # AST -- expressions vanish entirely, and distinct designs then hash alike.
-    comp = _elaborate(tree, top_module)
-    _raise_on_errors(comp, sm, fallback)
+    covered: Set[str] = set()
+    _contributing_files(doc.get("design", {}), covered)
+    _warn_uncovered(real_paths, covered)
 
-    # One unit per distinct elaborated body.  slang shares canonicalBody between
-    # instances of the same specialization, so this dedups repeated instances
-    # while keeping mux #(8) and mux #(16) apart.
-    seen_bodies: Set[str] = set()
-    stack: List[Any] = list(comp.getRoot().topInstances)
-    while stack:
-        inst = stack.pop()
-        body = getattr(inst, "canonicalBody", None) or inst.body
-        marker = _body_identity(body)
-        if marker in seen_bodies:
-            continue
-        seen_bodies.add(marker)
+    unit = DesignUnit(key="design", sha256=overall,
+                      files=",".join(sorted(covered)) or (real_paths[0] if real_paths else ""),
+                      tokens=_count(payload))
+    return overall, [unit]
 
-        children: List[Any] = []
-        text, ntok = _canon_ast(body, children)
-        sha = sha256_hex(text.encode("utf-8"))
-        owner = _file_of(sm, body.location) or fallback
-        # Key on the plain name, not the specialization: Verilog-2001 declares
-        # ordinary parameters in the module body, so a real module can carry a
-        # dozen and the key becomes unreadable.  Two specializations bucket under
-        # one key and their hashes combine, which still distinguishes them.
-        add(f"module:{body.name}" if body.name else f"$unit:{sha[:16]}",
-            sha, owner, ntok)
-        stack.extend(children)
 
-    # `timescale and friends are consumed by the preprocessor and never reach
-    # the AST, so they are picked up from the syntax tree separately.
-    directives = _collect_directives(tree)
-    if directives:
-        sha = sha256_hex(directives.encode("utf-8"))
-        add(f"$directives:{sha[:16]}", sha, fallback, 0)
+def _warn_uncovered(paths: Sequence[str], covered: Set[str]) -> None:
+    """
+    Warn about listed files that contributed nothing to the fingerprint.
 
-    _warn_uncovered(real_paths, buckets)
-
-    units: List[DesignUnit] = []
-    for key in sorted(buckets):
-        entries = sorted(buckets[key])
-        if len(entries) == 1:
-            combined = entries[0][0]
-        else:
-            # Same key defined more than once (duplicate module definitions, or
-            # the same header pulled into several files).  Hash the sorted set
-            # of member hashes so this stays deterministic instead of erroring.
-            combined = sha256_hex("\n".join(e[0] for e in entries).encode("utf-8"))
-        files = ",".join(sorted({e[1] for e in entries}))
-        units.append(DesignUnit(key=key, sha256=combined, files=files,
-                                tokens=sum(e[2] for e in entries)))
-
-    manifest = "\n".join(f"{u.key} {u.sha256}" for u in units)
-    return sha256_hex(manifest.encode("utf-8")), units
+    Elaborating from a top module is what makes a dead module stop forcing a
+    re-run, which is the point.  The same mechanism means a stale or misspelled
+    ``top_module`` silently shrinks coverage while still returning a
+    healthy-looking hash -- so say so.  Diagnostic only: this never raises and
+    never touches a hash.
+    """
+    missing = [p for p in paths if p not in covered]
+    if missing and len(missing) != len(paths):
+        print(f"rtl_check: {len(missing)} of {len(paths)} input files contributed no "
+              f"design units; check synthesis.inputs.top_module reaches them:",
+              file=sys.stderr)
+        for p in missing:
+            print(f"  {p}", file=sys.stderr)
 
 
 def digest_files(paths: Sequence[str],
@@ -586,9 +432,17 @@ def digest_files(paths: Sequence[str],
 # ── Output ──────────────────────────────────────────────────────────────────
 
 def format_fingerprint(overall: str, units: Sequence[DesignUnit]) -> str:
+    """
+    The human-readable report: the fingerprint, then the files behind it.
+
+    The file list is what makes a surprising hash diagnosable -- if a file you
+    expected is missing, ``top_module`` does not reach it.
+    """
     lines = [f"overall_sha256 {overall}\n"]
     for u in units:
-        lines.append(f"{u.sha256}  {u.key}  {u.files}  tokens={u.tokens}\n")
+        lines.append(f"nodes {u.tokens}\n")
+        for f in u.files.split(",") if u.files else []:
+            lines.append(f"  {f}\n")
     return "".join(lines)
 
 
@@ -623,21 +477,27 @@ def write_if_changed(out_path: str, contents: str) -> bool:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Compute an RTL fingerprint from the SystemVerilog syntax tree.")
+        description="Compute an RTL fingerprint from the elaborated SystemVerilog design.")
     parser.add_argument("--out", required=True, help="Output fingerprint file path.")
     parser.add_argument("-I", "--include-dir", action="append", default=[],
                         metavar="DIR", help="Extra `include search directory (repeatable).")
     parser.add_argument("-D", "--define", action="append", default=[],
                         metavar="NAME[=VALUE]", help="Predefined macro (repeatable).")
+    parser.add_argument("--top", default=None, metavar="MODULE",
+                        help="Elaborate from this top module, as synthesis does.")
     parser.add_argument("inputs", nargs="+", help="Input RTL files (.v/.sv).")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
         overall, units = digest_units(args.inputs,
                                       include_dirs=args.include_dir,
-                                      defines=args.define)
+                                      defines=args.define,
+                                      top_module=args.top)
     except RtlParseError as e:
         print(e.report, file=sys.stderr)
+        return 1
+    except SlangNotFound as e:
+        print(f"rtl_check: {e}", file=sys.stderr)
         return 1
     except FileNotFoundError as e:
         print(f"RTL file not found: {e.filename}", file=sys.stderr)
